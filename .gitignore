@@ -1,0 +1,25 @@
+# Secrets — ห้าม commit เด็ดขาด
+.env
+*.env.local
+docs/Auth.txt
+*service-account*.json
+
+# Runtime state & logs
+*.log
+logs/
+state/
+*.sqlite
+*.db
+
+# Dependencies & build
+node_modules/
+dist/
+__pycache__/
+.venv/
+
+# Session memory (local only)
+.remember/
+
+# OS
+Thumbs.db
+.DS_Store
