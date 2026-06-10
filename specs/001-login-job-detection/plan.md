@@ -137,3 +137,4 @@ logs/                    # JSON logs (gitignored)
 | Violation | Why Needed | Simpler Alternative Rejected Because |
 |-----------|------------|-------------------------------------|
 | Daily summary (Constitution V) ยังไม่ implement ในฟีเจอร์นี้ | ผู้ใช้กำหนดให้ daily report ใช้ Google Chat ช่องที่สอง ซึ่งยังไม่มี webhook (placeholder ใน .env) — จะทำเป็นฟีเจอร์ถัดไปเมื่อได้ URL | ส่งรายงานประจำวันเข้าช่องแจ้งเตือนระบบไปก่อน → ถูกปฏิเสธเพราะผู้ใช้ตั้งใจแยก 2 ช่องชัดเจน และการปนช่องทำให้ alert channel รก ผิดหลัก UX Consistency |
+| การส่งแจ้งเตือนเป็น at-least-once (Constitution VII ระบุห้ามเกิดข้อความซ้ำ) | มีหน้าต่าง crash สั้นมากระหว่าง POST สำเร็จกับ mark sent ซึ่งทำให้ซ้ำได้ ≤ 1 ข้อความหลัง restart — Google Chat webhook ไม่มี dedup ฝั่งรับ | Exactly-once ต้องมี dedup ฝั่งผู้รับหรือ transaction ข้ามระบบ ซึ่งเป็นไปไม่ได้กับ webhook ธรรมดา → ยอมรับ window สั้นสุด (mark sent ทันทีหลัง 2xx) + test ครอบใน T033 |

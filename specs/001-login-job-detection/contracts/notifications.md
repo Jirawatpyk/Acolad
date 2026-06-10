@@ -63,16 +63,16 @@ baseline (ไม่ใช่ N ข้อความจาก appearance events 
 ตาราง action ต่อทริกเกอร์ (ช่อง "ต้องทำ" ของแต่ละกรณี — FR-009 บังคับให้
 ระบุสิ่งที่ผู้ดูแลต้องทำ):
 
-| ทริกเกอร์ | severity | ผลกระทบ | ต้องทำ |
-|-----------|----------|----------|--------|
-| login ล้มเหลวครบ 3 ครั้ง | CRITICAL | หยุดเฝ้างานชั่วคราว (lockout 15 นาที) | ลอง login ด้วยมือ; ถ้ารหัสผ่านเปลี่ยน แก้ `ACOLAD_PASSWORD` ใน .env แล้ว `pm2 restart acolad-bot` |
-| CAPTCHA/2FA | CRITICAL | หยุดเฝ้างานจนกว่าคนจะผ่านขั้นยืนยัน | login ด้วยมือผ่าน CAPTCHA แล้ว restart บอท; ถ้า portal บังคับ 2FA ถาวร ให้หยุดระบบและทบทวน Assumption ใน spec |
-| LayoutChanged / locale เปลี่ยน | CRITICAL | หยุดอ่านหน้ารายการงาน | เปิด `state/evidence/<timestamp>-layout_changed` เทียบหน้าใหม่ อัปเดต `src/portal/selectors.ts` รัน `npm test` ผ่าน แล้ว restart |
-| พบตัวบ่งชี้ pagination (FR-009) | WARN | ขอบเขตตรวจจับอาจไม่ครบ | ตรวจหน้าจริง ทบทวน Assumption "หน้าเดียว" และขยาย scope การอ่านถ้าจำเป็น |
-| portal ล่มต่อเนื่อง > 10 นาที | WARN | การตรวจถูกถ่วงด้วย backoff | ลองเปิด portal จากเครื่องอื่น; ถ้าล่มจริงไม่ต้องทำอะไร ระบบ retry เองและส่ง SYSTEM_RECOVERED เมื่อกลับมา |
-| outbox dead (FR-018) | CRITICAL | มีข้อความค้างส่งไม่สำเร็จ | ตรวจ webhook URL/สิทธิ์ Chat space แล้วสั่ง requeue รายการ dead (`npm run outbox:requeue`) |
-| cold start ซ้ำใน 7 วัน (FR-015) | WARN | ฐานสถานะอาจสูญหายผิดปกติ | ตรวจดิสก์/สาเหตุที่ไฟล์ db หาย และดูสำเนา `.corrupt-*` ถ้ามี (FR-017) |
-| ฐานสถานะเสียหาย (FR-017) | CRITICAL | ฐานถูกรีเซ็ตเป็น cold start | เก็บสำเนา corrupt ไว้วิเคราะห์ ตรวจสุขภาพดิสก์ |
+| ทริกเกอร์ | severity | ผลกระทบ | ต้องทำ | Recovered |
+|-----------|----------|----------|--------|-----------|
+| login ล้มเหลวครบ 3 ครั้ง | CRITICAL | หยุดเฝ้างานชั่วคราว (lockout 15 นาที) | ลอง login ด้วยมือ; ถ้ารหัสผ่านเปลี่ยน แก้ `ACOLAD_PASSWORD` ใน .env แล้ว `pm2 restart acolad-bot` | ✅ ส่งเมื่อ login สำเร็จครั้งถัดไป |
+| CAPTCHA/2FA | CRITICAL | หยุดเฝ้างานจนกว่าคนจะผ่านขั้นยืนยัน | login ด้วยมือผ่าน CAPTCHA แล้ว restart บอท; ถ้า portal บังคับ 2FA ถาวร ให้หยุดระบบและทบทวน Assumption ใน spec | ✅ ส่งเมื่อ login สำเร็จหลังคนแก้ |
+| LayoutChanged / locale เปลี่ยน | CRITICAL | หยุดอ่านหน้ารายการงาน | เปิด `state/evidence/<timestamp>-layout_changed` เทียบหน้าใหม่ อัปเดต `src/portal/selectors.ts` รัน `npm test` ผ่าน แล้ว restart | ✅ ส่งเมื่ออ่านหน้ารายการสำเร็จอีกครั้ง |
+| พบตัวบ่งชี้ pagination (FR-009) | WARN | ขอบเขตตรวจจับอาจไม่ครบ | ตรวจหน้าจริง ทบทวน Assumption "หน้าเดียว" และขยาย scope การอ่านถ้าจำเป็น | ❌ one-shot (ปิดเมื่อคนทบทวน assumption) |
+| portal ล่มต่อเนื่อง > 10 นาที | WARN | การตรวจถูกถ่วงด้วย backoff | ลองเปิด portal จากเครื่องอื่น; ถ้าล่มจริงไม่ต้องทำอะไร ระบบ retry เองและส่ง SYSTEM_RECOVERED เมื่อกลับมา | ✅ ส่งเมื่อรอบตรวจสำเร็จครั้งถัดไป |
+| outbox dead (FR-018) | CRITICAL | มีข้อความค้างส่งไม่สำเร็จ | ตรวจ webhook URL/สิทธิ์ Chat space แล้วสั่ง requeue รายการ dead (`npm run outbox:requeue`) | ✅ ส่งเมื่อ requeue แล้วส่งสำเร็จ |
+| cold start ซ้ำใน 7 วัน (FR-015) | WARN | ฐานสถานะอาจสูญหายผิดปกติ | ตรวจดิสก์/สาเหตุที่ไฟล์ db หาย และดูสำเนา `.corrupt-*` ถ้ามี (FR-017) | ❌ one-shot |
+| ฐานสถานะเสียหาย (FR-017) | CRITICAL | ฐานถูกรีเซ็ตเป็น cold start | เก็บสำเนา corrupt ไว้วิเคราะห์ ตรวจสุขภาพดิสก์ | ❌ one-shot (สำเนาเก็บไว้แล้ว) |
 
 ### 5. SYSTEM_RECOVERED — กลับสู่ปกติ
 

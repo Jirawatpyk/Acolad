@@ -30,6 +30,7 @@ Meta (key-value): baseline_done, last_successful_poll_at, login_lockout_until, .
 | fee | TEXT | NULLABLE | FR-004 — เก็บตามที่ portal แสดง ไม่แปลงสกุล |
 | url | TEXT | NULLABLE | FR-004 |
 | status | TEXT | CHECK IN ('visible','missing') | สถานะการปรากฏปัจจุบัน |
+| consecutive_misses | INTEGER | DEFAULT 0 | ตัวนับรอบที่ไม่พบติดต่อกัน — persist เพื่อให้เกณฑ์ missing ≥ 2 รอบทนต่อการรีสตาร์ตกลาง flicker |
 | first_seen_at | TEXT (ISO) | NOT NULL | เวลาพบครั้งแรก |
 | last_seen_at | TEXT (ISO) | NOT NULL | อัปเดตทุกรอบที่ยังเห็น |
 | snapshot_hash | TEXT | NOT NULL | hash ของฟิลด์ทั้งหมด ใช้ตรวจการเปลี่ยนแปลงรายละเอียด |
@@ -90,6 +91,12 @@ UNIQUE INDEX (partial): `dedup_key` WHERE `resolved_at IS NULL` AND
 UNIQUE INDEX: `(event_id, channel)` — เหตุการณ์หนึ่งส่งได้ครั้งเดียวต่อช่องทาง
 `dead` = เกิน retry cap → ยกระดับเป็น system alert (Constitution IV: ห้ามเงียบ)
 
+ข้อจำกัด **at-least-once**: มีหน้าต่างสั้นระหว่าง "ส่ง HTTP สำเร็จ (2xx)" กับ
+"mark sent" — หาก process ตายในหน้าต่างนี้ ข้อความอาจถูกส่งซ้ำ 1 ครั้งหลัง
+restart (Google Chat webhook ไม่มี dedup ฝั่งรับ) — dispatcher ต้อง mark
+sent ทันทีหลังได้ 2xx เพื่อให้หน้าต่างสั้นที่สุด; ข้อยกเว้นต่อ Constitution VII
+นี้บันทึกใน plan.md Complexity Tracking และมี test ครอบ (tasks T033)
+
 ## Entity: Meta (ตาราง `meta` — key/value)
 
 | Key | ความหมาย |
@@ -126,8 +133,12 @@ missing ──กลับมาในรายการ──► visible : emit
   โหลดไม่ครบ — Constitution VI, ระบุใน FR-007 แล้ว)
 - รายละเอียดงานเปลี่ยนโดยงานยังแสดงอยู่ (FR-019): อัปเดตแถว `jobs` +
   `snapshot_hash` และบันทึกการเปลี่ยนแปลง (ฟิลด์เดิม→ใหม่) ลง log เพื่อ
-  ไล่ย้อน — **ไม่สร้าง** appearance event และ**ไม่สร้าง**แถว outbox
-  (ไม่แจ้งเตือน)
+  ไล่ย้อน (window 14 วันตาม FR-019) — **ไม่สร้าง** appearance event และ
+  **ไม่สร้าง**แถว outbox (ไม่แจ้งเตือน)
+- เจ้าของกติกา transition ทั้งหมดคือ `detection/diff.ts` (pure function:
+  รับ snapshot + สถานะเดิมรวม `consecutive_misses` → คืน events + สถานะ
+  ใหม่) — `state/jobStore.ts` ทำหน้าที่ persist ผลลัพธ์เท่านั้น ไม่ตัดสิน
+  transition ซ้ำซ้อน
 
 ## Data Retention
 

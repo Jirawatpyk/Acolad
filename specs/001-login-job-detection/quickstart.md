@@ -8,10 +8,13 @@
 
 1. Node.js 22 LTS (`node -v` ≥ 22)
 2. ไฟล์ `.env` ที่ root — ครบตาม [contracts/config.md](./contracts/config.md)
-   - มีอยู่แล้ว: portal credentials + `GOOGLE_CHAT_WEBHOOK_SYSTEM` (ทดสอบแล้ว)
-   - ต้องเพิ่มก่อนรันจริง: `HEALTHCHECKS_PING_URL`
-3. Healthchecks.io: สร้าง check (period 5 นาที, grace 5 นาที) + ตั้ง
-   integration ยิงเข้า Google Chat ช่องแจ้งเตือนระบบ → คัดลอก ping URL
+   - ✅ ครบแล้ว: portal credentials + `GOOGLE_CHAT_WEBHOOK_SYSTEM` (ทดสอบ
+     แล้ว) + `HEALTHCHECKS_PING_URL` (ตั้งค่า + ping ทดสอบได้ `OK`
+     2026-06-10 — ยืนยันซ้ำ end-to-end ใน T047)
+3. Healthchecks.io: ✅ ทำแล้ว (check period 5 นาที / grace 5 นาที +
+   integration เข้า Google Chat ช่องแจ้งเตือนระบบ) — ขั้นตอนเก็บไว้อ้างอิง
+   กรณีต้องสร้างใหม่: สร้าง check → ตั้ง period/grace → ผูก integration →
+   คัดลอก ping URL ลง .env
 4. PM2 (ครั้งเดียว สำหรับขั้นรัน 24/7): `npm install -g pm2`
 5. ความปลอดภัยของเครื่อง (ครั้งเดียว): ยืนยันว่า `.gitignore` ครอบคลุม
    `state/` และ `.env`, ไม่มีไฟล์ credentials แบบ plaintext ในโปรเจกต์
@@ -78,7 +81,7 @@ pm2 status                        # ต้องเห็น acolad-bot online
 |---|-----------|----------|--------------|
 | V1 | งานใหม่ถูกตรวจพบ (US1-AS1) | integration test กับ fixture "มีงานเพิ่ม 1 งาน"; ของจริง: รอจนงานแรกเข้า | แจ้ง Chat ภายใน 60s, log แสดง detect ≤ 30s |
 | V2 | ไม่แจ้งซ้ำเมื่องานยังแสดงอยู่ (US1-AS2) | รัน poll 3 รอบกับ fixture เดิม | แจ้งครั้งเดียว, outbox ไม่มี entry เพิ่ม |
-| V3 | หลายงานพร้อมกัน (US1-AS3) | fixture 20 งานใหม่รอบเดียว | ครบ 20 เหตุการณ์ งานละ 1 ไม่ตกหล่น |
+| V3 | หลายงานพร้อมกัน (US1-AS3 + SC-008) | fixture 25 งานใหม่รอบเดียว | ครบ 25 เหตุการณ์ งานละ 1 ข้อความ ไม่ตกหล่น ภายใน 60s |
 | V4 | session หมดอายุ (US2-AS1) | ลบ storageState ระหว่างรัน / fixture เด้ง login | re-login อัตโนมัติ + รอบถัดไปทำงานปกติ ไม่มี alert |
 | V5 | restart ไม่แจ้งซ้ำ (US2-AS2) | `pm2 restart acolad-bot` ระหว่างมีงานค้างแสดง | ไม่มีแจ้งเตือนซ้ำ, กลับมา poll ภายใน 2 นาที |
 | V6 | heartbeat ปกติ + dead-man alert (US2-AS3 + US3-AS3) | ขณะรันปกติเปิด Healthchecks dashboard ดู ping; จากนั้น `pm2 stop acolad-bot` ทิ้งไว้ > 10 นาที | เห็น ping สม่ำเสมอ (≤ 5 นาที/ครั้ง) ขณะรัน; หลังหยุด Healthchecks ยิงแจ้งเตือนเข้า Chat |
@@ -106,7 +109,7 @@ pm2 status                        # ต้องเห็น acolad-bot online
 |----|---------|-------------|--------------|
 | SC-001/002 | ต่อเนื่อง | log JSON (สรุป p95 รายสัปดาห์) | docs/acceptance/001.md |
 | SC-003 | 7 วัน | ตาราง appearance_events + outbox + เวลา restart | docs/acceptance/001.md |
-| SC-004 | 30 วัน | Healthchecks check history (สำรอง: ช่องว่าง last_successful_poll_at ใน log) | docs/acceptance/001.md |
+| SC-004 | 30 วัน | Healthchecks check history (สำรอง: ช่องว่างของ meta.last_successful_poll_at ใน SQLite) | docs/acceptance/001.md |
 | SC-005 | ทดสอบ V6-V8 | ผลรัน scenario | docs/acceptance/001.md |
 | SC-006 | ทุก restart | log เวลา start → poll แรกสำเร็จ | docs/acceptance/001.md |
 | SC-007/008 | 30 วัน / V3 | system_events + log อัตราเรียก / fixture 25 งาน | docs/acceptance/001.md |
