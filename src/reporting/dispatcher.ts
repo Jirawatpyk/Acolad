@@ -38,15 +38,21 @@ export class Dispatcher {
     };
     const due = this.outbox.due(nowIso);
     for (const row of due) {
-      const payload = JSON.parse(row.payload_json) as ChatPayload;
-      // Guard the implicit contract (Constitution VI): never send an empty/
-      // malformed payload silently. Drop it with an error log + dead alert.
-      if (typeof payload.text !== 'string' || payload.text === '') {
+      // Guard the implicit contract (Constitution VI): a single malformed row
+      // (invalid JSON or missing text) must not wedge the whole queue or send an
+      // empty message — drop it with an error log + dead alert.
+      let text: string | undefined;
+      try {
+        text = (JSON.parse(row.payload_json) as ChatPayload).text;
+      } catch {
+        text = undefined;
+      }
+      if (typeof text !== 'string' || text === '') {
         summary.dead++;
         this.outbox.markSent(row.outbox_id, nowIso); // drop so the queue can't wedge
         this.logger.error(
           { module: 'dispatcher', action: 'send', outcome: 'malformed', eventId: row.event_id },
-          'dropped malformed outbox payload (no text)',
+          'dropped malformed outbox payload',
         );
         this.hooks.onDead?.(row.event_id);
         continue;
@@ -54,7 +60,7 @@ export class Dispatcher {
       const start = Date.now();
       let outcome: SendOutcome;
       try {
-        outcome = await this.sender.send(payload.text);
+        outcome = await this.sender.send(text);
       } catch {
         outcome = 'transient';
       }

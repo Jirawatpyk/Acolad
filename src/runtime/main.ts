@@ -1,14 +1,7 @@
-import { loadConfig } from '../config/index.js';
-import { createLogger } from '../monitoring/logger.js';
-import { openDatabase } from '../state/db.js';
-import { Outbox } from '../state/outbox.js';
 import { MetaStore } from '../state/meta.js';
 import { raiseAlert } from '../reporting/systemAlerts.js';
-import { BrowserSession } from '../portal/browser.js';
-import { PlaywrightPortalClient } from '../portal/portalClient.js';
 import { ColdStartHistory } from './coldStartHistory.js';
-import { PollLoop } from './pollLoop.js';
-import { RateLimiter } from './rateLimiter.js';
+import { createBot } from './bootstrap.js';
 import { computeNextDelay, jitter } from './scheduler.js';
 import { systemClock } from '../clock.js';
 
@@ -17,27 +10,13 @@ const stamp = (): string => new Date().toLocaleTimeString('en-GB');
 
 /** Long-running 24/7 entrypoint under PM2 (npm start). */
 async function main(): Promise<void> {
-  const cfg = loadConfig();
-  const logger = createLogger(cfg);
-  const opened = openDatabase(cfg.STATE_DIR, systemClock.nowIso());
-  const outbox = new Outbox(opened.db, cfg.OUTBOX_RETRY_CAP, cfg.OUTBOX_DEAD_AFTER_HOURS);
-
-  if (opened.recoveredFromCorruption) {
-    raiseAlert(
-      opened.db,
-      outbox,
-      'db_corrupt',
-      systemClock.nowIso(),
-      `สำเนา: ${opened.corruptCopyPath ?? 'n/a'}`,
-    );
-  }
+  const { cfg, logger, db, outbox, rate, client, loop } = createBot();
 
   // Cold-start-repeat detection (FR-015): only counts when there is no baseline yet.
-  const history = new ColdStartHistory(cfg.LOG_DIR);
-  if (!new MetaStore(opened.db).baselineDone) {
-    if (history.record(systemClock.nowIso())) {
+  if (!new MetaStore(db).baselineDone) {
+    if (new ColdStartHistory(cfg.LOG_DIR).record(systemClock.nowIso())) {
       raiseAlert(
-        opened.db,
+        db,
         outbox,
         'cold_start_repeat',
         systemClock.nowIso(),
@@ -45,11 +24,6 @@ async function main(): Promise<void> {
       );
     }
   }
-
-  const browser = new BrowserSession(cfg.STATE_DIR, cfg.BROWSER_RECYCLE_HOURS, systemClock.nowMs);
-  const rate = new RateLimiter(cfg.REQUESTS_PER_HOUR_CAP);
-  const client = new PlaywrightPortalClient(browser, cfg, rate, systemClock);
-  const loop = new PollLoop(opened.db, client, cfg, logger);
 
   let running = true;
   const shutdown = (signal: string): void => {
@@ -93,7 +67,7 @@ async function main(): Promise<void> {
   }
 
   await client.dispose();
-  opened.db.close();
+  db.close();
   logger.info({ module: 'main', action: 'shutdown', outcome: 'ok' }, 'acolad-bot stopped');
   console.log(`[${stamp()}] acolad-bot หยุดแล้ว`);
 }

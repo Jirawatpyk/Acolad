@@ -4,10 +4,10 @@
 docs/Auth.txt
 *service-account*.json
 
-# Runtime state & logs
+# Runtime state & logs (root-anchored so src/state/ source is NOT ignored)
 *.log
-logs/
-state/
+/logs/
+/state/
 *.sqlite
 *.db
 

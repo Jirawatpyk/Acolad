@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DB } from '../state/db.js';
-import { Outbox } from '../state/outbox.js';
+import { Outbox, createOutbox } from '../state/outbox.js';
 import { PollCyclePersister } from './pollCycle.js';
 import { Dispatcher } from '../reporting/dispatcher.js';
 import { GoogleChatSender, type ChatSender } from '../reporting/googleChat.js';
@@ -48,7 +48,7 @@ export class PollLoop {
     private readonly clock: Clock = systemClock,
     deps: PollLoopDeps = {},
   ) {
-    this.outbox = new Outbox(db, cfg.OUTBOX_RETRY_CAP, cfg.OUTBOX_DEAD_AFTER_HOURS);
+    this.outbox = createOutbox(db, cfg);
     this.persister = new PollCyclePersister(db, this.outbox, logger);
     this.heartbeat =
       deps.heartbeat ??
