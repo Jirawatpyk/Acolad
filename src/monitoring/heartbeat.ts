@@ -10,6 +10,7 @@ export class Heartbeat {
   constructor(
     private readonly pingUrl: string,
     private readonly onError: (e: unknown, action: string) => void = () => undefined,
+    private readonly timeoutMs = 5_000,
   ) {}
 
   async ok(): Promise<void> {
@@ -22,7 +23,7 @@ export class Heartbeat {
 
   private async ping(url: string, action: string): Promise<void> {
     try {
-      await fetch(url, { method: 'POST' });
+      await fetch(url, { method: 'POST', signal: AbortSignal.timeout(this.timeoutMs) });
     } catch (e) {
       // A failed heartbeat must never propagate into the poll loop.
       this.onError(e, action);

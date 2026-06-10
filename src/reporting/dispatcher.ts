@@ -39,47 +39,67 @@ export class Dispatcher {
     const due = this.outbox.due(nowIso);
     for (const row of due) {
       const payload = JSON.parse(row.payload_json) as { text: string };
-      const start = nowMs;
+      const start = Date.now();
       let outcome: SendOutcome;
       try {
         outcome = await this.sender.send(payload.text);
       } catch {
         outcome = 'transient';
       }
+      const latencyMs = Date.now() - start;
 
       if (outcome === 'ok') {
         this.outbox.markSent(row.outbox_id, nowIso);
         summary.sent++;
         this.logger.info(
-          {
-            module: 'dispatcher',
-            action: 'send',
-            outcome: 'ok',
-            latencyMs: nowMs - start,
-            eventId: row.event_id,
-          },
+          { module: 'dispatcher', action: 'send', outcome: 'ok', latencyMs, eventId: row.event_id },
           'notification sent',
         );
         continue;
       }
 
-      if (outcome === 'permanent') summary.permanentFailures++;
+      if (outcome === 'permanent') {
+        // Webhook revoked/removed: defer slowly, do NOT count toward dead (FR-018)
+        // so queued events flush once the channel is fixed. Out-of-band signal is
+        // the heartbeat /fail raised by the caller.
+        summary.permanentFailures++;
+        this.outbox.recordPermanentFailure(row, nowMs);
+        this.logger.error(
+          {
+            module: 'dispatcher',
+            action: 'send',
+            outcome: 'permanent',
+            latencyMs,
+            eventId: row.event_id,
+          },
+          'notification channel permanently failing',
+        );
+        this.hooks.onPermanent?.(row.event_id);
+        continue;
+      }
+
+      // Transient: backoff, eventually dead.
       const result = this.outbox.recordFailure(row, nowMs);
       if (result === 'dead') {
         summary.dead++;
         this.logger.error(
-          { module: 'dispatcher', action: 'send', outcome: 'dead', eventId: row.event_id },
+          {
+            module: 'dispatcher',
+            action: 'send',
+            outcome: 'dead',
+            latencyMs,
+            eventId: row.event_id,
+          },
           'notification exhausted retries',
         );
         this.hooks.onDead?.(row.event_id);
       } else {
         summary.transientFailures++;
         this.logger.warn(
-          { module: 'dispatcher', action: 'send', outcome, eventId: row.event_id },
+          { module: 'dispatcher', action: 'send', outcome, latencyMs, eventId: row.event_id },
           'notification deferred',
         );
       }
-      if (outcome === 'permanent') this.hooks.onPermanent?.(row.event_id);
     }
     return summary;
   }

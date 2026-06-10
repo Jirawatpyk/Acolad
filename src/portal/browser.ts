@@ -35,14 +35,7 @@ export class BrowserSession {
 
   private async open(): Promise<void> {
     this.browser = await chromium.launch({ headless: true });
-    let storageState: string | undefined;
-    if (existsSync(this.storageStatePath)) {
-      try {
-        storageState = this.storageStatePath;
-      } catch {
-        storageState = undefined;
-      }
-    }
+    const storageState = existsSync(this.storageStatePath) ? this.storageStatePath : undefined;
     try {
       this.context = await this.browser.newContext(storageState ? { storageState } : {});
     } catch {

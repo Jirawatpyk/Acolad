@@ -194,3 +194,46 @@ describe('MetaStore', () => {
     expect(meta.get('last_successful_poll_at')).toBe(NOW);
   });
 });
+
+describe('PollCyclePersister idempotency across restart (SC-003)', () => {
+  const noopLogger = { info: () => undefined, warn: () => undefined, error: () => undefined };
+  const snap = (jobs: { id: string; title: string }[], cycle: string) => ({
+    jobs: jobs.map((j) => ({
+      portalJobId: j.id,
+      title: j.title,
+      languagePair: 'EN>MS',
+      deadline: null,
+      deadlineRaw: null,
+      fee: null,
+      url: null,
+    })),
+    malformed: [],
+    capturedAt: NOW,
+    pollCycleId: cycle,
+    emptyListConfirmed: jobs.length === 0,
+  });
+
+  it('does not re-notify a job after a simulated restart', async () => {
+    const { PollCyclePersister } = await import('../../src/runtime/pollCycle.js');
+    // baseline (empty) → then a new job appears → 1 notification.
+    new PollCyclePersister(db, new Outbox(db, 10, 6), noopLogger).persist(snap([], 'c0'));
+    new PollCyclePersister(db, new Outbox(db, 10, 6), noopLogger).persist(
+      snap([{ id: 'J1', title: 'Malay job' }], 'c1'),
+    );
+    const sentishBefore = new Outbox(db, 10, 6).due(NOW).length;
+    expect(sentishBefore).toBe(2); // cold-start summary + first_seen
+
+    // Simulate restart: reopen the same db dir, fresh persister, same job present.
+    db.close();
+    db = openDatabase(dir, NOW).db;
+    new PollCyclePersister(db, new Outbox(db, 10, 6), noopLogger).persist(
+      snap([{ id: 'J1', title: 'Malay job' }], 'c2'),
+    );
+    // No new outbox row, no duplicate appearance event for J1.
+    expect(new Outbox(db, 10, 6).due(NOW).length).toBe(2);
+    const events = db
+      .prepare("SELECT COUNT(*) AS n FROM appearance_events WHERE job_key = 'J1'")
+      .get() as { n: number };
+    expect(events.n).toBe(1);
+  });
+});

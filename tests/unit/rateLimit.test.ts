@@ -44,10 +44,14 @@ describe('computeNextDelay (start-to-start, SC-001b)', () => {
     );
   });
 
-  it('never produces a real gap below the 20s minimum', () => {
-    // interval clamps to 30s max spacing; with a 25s cycle, delay would be 5s,
-    // but min real gap 20s - 25s cycle = negative -> 0; spacing handled by clamp.
-    const d = computeNextDelay({ intervalMs: 25_000, cycleDurationMs: 25_000, jitterMs: 5_000 });
+  it('keeps the real request gap >= 20s when the cycle is fast', () => {
+    // Fast 2s cycle: delay + cycle time must still be at least the 20s floor.
+    const d = computeNextDelay({ intervalMs: 25_000, cycleDurationMs: 2_000, jitterMs: -5_000 });
+    expect(d + 2_000).toBeGreaterThanOrEqual(20_000);
+  });
+
+  it('never returns a negative delay even when the cycle outran the interval', () => {
+    const d = computeNextDelay({ intervalMs: 25_000, cycleDurationMs: 40_000, jitterMs: 5_000 });
     expect(d).toBeGreaterThanOrEqual(0);
   });
 

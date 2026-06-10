@@ -88,4 +88,32 @@ describe('Dispatcher', () => {
     );
     expect(onPermanent).toHaveBeenCalledWith('e1');
   });
+
+  it('V13/FR-018: a permanent failure never becomes dead and stays queued', async () => {
+    const ob = new Outbox(db, 1, 6); // cap=1 → a transient would die immediately
+    ob.enqueue('e1', JSON.stringify({ text: 'a' }), NOW);
+    const disp = new Dispatcher(ob, new StubSender('permanent'), noopLogger);
+    for (let i = 1; i <= 5; i++) {
+      const at = new Date(Date.parse(NOW) + i * 31 * 60_000).toISOString();
+      await disp.flush(at, Date.parse(at));
+    }
+    expect(ob.countByStatus('dead')).toBe(0);
+    expect(ob.countByStatus('pending')).toBe(1);
+    expect(ob.countByStatus('sent')).toBe(0);
+  });
+
+  it('V10/FR-013: a transient failure stays queued, then flushes once the channel recovers', async () => {
+    const ob = new Outbox(db, 10, 6);
+    ob.enqueue('e1', JSON.stringify({ text: 'a' }), NOW);
+
+    await new Dispatcher(ob, new StubSender('transient'), noopLogger).flush(NOW, Date.parse(NOW));
+    expect(ob.countByStatus('pending')).toBe(1);
+
+    const later = new Date(Date.parse(NOW) + 60_000).toISOString();
+    const ok = new StubSender('ok');
+    const summary = await new Dispatcher(ob, ok, noopLogger).flush(later, Date.parse(later));
+    expect(summary.sent).toBe(1);
+    expect(ok.calls).toBe(1);
+    expect(ob.countByStatus('sent')).toBe(1);
+  });
 });

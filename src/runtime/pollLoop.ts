@@ -109,32 +109,30 @@ export class PollLoop {
     const startMs = this.clock.nowMs();
     try {
       const page = await this.browser.page();
-      this.rate.record(this.clock.nowMs());
-      await performLogin(page, {
-        portalUrl: this.cfg.ACOLAD_PORTAL_URL,
-        email: this.cfg.ACOLAD_EMAIL,
-        password: this.cfg.ACOLAD_PASSWORD,
-      });
-      await this.browser.persistSession();
-
-      const snapshot = await this.readSnapshot(page, pollCycleId).catch(async (err: unknown) => {
-        if (err instanceof SessionExpiredError || (await isLoggedOut(page))) {
-          // Re-login once within the same cycle (FR-002).
-          this.rate.record(this.clock.nowMs());
-          await performLogin(page, {
-            portalUrl: this.cfg.ACOLAD_PORTAL_URL,
-            email: this.cfg.ACOLAD_EMAIL,
-            password: this.cfg.ACOLAD_PASSWORD,
-          });
-          return this.readSnapshot(page, pollCycleId);
-        }
-        throw err;
-      });
+      const snapshot = await this.fetchSnapshot(page, pollCycleId);
 
       const persist = this.persister.persist(snapshot);
       this.onCycleSuccess();
-      await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
-      await this.heartbeat.ok();
+      const summary = await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
+
+      if (snapshot.malformed.length > 0) {
+        raiseAlert(
+          this.db,
+          this.outbox,
+          'layout_changed',
+          this.clock.nowIso(),
+          `พบ ${snapshot.malformed.length} แถวที่ parse ไม่ผ่าน (quarantine)`,
+        );
+        await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
+      }
+
+      // C1 (Constitution IV): if notifications are stuck (dead/permanent), the
+      // alert can't leave via the same webhook — signal out-of-band via /fail so
+      // the dead-man switch tells the operator. Only ping ok when truly healthy.
+      const stuck =
+        summary.dead > 0 || summary.permanentFailures > 0 || this.outbox.countByStatus('dead') > 0;
+      if (stuck) await this.heartbeat.fail();
+      else await this.heartbeat.ok();
 
       this.logger.info(
         {
@@ -146,19 +144,11 @@ export class PollLoop {
           malformed: snapshot.malformed.length,
           enqueued: persist.enqueued,
           coldStart: persist.coldStart,
+          dead: summary.dead,
+          permanentFailures: summary.permanentFailures,
         },
         'poll cycle ok',
       );
-      if (snapshot.malformed.length > 0) {
-        raiseAlert(
-          this.db,
-          this.outbox,
-          'layout_changed',
-          this.clock.nowIso(),
-          `พบ ${snapshot.malformed.length} แถวที่ parse ไม่ผ่าน (quarantine)`,
-        );
-        await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
-      }
       return true;
     } catch (err) {
       await this.handleError(err);
@@ -166,9 +156,46 @@ export class PollLoop {
     }
   }
 
-  /** Navigate to the offers list page, then read the snapshot. */
-  private async readSnapshot(page: Page, pollCycleId: string): ReturnType<typeof readJobSnapshot> {
+  /**
+   * Navigate to the offers list and read a snapshot. Goes straight to the offers
+   * URL (1 navigation in steady state — keeps requests under the FR-011 cap); a
+   * full login runs only when we land logged-out, or once mid-cycle if the
+   * session expires while reading (FR-002).
+   */
+  private async fetchSnapshot(page: Page, pollCycleId: string): ReturnType<typeof readJobSnapshot> {
+    await this.navigateToOffers(page);
+    if (await isLoggedOut(page)) {
+      await this.login(page);
+      await this.navigateToOffers(page);
+    }
+    try {
+      return await this.readOffers(page, pollCycleId);
+    } catch (err) {
+      if (err instanceof SessionExpiredError || (await isLoggedOut(page))) {
+        await this.login(page);
+        await this.navigateToOffers(page);
+        return this.readOffers(page, pollCycleId);
+      }
+      throw err;
+    }
+  }
+
+  private async navigateToOffers(page: Page): Promise<void> {
+    this.rate.record(this.clock.nowMs());
     await page.goto(this.cfg.ACOLAD_OFFERS_URL, { waitUntil: 'domcontentloaded' });
+  }
+
+  private async login(page: Page): Promise<void> {
+    this.rate.record(this.clock.nowMs());
+    await performLogin(page, {
+      portalUrl: this.cfg.ACOLAD_PORTAL_URL,
+      email: this.cfg.ACOLAD_EMAIL,
+      password: this.cfg.ACOLAD_PASSWORD,
+    });
+    await this.browser.persistSession();
+  }
+
+  private readOffers(page: Page, pollCycleId: string): ReturnType<typeof readJobSnapshot> {
     return readJobSnapshot(page, pollCycleId, this.clock.nowIso(), (reason) =>
       captureEvidence(page, this.cfg.STATE_DIR, reason, this.clock.nowIso(), this.secrets),
     );
@@ -198,48 +225,62 @@ export class PollLoop {
   }
 
   private async handleError(err: unknown): Promise<void> {
-    const at = this.clock.nowIso();
-    if (err instanceof LoginFailedError) {
-      this.loginFailures++;
-      if (this.loginFailures >= this.cfg.LOGIN_MAX_RETRY) {
-        this.lockoutUntilMs = this.clock.nowMs() + this.cfg.LOGIN_LOCKOUT_MINUTES * 60_000;
-        raiseAlert(
-          this.db,
-          this.outbox,
-          'login_failed',
-          at,
-          `login ล้มเหลว ${this.loginFailures} ครั้งติดต่อกัน`,
-        );
-        await this.dispatcher.flush(at, this.clock.nowMs());
-      }
-    } else if (err instanceof CaptchaDetectedError) {
-      raiseAlert(this.db, this.outbox, 'captcha', at, err.message);
-      await this.dispatcher.flush(at, this.clock.nowMs());
-    } else if (err instanceof LayoutChangedError) {
-      raiseAlert(this.db, this.outbox, 'layout_changed', at, err.message);
-      await this.dispatcher.flush(at, this.clock.nowMs());
-    } else if (err instanceof PaginationDetectedError) {
-      raiseAlert(this.db, this.outbox, 'pagination', at, err.message);
-      await this.dispatcher.flush(at, this.clock.nowMs());
-    } else {
-      // Transient (network/timeout): track portal-down window.
-      if (this.firstPortalErrorMs === 0) this.firstPortalErrorMs = this.clock.nowMs();
-      if (this.clock.nowMs() - this.firstPortalErrorMs >= PORTAL_DOWN_THRESHOLD_MS) {
-        if (raiseAlert(this.db, this.outbox, 'portal_down', at, 'portal ไม่ตอบสนองต่อเนื่อง')) {
+    // A failure while *handling* a failure must never kill the loop — wrap the
+    // whole body so raiseAlert/flush (which touch the DB and network) cannot
+    // escape and reject runOnce.
+    try {
+      const at = this.clock.nowIso();
+      // login_failed accumulates only across consecutive login failures (FR-009).
+      // Any other error type breaks the streak so we don't lock out spuriously.
+      if (!(err instanceof LoginFailedError)) this.loginFailures = 0;
+
+      if (err instanceof LoginFailedError) {
+        this.loginFailures++;
+        if (this.loginFailures >= this.cfg.LOGIN_MAX_RETRY) {
+          this.lockoutUntilMs = this.clock.nowMs() + this.cfg.LOGIN_LOCKOUT_MINUTES * 60_000;
+          raiseAlert(
+            this.db,
+            this.outbox,
+            'login_failed',
+            at,
+            `login ล้มเหลว ${this.loginFailures} ครั้งติดต่อกัน`,
+          );
           await this.dispatcher.flush(at, this.clock.nowMs());
         }
+      } else if (err instanceof CaptchaDetectedError) {
+        raiseAlert(this.db, this.outbox, 'captcha', at, err.message);
+        await this.dispatcher.flush(at, this.clock.nowMs());
+      } else if (err instanceof LayoutChangedError) {
+        raiseAlert(this.db, this.outbox, 'layout_changed', at, err.message);
+        await this.dispatcher.flush(at, this.clock.nowMs());
+      } else if (err instanceof PaginationDetectedError) {
+        raiseAlert(this.db, this.outbox, 'pagination', at, err.message);
+        await this.dispatcher.flush(at, this.clock.nowMs());
+      } else {
+        // Transient (network/timeout): track portal-down window.
+        if (this.firstPortalErrorMs === 0) this.firstPortalErrorMs = this.clock.nowMs();
+        if (this.clock.nowMs() - this.firstPortalErrorMs >= PORTAL_DOWN_THRESHOLD_MS) {
+          if (raiseAlert(this.db, this.outbox, 'portal_down', at, 'portal ไม่ตอบสนองต่อเนื่อง')) {
+            await this.dispatcher.flush(at, this.clock.nowMs());
+          }
+        }
       }
+      await this.heartbeat.fail();
+      this.logger.error(
+        {
+          module: 'pollLoop',
+          action: 'cycle',
+          outcome: 'error',
+          errKind: (err as { kind?: string }).kind ?? 'unknown',
+        },
+        err instanceof Error ? err.message : 'unknown error',
+      );
+    } catch (handlerErr) {
+      this.logger.error(
+        { module: 'pollLoop', action: 'handle_error', outcome: 'error' },
+        handlerErr instanceof Error ? handlerErr.message : 'error handler failed',
+      );
     }
-    await this.heartbeat.fail();
-    this.logger.error(
-      {
-        module: 'pollLoop',
-        action: 'cycle',
-        outcome: 'error',
-        errKind: (err as { kind?: string }).kind ?? 'unknown',
-      },
-      err instanceof Error ? err.message : 'unknown error',
-    );
   }
 
   rateLimiter(): RateLimiter {

@@ -110,15 +110,16 @@ export function raiseAlert(
       action: extra.action ?? spec.action,
       occurredAt,
     };
+    const payload = JSON.stringify({ text: renderSystemAlert(fields) });
     const eventId = system.create({
       eventType: 'system_alert',
       severity: spec.severity,
       dedupKey: kind,
-      payloadJson: JSON.stringify({ text: renderSystemAlert(fields) }),
+      payloadJson: payload,
       occurredAt,
     });
     if (!eventId) return false; // already active
-    return outbox.enqueue(eventId, JSON.stringify({ text: renderSystemAlert(fields) }), occurredAt);
+    return outbox.enqueue(eventId, payload, occurredAt);
   })();
 }
 

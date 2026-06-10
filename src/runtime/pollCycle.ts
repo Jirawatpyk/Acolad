@@ -54,21 +54,19 @@ export class PollCyclePersister {
         const visibleJobs: JobState[] = [...result.nextStates.values()].filter(
           (s) => s.status === 'visible',
         );
+        const summaryPayload = JSON.stringify({
+          text: renderColdStartSummary(visibleJobs, snapshot.capturedAt),
+        });
         const summaryId = this.system.create({
           eventType: 'cold_start_summary',
           severity: 'info',
           dedupKey: `cold_start:${snapshot.pollCycleId}`,
-          payloadJson: JSON.stringify({
-            text: renderColdStartSummary(visibleJobs, snapshot.capturedAt),
-          }),
+          payloadJson: summaryPayload,
           occurredAt: snapshot.capturedAt,
         });
         let enqueued = 0;
-        if (summaryId) {
-          const payload = JSON.stringify({
-            text: renderColdStartSummary(visibleJobs, snapshot.capturedAt),
-          });
-          if (this.outbox.enqueue(summaryId, payload, snapshot.capturedAt)) enqueued++;
+        if (summaryId && this.outbox.enqueue(summaryId, summaryPayload, snapshot.capturedAt)) {
+          enqueued++;
         }
         this.meta.markBaselineDone();
         this.meta.recordSuccessfulPoll(snapshot.capturedAt);
