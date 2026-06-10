@@ -1,5 +1,10 @@
 export type SendOutcome = 'ok' | 'transient' | 'permanent';
 
+/** Shape stored in outbox.payload_json — the implicit producer/consumer contract. */
+export interface ChatPayload {
+  text: string;
+}
+
 export interface ChatSender {
   send(text: string): Promise<SendOutcome>;
 }

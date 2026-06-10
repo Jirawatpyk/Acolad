@@ -17,8 +17,6 @@ import type { AppConfig } from '../config/index.js';
 import type { Logger } from '../monitoring/logger.js';
 import { type Clock, systemClock } from '../clock.js';
 
-export { type Clock, systemClock } from '../clock.js';
-
 const PORTAL_DOWN_THRESHOLD_MS = 10 * 60_000;
 
 /** Optional collaborators injected for testing (default to production impls). */
@@ -115,8 +113,21 @@ export class PollLoop {
       // the dead-man switch tells the operator. Only ping ok when truly healthy.
       const stuck =
         summary.dead > 0 || summary.permanentFailures > 0 || this.outbox.countByStatus('dead') > 0;
-      if (stuck) await this.heartbeat.fail();
-      else await this.heartbeat.ok();
+      if (stuck) {
+        await this.heartbeat.fail();
+      } else {
+        // Outbox drained: clear any active outbox_dead alert (sends RECOVERED and
+        // re-arms the dedup so a future failure alerts again — without this the
+        // alert stays active forever and the next dead row is silently deduped).
+        resolveAlert(
+          this.db,
+          this.outbox,
+          'outbox_dead',
+          this.clock.nowIso(),
+          'แจ้งเตือนส่งได้ตามปกติ',
+        );
+        await this.heartbeat.ok();
+      }
 
       this.logger.info(
         {
@@ -204,7 +215,6 @@ export class PollLoop {
           }
         }
       }
-      await this.heartbeat.fail();
       this.logger.error(
         {
           module: 'pollLoop',
@@ -219,6 +229,10 @@ export class PollLoop {
         { module: 'pollLoop', action: 'handle_error', outcome: 'error' },
         handlerErr instanceof Error ? handlerErr.message : 'error handler failed',
       );
+    } finally {
+      // Guarantee an out-of-band /fail ping on every errored cycle, even if the
+      // alert raise/flush above threw — the dead-man switch must always learn.
+      await this.heartbeat.fail();
     }
   }
 }

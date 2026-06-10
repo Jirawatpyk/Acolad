@@ -5,10 +5,20 @@ import type { Clock } from '../clock.js';
 import type { RateLimiter } from '../runtime/rateLimiter.js';
 import type { JobSnapshot } from '../detection/types.js';
 import { BrowserSession } from './browser.js';
-import { performLogin } from './login.js';
+import { performLogin, type Credentials } from './login.js';
 import { readJobSnapshot, isLoggedOut } from './jobList.js';
 import { captureEvidence } from './evidence.js';
 import { SessionExpiredError } from './errors.js';
+
+/**
+ * The page-level portal operations, injectable so the navigation/rate logic of
+ * PlaywrightPortalClient can be unit-tested without a real browser.
+ */
+export interface PortalOps {
+  isLoggedOut(page: Page): Promise<boolean>;
+  login(page: Page, creds: Credentials): Promise<void>;
+  read(page: Page, pollCycleId: string): Promise<JobSnapshot>;
+}
 
 /**
  * The single surface the orchestrator (PollLoop) uses to talk to the portal
@@ -31,31 +41,40 @@ export interface PortalClient {
  * while reading (FR-002). Every navigation is recorded against the rate limiter.
  */
 export class PlaywrightPortalClient implements PortalClient {
-  private readonly secrets: string[];
+  private readonly ops: PortalOps;
 
   constructor(
     private readonly browser: BrowserSession,
     private readonly cfg: AppConfig,
     private readonly rate: RateLimiter,
     private readonly clock: Clock,
+    ops?: PortalOps,
   ) {
-    this.secrets = secretValues(cfg);
+    const secrets = secretValues(cfg);
+    this.ops = ops ?? {
+      isLoggedOut: (page) => isLoggedOut(page),
+      login: (page, creds) => performLogin(page, creds),
+      read: (page, pollCycleId) =>
+        readJobSnapshot(page, pollCycleId, this.clock.nowIso(), (reason) =>
+          captureEvidence(page, this.cfg.STATE_DIR, reason, this.clock.nowIso(), secrets),
+        ),
+    };
   }
 
   async fetchSnapshot(pollCycleId: string): Promise<JobSnapshot> {
     const page = await this.browser.page();
     await this.navigateToOffers(page);
-    if (await isLoggedOut(page)) {
+    if (await this.ops.isLoggedOut(page)) {
       await this.login(page);
       await this.navigateToOffers(page);
     }
     try {
-      return await this.readOffers(page, pollCycleId);
+      return await this.ops.read(page, pollCycleId);
     } catch (err) {
-      if (err instanceof SessionExpiredError || (await isLoggedOut(page))) {
+      if (err instanceof SessionExpiredError || (await this.ops.isLoggedOut(page))) {
         await this.login(page);
         await this.navigateToOffers(page);
-        return this.readOffers(page, pollCycleId);
+        return this.ops.read(page, pollCycleId);
       }
       throw err;
     }
@@ -76,17 +95,11 @@ export class PlaywrightPortalClient implements PortalClient {
 
   private async login(page: Page): Promise<void> {
     this.rate.record(this.clock.nowMs());
-    await performLogin(page, {
+    await this.ops.login(page, {
       portalUrl: this.cfg.ACOLAD_PORTAL_URL,
       email: this.cfg.ACOLAD_EMAIL,
       password: this.cfg.ACOLAD_PASSWORD,
     });
     await this.browser.persistSession();
-  }
-
-  private readOffers(page: Page, pollCycleId: string): Promise<JobSnapshot> {
-    return readJobSnapshot(page, pollCycleId, this.clock.nowIso(), (reason) =>
-      captureEvidence(page, this.cfg.STATE_DIR, reason, this.clock.nowIso(), this.secrets),
-    );
   }
 }

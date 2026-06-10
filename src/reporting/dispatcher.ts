@@ -1,5 +1,5 @@
 import type { Outbox } from '../state/outbox.js';
-import type { ChatSender, SendOutcome } from './googleChat.js';
+import type { ChatSender, ChatPayload, SendOutcome } from './googleChat.js';
 import type { Logger } from '../monitoring/logger.js';
 
 export interface DispatchSummary {
@@ -38,7 +38,19 @@ export class Dispatcher {
     };
     const due = this.outbox.due(nowIso);
     for (const row of due) {
-      const payload = JSON.parse(row.payload_json) as { text: string };
+      const payload = JSON.parse(row.payload_json) as ChatPayload;
+      // Guard the implicit contract (Constitution VI): never send an empty/
+      // malformed payload silently. Drop it with an error log + dead alert.
+      if (typeof payload.text !== 'string' || payload.text === '') {
+        summary.dead++;
+        this.outbox.markSent(row.outbox_id, nowIso); // drop so the queue can't wedge
+        this.logger.error(
+          { module: 'dispatcher', action: 'send', outcome: 'malformed', eventId: row.event_id },
+          'dropped malformed outbox payload (no text)',
+        );
+        this.hooks.onDead?.(row.event_id);
+        continue;
+      }
       const start = Date.now();
       let outcome: SendOutcome;
       try {

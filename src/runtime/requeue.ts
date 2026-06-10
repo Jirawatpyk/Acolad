@@ -1,7 +1,7 @@
 import { loadConfig } from '../config/index.js';
 import { openDatabase } from '../state/db.js';
 import { Outbox } from '../state/outbox.js';
-import { systemClock } from './pollLoop.js';
+import { systemClock } from '../clock.js';
 
 /** Ops tool: requeue dead outbox rows back to pending (npm run outbox:requeue). */
 function main(): void {

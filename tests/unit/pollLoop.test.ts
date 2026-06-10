@@ -139,6 +139,34 @@ describe('PollLoop orchestration', () => {
     expect(heartbeat.okCount).toBe(0);
   });
 
+  it('returns to heartbeat ok once the dead outbox is requeued and drains (C1 recovery)', async () => {
+    const ob = new Outbox(db, 10, 6);
+    ob.enqueue('stale', JSON.stringify({ text: 'x' }), clock.nowIso());
+    ob.recordFailure(
+      { ...ob.due(clock.nowIso())[0]!, attempts: 99 },
+      clock.nowMs() + 7 * 3_600_000,
+    );
+
+    const loop = makeLoop();
+    await loop.runOnce(); // dead present → fail
+    expect(heartbeat.failCount).toBe(1);
+
+    // Operator requeues; the channel is healthy (default 'ok' sender) → drains.
+    ob.requeueDead(clock.nowIso());
+    await loop.runOnce();
+    expect(heartbeat.okCount).toBe(1);
+    expect(ob.countByStatus('dead')).toBe(0);
+  });
+
+  it('pings /fail when the channel returns permanent failures this cycle', async () => {
+    // A pending row + a permanent-returning sender → summary.permanentFailures > 0.
+    new Outbox(db, 10, 6).enqueue('e1', JSON.stringify({ text: 'a' }), clock.nowIso());
+    sender.outcome = 'permanent';
+    await makeLoop().runOnce();
+    expect(heartbeat.failCount).toBe(1);
+    expect(heartbeat.okCount).toBe(0);
+  });
+
   it('locks out after LOGIN_MAX_RETRY consecutive login failures (FR-009)', async () => {
     const loop = makeLoop();
     portal.script = [
