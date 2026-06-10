@@ -126,6 +126,20 @@
 - **Alternatives considered**: รอให้มีงานจริงก่อนค่อยพัฒนา (เสียเวลารอ และ
   เสี่ยงพลาดงานแรกๆ); hardcode selector จากหน้า login เท่าที่เห็น (ครอบคลุม
   ไม่พอ)
+- **ผลจริงจาก evidence-first (2026-06-10, ยืนยันด้วย live smoke)**: portal เป็น
+  React SPA — ยืนยัน selector จริงได้ดังนี้
+  - หน้า login: `[data-test="email-input-input"]`, `[data-test="password-input-input"]`,
+    `#login-submit-button` (ไม่มี `<form>` ที่มี attribute ระบุชนิด) — ใช้การมี
+    password field เป็น marker ของ "อยู่หน้า login"; ต้อง settle ~500ms หลัง
+    fill ก่อนคลิก submit (React controlled input commit state ช้ากว่า 1 tick)
+  - หลัง login portal เด้งไปหน้า root → ต้อง navigate ไปหน้า offers list
+    โดยตรง (`ACOLAD_OFFERS_URL` = `/project/offer/list/pending?view=card&grouped=false`)
+  - หน้า offers: shell marker = `[data-test="offers-nav"]`, สถานะว่าง =
+    `[data-test="empty-state-subtitle"]` ("No pending offers") — nav shell
+    render ก่อน list body จึงต้องรอ row หรือ empty-state โผล่ก่อนตัดสิน
+  - **ยังไม่ยืนยัน**: selector ของ "การ์ดงานจริง" (portal ว่างตอนทดสอบ) — ใช้
+    best-effort guess ใน selectors.ts; เมื่อมีงานจริงและ selector ไม่ match
+    ระบบจะ fail loud + เก็บ evidence ให้ปรับ selector (กฎใน jobList.ts)
 
 ## R10: จังหวะ Polling และความสุภาพต่อ Portal
 

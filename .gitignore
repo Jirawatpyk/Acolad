@@ -14,6 +14,7 @@ state/
 # Dependencies & build
 node_modules/
 dist/
+coverage/
 __pycache__/
 .venv/
 

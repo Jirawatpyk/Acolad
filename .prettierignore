@@ -1,0 +1,11 @@
+dist/
+node_modules/
+coverage/
+logs/
+state/
+.specify/
+.claude/
+specs/
+.remember/
+package-lock.json
+*.md
