@@ -4,8 +4,11 @@ import { openDatabase } from '../state/db.js';
 import { Outbox } from '../state/outbox.js';
 import { raiseAlert } from '../reporting/systemAlerts.js';
 import { BrowserSession } from '../portal/browser.js';
+import { PlaywrightPortalClient } from '../portal/portalClient.js';
 import { ColdStartHistory } from './coldStartHistory.js';
-import { PollLoop, systemClock } from './pollLoop.js';
+import { PollLoop } from './pollLoop.js';
+import { RateLimiter } from './rateLimiter.js';
+import { systemClock } from '../clock.js';
 
 /** Run a single poll cycle then exit (smoke test — npm run poll:once). */
 async function main(): Promise<void> {
@@ -26,13 +29,15 @@ async function main(): Promise<void> {
   const history = new ColdStartHistory(cfg.LOG_DIR);
 
   const browser = new BrowserSession(cfg.STATE_DIR, cfg.BROWSER_RECYCLE_HOURS, systemClock.nowMs);
-  const loop = new PollLoop(opened.db, browser, cfg, logger);
+  const rate = new RateLimiter(cfg.REQUESTS_PER_HOUR_CAP);
+  const client = new PlaywrightPortalClient(browser, cfg, rate, systemClock);
+  const loop = new PollLoop(opened.db, client, cfg, logger);
   try {
     const ok = await loop.runOnce();
     console.log(ok ? 'poll:once OK' : 'poll:once completed with errors (see logs/alerts)');
     if (ok) history.record(systemClock.nowIso());
   } finally {
-    await browser.dispose();
+    await client.dispose();
     opened.db.close();
   }
 }

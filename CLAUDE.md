@@ -6,11 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 บอทเฝ้า Acolad Partner Portal ตลอด 24/7: ตรวจจับงานแปลใหม่ → แจ้งเตือน
 Google Chat ภายใน 60 วินาที (ฟีเจอร์ 001) — ฟีเจอร์ถัดไปคือกดรับงานอัตโนมัติ
-+ บันทึกรายละเอียด task ลง Google Sheets
++ บันทึกรายละเอียด task ลง Google Sheets (รับเฉพาะคู่ภาษามาเลย์ MS — ยังไม่
+กรองในฟีเจอร์นี้ ดู [[acolad-malay-only-rule]])
 
-**สถานะปัจจุบัน**: spec/plan/tasks ของฟีเจอร์ 001 สมบูรณ์และผ่าน
-`/speckit-analyze` แล้ว — **ยังไม่เริ่ม implement** (ไม่มี `src/` จนกว่าจะรัน
-`/speckit-implement` ตาม tasks.md)
+**สถานะปัจจุบัน**: ฟีเจอร์ 001 **implement + ผ่าน review + ทดสอบกับ portal
+จริงแล้ว** (login ได้, ตรวจพบ "ไม่มีงาน", ส่ง Google Chat) — 82 tests ผ่าน,
+coverage ~98% บน core. selector ของ "การ์ดงานจริง" ยังไม่ยืนยัน (portal ว่าง);
+เมื่อมีงานแรกเข้า ระบบ fail-loud + เก็บ evidence ให้ปรับ `src/portal/selectors.ts`
 
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
@@ -66,15 +68,20 @@ npm run report:latency # สรุป p95 จาก log สำหรับตร
 วงจรหลัก (อ่าน plan.md + data-model.md + contracts/ ประกอบ):
 
 ```
-pollLoop (fixed-rate start-to-start 25s±5 clamp [20,30]s, ≤180 คำขอ/ชม.)
-  → PortalClient.ensureLoggedIn() → fetchJobSnapshot()   [src/portal/]
-  → diff(snapshot, prevState)                            [src/detection/ — pure]
+main/once → PollLoop.runOnce() [orchestration, unit-tested via stubs]
+  → PortalClient.fetchSnapshot(cycleId)  [src/portal/portalClient.ts]
+       (navigate offers → login เฉพาะเมื่อ logged-out → readJobSnapshot)
+  → diff(snapshot, prevState)            [src/detection/ — pure, transition owner]
   → persist state + enqueue outbox ใน SQLite txn เดียว   [src/state/]
   → dispatcher flush ทุก 5s → Google Chat webhook        [src/reporting/]
-  → heartbeat ping Healthchecks.io                       [src/monitoring/]
+  → heartbeat ok / fail (เมื่อ outbox dead) Healthchecks  [src/monitoring/]
 ```
 
-หลักออกแบบที่ต้องรักษา (มาจาก clarifications/analyze — ไม่ใช่สไตล์):
+**PortalClient** (interface ใน `src/portal/portalClient.ts`) แยก Playwright I/O
+ออกจาก orchestration — PollLoop พึ่ง interface นี้ จึง unit-test ได้ด้วย stub
+(`tests/unit/pollLoop.test.ts`). Clock/RateLimiter inject ได้เพื่อทดสอบเวลา/เพดาน
+
+หลักออกแบบที่ต้องรักษา (มาจาก clarifications/analyze/review — ไม่ใช่สไตล์):
 
 - **`detection/diff.ts` เป็นเจ้าของ state transition แต่เพียงผู้เดียว**
   (first_seen / missing เมื่อไม่พบ ≥ 2 รอบติด / relisted) — jobStore แค่

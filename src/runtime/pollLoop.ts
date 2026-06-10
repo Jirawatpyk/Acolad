@@ -1,96 +1,81 @@
 import { randomUUID } from 'node:crypto';
-import type { Page } from 'playwright';
 import type { DB } from '../state/db.js';
 import { Outbox } from '../state/outbox.js';
-import { MetaStore } from '../state/meta.js';
 import { PollCyclePersister } from './pollCycle.js';
 import { Dispatcher } from '../reporting/dispatcher.js';
-import { GoogleChatSender } from '../reporting/googleChat.js';
+import { GoogleChatSender, type ChatSender } from '../reporting/googleChat.js';
 import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
-import { RateLimiter } from './rateLimiter.js';
-import { Heartbeat } from '../monitoring/heartbeat.js';
-import { BrowserSession } from '../portal/browser.js';
-import { performLogin } from '../portal/login.js';
-import { readJobSnapshot, isLoggedOut } from '../portal/jobList.js';
-import { captureEvidence } from '../portal/evidence.js';
+import { Heartbeat, type HeartbeatPinger } from '../monitoring/heartbeat.js';
+import type { PortalClient } from '../portal/portalClient.js';
 import {
   CaptchaDetectedError,
   LayoutChangedError,
   LoginFailedError,
   PaginationDetectedError,
-  SessionExpiredError,
 } from '../portal/errors.js';
 import type { AppConfig } from '../config/index.js';
-import { secretValues } from '../config/index.js';
 import type { Logger } from '../monitoring/logger.js';
+import { type Clock, systemClock } from '../clock.js';
+
+export { type Clock, systemClock } from '../clock.js';
 
 const PORTAL_DOWN_THRESHOLD_MS = 10 * 60_000;
 
-export interface Clock {
-  nowMs(): number;
-  nowIso(): string;
+/** Optional collaborators injected for testing (default to production impls). */
+export interface PollLoopDeps {
+  sender?: ChatSender;
+  heartbeat?: HeartbeatPinger;
 }
 
-export const systemClock: Clock = {
-  nowMs: () => Date.now(),
-  nowIso: () => new Date().toISOString(),
-};
-
 /**
- * One full poll cycle: ensure login → fetch snapshot → diff+persist+enqueue →
- * dispatch → heartbeat. Returns whether the cycle succeeded. Errors are mapped
- * to system alerts; reporting failures never block detection (Constitution IV).
+ * One full poll cycle: fetch snapshot → diff+persist+enqueue → dispatch →
+ * heartbeat. Returns whether the cycle succeeded. Errors are mapped to system
+ * alerts; reporting failures never block detection (Constitution IV). Portal
+ * I/O is delegated to a PortalClient so this orchestration is unit-testable.
  */
 export class PollLoop {
   private readonly outbox: Outbox;
   private readonly persister: PollCyclePersister;
   private readonly dispatcher: Dispatcher;
-  private readonly heartbeat: Heartbeat;
-  private readonly rate: RateLimiter;
-  private readonly meta: MetaStore;
-  private readonly secrets: string[];
+  private readonly heartbeat: HeartbeatPinger;
   private loginFailures = 0;
   private lockoutUntilMs = 0;
   private firstPortalErrorMs = 0;
 
   constructor(
     private readonly db: DB,
-    private readonly browser: BrowserSession,
+    private readonly client: PortalClient,
     private readonly cfg: AppConfig,
     private readonly logger: Logger,
     private readonly clock: Clock = systemClock,
+    deps: PollLoopDeps = {},
   ) {
     this.outbox = new Outbox(db, cfg.OUTBOX_RETRY_CAP, cfg.OUTBOX_DEAD_AFTER_HOURS);
     this.persister = new PollCyclePersister(db, this.outbox, logger);
-    this.heartbeat = new Heartbeat(cfg.HEALTHCHECKS_PING_URL, (e, action) =>
-      logger.warn({ module: 'heartbeat', action, outcome: 'error', err: String(e) }),
-    );
-    this.dispatcher = new Dispatcher(
-      this.outbox,
-      new GoogleChatSender(cfg.GOOGLE_CHAT_WEBHOOK_SYSTEM),
-      logger,
-      {
-        onDead: () =>
-          raiseAlert(
-            db,
-            this.outbox,
-            'outbox_dead',
-            this.clock.nowIso(),
-            'รายการ outbox เกินเพดาน retry',
-          ),
-        onPermanent: () =>
-          raiseAlert(
-            db,
-            this.outbox,
-            'outbox_dead',
-            this.clock.nowIso(),
-            'webhook ถูก revoke/ลบ (ถาวร)',
-          ),
-      },
-    );
-    this.rate = new RateLimiter(cfg.REQUESTS_PER_HOUR_CAP);
-    this.meta = new MetaStore(db);
-    this.secrets = secretValues(cfg);
+    this.heartbeat =
+      deps.heartbeat ??
+      new Heartbeat(cfg.HEALTHCHECKS_PING_URL, (e, action) =>
+        logger.warn({ module: 'heartbeat', action, outcome: 'error', err: String(e) }),
+      );
+    const sender = deps.sender ?? new GoogleChatSender(cfg.GOOGLE_CHAT_WEBHOOK_SYSTEM);
+    this.dispatcher = new Dispatcher(this.outbox, sender, logger, {
+      onDead: () =>
+        raiseAlert(
+          db,
+          this.outbox,
+          'outbox_dead',
+          this.clock.nowIso(),
+          'รายการ outbox เกินเพดาน retry',
+        ),
+      onPermanent: () =>
+        raiseAlert(
+          db,
+          this.outbox,
+          'outbox_dead',
+          this.clock.nowIso(),
+          'webhook ถูก revoke/ลบ (ถาวร)',
+        ),
+    });
   }
 
   /** Run a single cycle. Returns true on success. */
@@ -108,8 +93,7 @@ export class PollLoop {
     const pollCycleId = randomUUID();
     const startMs = this.clock.nowMs();
     try {
-      const page = await this.browser.page();
-      const snapshot = await this.fetchSnapshot(page, pollCycleId);
+      const snapshot = await this.client.fetchSnapshot(pollCycleId);
 
       const persist = this.persister.persist(snapshot);
       this.onCycleSuccess();
@@ -154,51 +138,6 @@ export class PollLoop {
       await this.handleError(err);
       return false;
     }
-  }
-
-  /**
-   * Navigate to the offers list and read a snapshot. Goes straight to the offers
-   * URL (1 navigation in steady state — keeps requests under the FR-011 cap); a
-   * full login runs only when we land logged-out, or once mid-cycle if the
-   * session expires while reading (FR-002).
-   */
-  private async fetchSnapshot(page: Page, pollCycleId: string): ReturnType<typeof readJobSnapshot> {
-    await this.navigateToOffers(page);
-    if (await isLoggedOut(page)) {
-      await this.login(page);
-      await this.navigateToOffers(page);
-    }
-    try {
-      return await this.readOffers(page, pollCycleId);
-    } catch (err) {
-      if (err instanceof SessionExpiredError || (await isLoggedOut(page))) {
-        await this.login(page);
-        await this.navigateToOffers(page);
-        return this.readOffers(page, pollCycleId);
-      }
-      throw err;
-    }
-  }
-
-  private async navigateToOffers(page: Page): Promise<void> {
-    this.rate.record(this.clock.nowMs());
-    await page.goto(this.cfg.ACOLAD_OFFERS_URL, { waitUntil: 'domcontentloaded' });
-  }
-
-  private async login(page: Page): Promise<void> {
-    this.rate.record(this.clock.nowMs());
-    await performLogin(page, {
-      portalUrl: this.cfg.ACOLAD_PORTAL_URL,
-      email: this.cfg.ACOLAD_EMAIL,
-      password: this.cfg.ACOLAD_PASSWORD,
-    });
-    await this.browser.persistSession();
-  }
-
-  private readOffers(page: Page, pollCycleId: string): ReturnType<typeof readJobSnapshot> {
-    return readJobSnapshot(page, pollCycleId, this.clock.nowIso(), (reason) =>
-      captureEvidence(page, this.cfg.STATE_DIR, reason, this.clock.nowIso(), this.secrets),
-    );
   }
 
   private onCycleSuccess(): void {
@@ -281,9 +220,5 @@ export class PollLoop {
         handlerErr instanceof Error ? handlerErr.message : 'error handler failed',
       );
     }
-  }
-
-  rateLimiter(): RateLimiter {
-    return this.rate;
   }
 }

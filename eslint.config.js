@@ -21,7 +21,12 @@ export default tseslint.config(
   },
   {
     // CLI entrypoints/reports print to stdout by design
-    files: ['src/runtime/requeue.ts', 'src/runtime/latencyReport.ts', 'src/runtime/once.ts'],
+    files: [
+      'src/runtime/requeue.ts',
+      'src/runtime/latencyReport.ts',
+      'src/runtime/once.ts',
+      'src/runtime/main.ts',
+    ],
     rules: { 'no-console': 'off' },
   },
 );

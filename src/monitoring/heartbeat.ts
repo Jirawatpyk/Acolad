@@ -1,3 +1,9 @@
+/** Minimal heartbeat surface so the poll loop can be tested with a spy. */
+export interface HeartbeatPinger {
+  ok(): Promise<void>;
+  fail(): Promise<void>;
+}
+
 /**
  * Dead-man switch heartbeat to Healthchecks.io (FR-010). The bot pings after a
  * successful poll cycle; if pings stop for > 10 minutes the external service
@@ -6,7 +12,7 @@
  * is alive but failing, so the operator can tell "machine dead" from "knowingly
  * failing" and avoid duplicate alerts.
  */
-export class Heartbeat {
+export class Heartbeat implements HeartbeatPinger {
   constructor(
     private readonly pingUrl: string,
     private readonly onError: (e: unknown, action: string) => void = () => undefined,
