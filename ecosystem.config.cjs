@@ -3,7 +3,14 @@ module.exports = {
     {
       name: 'acolad-bot',
       script: 'dist/runtime/main.js',
+      // Run from the project root regardless of where pm2 is invoked, so the
+      // relative script/log paths and .env resolve correctly.
+      cwd: __dirname,
       autorestart: true,
+      // Hide the spawned console window. Without this, the headless Chromium
+      // (chrome-headless-shell.exe, a console binary) pops a stray Windows
+      // Terminal window on Windows 11 — matching the other PM2 bots' config.
+      windowsHide: true,
       max_memory_restart: '900M',
       restart_delay: 5000,
       out_file: 'logs/pm2-out.log',

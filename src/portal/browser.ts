@@ -52,7 +52,11 @@ export class BrowserSession {
   }
 
   private async open(): Promise<void> {
-    this.browser = await chromium.launch({ headless: true });
+    // channel:'chromium' uses the new headless mode (the full Chrome binary, a
+    // GUI app) instead of chrome-headless-shell.exe (a console binary). On
+    // Windows 11 the console binary pops a stray Windows Terminal window that
+    // stays open for the browser's lifetime; the full binary launches silently.
+    this.browser = await chromium.launch({ headless: true, channel: 'chromium' });
     const storageState = existsSync(this.storageStatePath) ? this.storageStatePath : undefined;
     try {
       this.context = await this.browser.newContext(storageState ? { storageState } : {});
