@@ -26,11 +26,29 @@ export class BrowserSession {
   }
 
   async page(): Promise<Page> {
-    if (!this.context) await this.open();
-    const ctx = this.context;
-    if (!ctx) throw new Error('browser context unavailable');
-    const pages = ctx.pages();
-    return pages[0] ?? (await ctx.newPage());
+    // Reopen when there is no context yet, or the browser has crashed/disconnected
+    // (isConnected() === false). Without this a dead browser would never be replaced.
+    if (!this.context || this.browser?.isConnected() === false) await this.reopen();
+    try {
+      const ctx = this.context;
+      if (!ctx) throw new Error('browser context unavailable');
+      const pages = ctx.pages();
+      return pages[0] ?? (await ctx.newPage());
+    } catch {
+      // The context closed out from under us (Chromium crash) while we still held
+      // a stale reference — the production stuck-loop cause. Reopen a fresh
+      // browser/context and retry once so the poll loop self-heals.
+      await this.reopen();
+      const ctx = this.context;
+      if (!ctx) throw new Error('browser context unavailable after reopen');
+      return ctx.newPage();
+    }
+  }
+
+  /** Drop any dead browser/context handles and open a fresh one. */
+  private async reopen(): Promise<void> {
+    await this.dispose();
+    await this.open();
   }
 
   private async open(): Promise<void> {
