@@ -8,7 +8,12 @@ import { Outbox } from '../../src/state/outbox.js';
 import { PollCyclePersister } from '../../src/runtime/pollCycle.js';
 import { Dispatcher } from '../../src/reporting/dispatcher.js';
 import { readJobSnapshot } from '../../src/portal/jobList.js';
-import { LayoutChangedError, PaginationDetectedError } from '../../src/portal/errors.js';
+import {
+  LayoutChangedError,
+  PaginationDetectedError,
+  PortalTimeoutError,
+  SessionExpiredError,
+} from '../../src/portal/errors.js';
 import type { ChatSender, SendOutcome } from '../../src/reporting/googleChat.js';
 import {
   jobListPage,
@@ -17,7 +22,14 @@ import {
   brokenLayoutPage,
   paginatedJobListPage,
   ambiguousEmptyPage,
+  loadingShellPage,
+  loadingListPage,
+  sessionExpiredPage,
 } from '../fixtures/pages.js';
+
+// Short read timeouts so "still loading" fixtures (whose loaders never clear)
+// don't burn the production 10–15s waits in the test suite.
+const FAST = { settle: 500, loader: 300, content: 300 };
 
 const noopLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -149,7 +161,7 @@ describe('detection integration (real Chromium DOM parsing)', () => {
   it('missing container marker -> LayoutChangedError (not empty list)', async () => {
     await page.setContent(brokenLayoutPage);
     await expect(
-      readJobSnapshot(page, 'c', '2026-06-10T03:00:00.000Z', noEvidence),
+      readJobSnapshot(page, 'c', '2026-06-10T03:00:00.000Z', noEvidence, FAST),
     ).rejects.toBeInstanceOf(LayoutChangedError);
   });
 
@@ -170,7 +182,40 @@ describe('detection integration (real Chromium DOM parsing)', () => {
   it('shell present but no rows and no empty-state marker -> fail loud (FR-016)', async () => {
     await page.setContent(ambiguousEmptyPage);
     await expect(
-      readJobSnapshot(page, 'c', '2026-06-10T03:00:00.000Z', noEvidence),
+      readJobSnapshot(page, 'c', '2026-06-10T03:00:00.000Z', noEvidence, FAST),
     ).rejects.toBeInstanceOf(LayoutChangedError);
+  });
+
+  // Regression: overnight 2026-06-11/12 the bot fired CRITICAL "layout changed"
+  // alerts for three BENIGN states (still-loading list, still-loading app shell,
+  // expired session). None is a layout change; each must be classified so the
+  // operator is not woken by false alarms and a real job is not masked by noise.
+
+  it('offers list still loading (loader visible) -> transient, NOT layout changed', async () => {
+    await page.setContent(loadingListPage);
+    const evidence = vi.fn(noEvidence);
+    await expect(
+      readJobSnapshot(page, 'c', '2026-06-10T03:00:00.000Z', evidence, FAST),
+    ).rejects.toBeInstanceOf(PortalTimeoutError);
+    // A transient load must not capture evidence (no disk/alert noise).
+    expect(evidence).not.toHaveBeenCalled();
+  });
+
+  it('app shell still loading (no container yet) -> transient, NOT layout changed', async () => {
+    await page.setContent(loadingShellPage);
+    const evidence = vi.fn(noEvidence);
+    await expect(
+      readJobSnapshot(page, 'c', '2026-06-10T03:00:00.000Z', evidence, FAST),
+    ).rejects.toBeInstanceOf(PortalTimeoutError);
+    expect(evidence).not.toHaveBeenCalled();
+  });
+
+  it('redirected to login (session expired) -> SessionExpiredError, NOT layout changed', async () => {
+    await page.setContent(sessionExpiredPage);
+    const evidence = vi.fn(noEvidence);
+    await expect(
+      readJobSnapshot(page, 'c', '2026-06-10T03:00:00.000Z', evidence, FAST),
+    ).rejects.toBeInstanceOf(SessionExpiredError);
+    expect(evidence).not.toHaveBeenCalled();
   });
 });

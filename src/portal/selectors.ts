@@ -41,6 +41,13 @@ export const SELECTORS = {
     },
     // Multi-page indicators — presence means we may not see all jobs (FR-009).
     pagination: '[data-test*="pagination"], .pagination, nav[aria-label*="age"]',
+    // Loading indicators shown while the offers list is still rendering (real
+    // portal: data-test="loader-container"). While one of these is visible, the
+    // absence of rows/empty-state is NOT meaningful — readJobSnapshot waits for
+    // it to clear and treats a stuck loader as transient, never a layout change.
+    // The pre-render app shell has no stable marker, only "Loading..." text —
+    // isLoading() falls back to that (see jobList.ts).
+    loading: '[data-test="loader-container"], [data-test*="loader"], [data-test*="spinner"]',
   },
   // Presence of any of these means the portal demands a human (no auto-bypass).
   challenge: 'iframe[src*="recaptcha"], iframe[title*="captcha"], [data-test="2fa"], #captcha',
