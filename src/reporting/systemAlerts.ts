@@ -11,7 +11,8 @@ export type TriggerKind =
   | 'portal_down'
   | 'outbox_dead'
   | 'cold_start_repeat'
-  | 'db_corrupt';
+  | 'db_corrupt'
+  | 'accept_failed';
 
 interface TriggerSpec {
   severity: 'warn' | 'critical';
@@ -84,6 +85,14 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     action: 'เก็บสำเนา .corrupt-* ไว้วิเคราะห์ และตรวจสุขภาพดิสก์',
     hasRecovered: false,
   },
+  accept_failed: {
+    severity: 'critical',
+    title: 'กดรับงานไม่สำเร็จ (ยืนยันไม่ได้)',
+    impact: 'งานมาเลย์ที่ควรได้อาจไม่ถูกรับ — ต้องตรวจด้วยคน',
+    action:
+      'เปิด state/evidence ล่าสุด + เข้า XTM ดูว่างานถูกรับไหม; ถ้าเมนู accept เปลี่ยนรูปแบบ อัปเดต src/portal/selectors.ts',
+    hasRecovered: false,
+  },
 };
 
 /**
@@ -98,6 +107,9 @@ export function raiseAlert(
   occurredAt: string,
   detail: string,
   extra: Partial<SystemAlertFields> = {},
+  /** Override the dedup key (default = kind). Use a per-job key for incidents
+   *  that recur per job (e.g. accept_failed) so distinct failures each alert. */
+  dedupKey?: string,
 ): boolean {
   const spec = TRIGGERS[kind];
   const system = new SystemEventStore(db);
@@ -114,7 +126,7 @@ export function raiseAlert(
     const eventId = system.create({
       eventType: 'system_alert',
       severity: spec.severity,
-      dedupKey: kind,
+      dedupKey: dedupKey ?? kind,
       payloadJson: payload,
       occurredAt,
     });

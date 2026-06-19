@@ -18,6 +18,8 @@ const cfg = (over: Partial<AppConfig> = {}): AppConfig =>
     ACCEPT_LANGUAGES: ['Malay (Malaysia)'],
     ACCEPT_MAX_WORDS: 0,
     ACCEPT_MAX_PER_CYCLE: 0,
+    OUTBOX_RETRY_CAP: 10,
+    OUTBOX_DEAD_AFTER_HOURS: 6,
     ...over,
   }) as AppConfig;
 
@@ -132,6 +134,23 @@ describe('XtmPollCycle (US1 — detect, accept, record)', () => {
     const s = only();
     expect(s.lifecycleStatus).toBe('accept_failed');
     expect(s.acceptStatus).toBe('failed');
+  });
+
+  it('raises a system alert (not silent) when an accept fails (T032/Constitution V)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    acc.outcome = 'failed';
+    await new XtmPollCycle(db, cfg(), acc).run(snap([xraw()]));
+    const alerts = db
+      .prepare(
+        "SELECT dedup_key FROM system_events WHERE event_type='system_alert' AND dedup_key LIKE 'accept_failed:%'",
+      )
+      .all();
+    expect(alerts).toHaveLength(1);
+    const out = db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE channel='chat'").get() as {
+      n: number;
+    };
+    expect(out.n).toBeGreaterThanOrEqual(1);
   });
 
   it('never accepts the same job twice across cycles (FR-008/SC-005)', async () => {

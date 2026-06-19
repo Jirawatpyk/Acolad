@@ -4,6 +4,8 @@ import { decideAccept } from '../detection/acceptDecision.js';
 import { XtmJobStore } from '../state/xtmJobStore.js';
 import { JobStore } from '../state/jobStore.js';
 import { MetaStore } from '../state/meta.js';
+import { Outbox, createOutbox } from '../state/outbox.js';
+import { raiseAlert } from '../reporting/systemAlerts.js';
 import type { DB } from '../state/db.js';
 import type { AppConfig } from '../config/index.js';
 import type { XtmJobSnapshot, XtmJobState } from '../detection/types.js';
@@ -35,6 +37,7 @@ export class XtmPollCycle {
   private readonly store: XtmJobStore;
   private readonly accept: JobStore; // accept-status state machine
   private readonly meta: MetaStore;
+  private readonly outbox: Outbox;
 
   constructor(
     private readonly db: DB,
@@ -44,6 +47,7 @@ export class XtmPollCycle {
     this.store = new XtmJobStore(db);
     this.accept = new JobStore(db);
     this.meta = new MetaStore(db);
+    this.outbox = createOutbox(db, cfg);
   }
 
   async run(snapshot: XtmJobSnapshot): Promise<XtmCycleSummary> {
@@ -122,9 +126,26 @@ export class XtmPollCycle {
           r.outcome,
           r.outcome === 'accepted' ? r.at : null,
         );
-        if (r.outcome === 'accepted') summary.accepted++;
-        else if (r.outcome === 'missing') summary.missing++;
-        else summary.failed++;
+        if (r.outcome === 'accepted') {
+          summary.accepted++;
+        } else if (r.outcome === 'missing') {
+          summary.missing++;
+        } else {
+          summary.failed++;
+          // T032 / Constitution V: an accept that could not be confirmed must
+          // never be silent — raise a per-job system alert through the outbox.
+          const s = result.nextStates.get(r.jobKey);
+          const detail = `${s?.projectName ?? '-'} / ${s?.fileName ?? r.jobKey}: ${r.reason}`;
+          raiseAlert(
+            this.db,
+            this.outbox,
+            'accept_failed',
+            snapshot.capturedAt,
+            detail,
+            {},
+            `accept_failed:${r.jobKey}`,
+          );
+        }
       }
     }
 

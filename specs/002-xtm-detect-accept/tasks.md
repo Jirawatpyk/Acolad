@@ -147,7 +147,7 @@ log โดยไม่ต้องมี Sheets/Chat)
       baseline + กดรับงานค้างที่ยังกดได้ (fallback baseline-only ถ้าแยกไม่ได้)
 - [x] T031 [US1] kill-switch + caps ใน pollLoop: `ACCEPT_ENABLED`, `ACCEPT_MAX_WORDS`,
       `ACCEPT_MAX_PER_CYCLE` (default ไม่จำกัด) → เกิน=Skipped+แจ้ง (FR-025)
-- [ ] T032 [US1] accept_failed → system alert (reuse `src/state/systemEvents.ts` +
+- [x] T032 [US1] accept_failed → system alert (reuse `src/state/systemEvents.ts` +
       evidence ref) — Constitution V (ห้ามเงียบ)
 
 **Checkpoint**: US1 ทำงานจบอิสระ — เจอมาเลย์ใหม่แล้วกดรับ+บันทึกถูก (MVP กดรับได้)
