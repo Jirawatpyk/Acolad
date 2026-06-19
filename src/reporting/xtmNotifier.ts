@@ -24,6 +24,23 @@ export function renderXtmNewJob(job: XtmJobState, capturedAt: string, statusNote
   ].join('\n');
 }
 
+/** 🔁 A job that disappeared and came back (relisted) — keeps the original first-seen. */
+export function renderXtmRelisted(
+  job: XtmJobState,
+  firstSeenAt: string | undefined,
+  capturedAt: string,
+): string {
+  const since = firstSeenAt ? ` (เคยเห็นเมื่อ ${formatBangkok(firstSeenAt)})` : '';
+  return [
+    `🔁 งานกลับมาอีกครั้ง${since}`,
+    `โปรเจกต์: ${dash(job.projectName)}`,
+    `ไฟล์: ${dash(job.fileName)}`,
+    `ภาษา: ${langs(job)}`,
+    `ครบกำหนด: ${due(job)} | คำ: ${dash(job.words)} | ขั้น: ${dash(job.step)} (${dash(job.role)})`,
+    `เวลา: ${formatBangkok(capturedAt)}`,
+  ].join('\n');
+}
+
 /** ✅ Accept succeeded (one message per job_key, never batched). */
 export function renderXtmAccepted(job: XtmJobState): string {
   return [
@@ -74,5 +91,6 @@ export function renderXtmColdStartSummary(jobs: XtmJobState[], _occurredAt: stri
     .join('\n');
   const more =
     jobs.length > COLD_START_MAX_ROWS ? `\n…และอีก ${jobs.length - COLD_START_MAX_ROWS} งาน` : '';
-  return `📋 เริ่มระบบเฝ้า XTM — พบงานค้าง ${jobs.length} รายการ (มาเลย์ ${eligible})\n${rows}${more}`;
+  // `eligible` is language-match only (acceptability needs the per-row menu); label it as such.
+  return `📋 เริ่มระบบเฝ้า XTM — พบงานค้าง ${jobs.length} รายการ (ตรวจพบเป็นมาเลย์ ${eligible})\n${rows}${more}`;
 }

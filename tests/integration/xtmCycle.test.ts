@@ -257,4 +257,34 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     );
     expect(outboxPayloads('sheets')[0]?.row?.status).toBe('New');
   });
+
+  it('announces a relisted job with 🔁, not 🆕 (review #7)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const cycle = new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), new StubAcceptor());
+    await cycle.run(snap([xraw({ targetLang: 'Thai' })], 'c1')); // 🆕
+    await cycle.run(snap([], 'c2')); // absent (flicker)
+    await cycle.run(snap([], 'c3')); // absent twice → missing
+    await cycle.run(snap([xraw({ targetLang: 'Thai' })], 'c4')); // returns → relisted
+    expect(outboxPayloads('chat').some((c) => c.text?.includes('🔁'))).toBe(true);
+  });
+});
+
+describe('XtmPollCycle crash recovery (review #1/#2)', () => {
+  it('recovers a job stranded in accepting as accept_failed + alert', async () => {
+    fresh();
+    const key = computeXtmJobKey(xraw());
+    const cycle = new XtmPollCycle(db, cfg(), new StubAcceptor());
+    await cycle.run(snap([xraw()], 'c1')); // accepted
+    // Simulate a prior crash after the claim but before recording: stuck in 'accepting'.
+    db.prepare("UPDATE jobs SET accept_status='accepting' WHERE job_key = ?").run(key);
+    await cycle.run(snap([xraw()], 'c2')); // start-of-cycle reconciliation
+    const s = only();
+    expect(s.acceptStatus).toBe('failed');
+    expect(s.lifecycleStatus).toBe('accept_failed');
+    const alerts = db
+      .prepare("SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key = ?")
+      .all(`accept_failed:${key}`);
+    expect(alerts.length).toBeGreaterThanOrEqual(1);
+  });
 });

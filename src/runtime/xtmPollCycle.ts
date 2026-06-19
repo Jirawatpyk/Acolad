@@ -9,6 +9,7 @@ import { raiseAlert } from '../reporting/systemAlerts.js';
 import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
+  renderXtmRelisted,
   renderXtmAccepted,
   renderXtmAcceptFailed,
   renderXtmColdStartSummary,
@@ -71,6 +72,33 @@ export class XtmPollCycle {
   async run(snapshot: XtmJobSnapshot): Promise<XtmCycleSummary> {
     const baseline = !this.meta.baselineDone;
     const prev = this.store.loadAll();
+
+    // Recovery (FR-008/FR-011, Constitution V/VII): a job still in 'accepting' is
+    // from a prior cycle that crashed or threw after the claim but before recording
+    // the outcome. Record it accept_failed + alert + sync to Sheets — never silently
+    // dropped, and never re-accepted (accept_status stays out of 'none').
+    for (const s of prev.values()) {
+      if (s.acceptStatus !== 'accepting') continue;
+      this.accept.recordAcceptOutcome(s.jobKey, 'failed', null);
+      s.acceptStatus = 'failed';
+      s.lifecycleStatus = 'accept_failed';
+      raiseAlert(
+        this.db,
+        this.outbox,
+        'accept_failed',
+        snapshot.capturedAt,
+        `${s.projectName} / ${s.fileName}: ค้างสถานะ accepting (รอบก่อนหยุดกลางคัน)`,
+        {},
+        `accept_failed:${s.jobKey}`,
+      );
+      this.outbox.enqueue(
+        `sheet:stranded:${s.jobKey}:${snapshot.pollCycleId}`,
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, 'crash mid-accept') }),
+        snapshot.capturedAt,
+        'sheets',
+      );
+    }
+
     const result = diffXtm(snapshot, prev, { baseline });
 
     // Eligibility for every next state (config-driven, R8).
@@ -160,13 +188,20 @@ export class XtmPollCycle {
     const acceptResults = new Map<string, AcceptResult>();
     if (targets.length > 0) {
       const results = await this.acceptor.acceptEligibleTasks(targets);
+      // Record every outcome in ONE transaction so a crash mid-batch is all-or-nothing
+      // — a partial record would strand the rest in 'accepting' (recovered next cycle).
+      this.db.transaction(() => {
+        for (const r of results) {
+          acceptResults.set(r.jobKey, r);
+          this.accept.recordAcceptOutcome(
+            r.jobKey,
+            r.outcome,
+            r.outcome === 'accepted' ? r.at : null,
+          );
+        }
+      })();
+      // Summary + in-memory state + alerts (outside the record transaction).
       for (const r of results) {
-        acceptResults.set(r.jobKey, r);
-        this.accept.recordAcceptOutcome(
-          r.jobKey,
-          r.outcome,
-          r.outcome === 'accepted' ? r.at : null,
-        );
         const s = result.nextStates.get(r.jobKey);
         if (r.outcome === 'accepted') {
           summary.accepted++;
@@ -225,7 +260,13 @@ export class XtmPollCycle {
       );
       // During baseline a single cold-start summary replaces per-job Chat (FR-005).
       if (!baseline) {
-        const text = this.chatForEvent(ev.eventType, s, outcome, snapshot.capturedAt);
+        const text = this.chatForEvent(
+          ev.eventType,
+          ev.firstSeenAt,
+          s,
+          outcome,
+          snapshot.capturedAt,
+        );
         if (text) {
           this.outbox.enqueue(
             `chat:${base}`,
@@ -272,6 +313,7 @@ export class XtmPollCycle {
   /** The Chat message for an appearance, or undefined for sheet-only events. */
   private chatForEvent(
     eventType: AppearanceEventType,
+    firstSeenAt: string | undefined,
     s: XtmJobState,
     outcome: AcceptResult | undefined,
     at: string,
@@ -288,6 +330,8 @@ export class XtmPollCycle {
     }
     // A job the bot never accepted leaving Active is sheet-only (contracts §sheet-only).
     if (eventType === 'missing') return undefined;
+    // A job that disappeared and returned is announced as relisted, not new (FR-019).
+    if (eventType === 'relisted') return renderXtmRelisted(s, firstSeenAt, at);
     const note = s.eligible
       ? this.cfg.ACCEPT_ENABLED
         ? 'เข้าเกณฑ์มาเลย์ (MS) — กำลังกดรับ'

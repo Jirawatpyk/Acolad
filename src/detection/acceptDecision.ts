@@ -38,6 +38,11 @@ export function decideAccept(i: AcceptDecisionInput): AcceptDecision {
   if (i.maxWords > 0 && i.words !== null && i.words > i.maxWords) {
     return { action: 'skip', reason: `exceeds max words (${i.words} > ${i.maxWords})` };
   }
+  // NOTE (latent, default 0 = unlimited): this caps the number of jobs the bot
+  // *labels* to accept, but the portal's bulk action ("Accept all tasks for this
+  // language in this group") claims the whole group at once — so an enabled cap can
+  // be exceeded on the portal and the over-cap rows are mislabeled Skipped for one
+  // cycle (the next re-read self-corrects). Redefine as max-groups before relying on it.
   if (i.maxPerCycle > 0 && i.acceptedThisCycle >= i.maxPerCycle) {
     return { action: 'skip', reason: `per-cycle accept cap reached (${i.maxPerCycle})` };
   }

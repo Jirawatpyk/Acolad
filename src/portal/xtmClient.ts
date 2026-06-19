@@ -128,7 +128,8 @@ export class PlaywrightXtmClient implements XtmPortalClient {
       .waitFor({ state: 'attached', timeout: 10_000 })
       .catch(() => undefined);
     const keys = await readClosedKeysFromGrid(frame);
-    // Return to Active so the next fetch reads the right tab.
+    // Return to Active so the next fetch reads the right tab — also a grid reload (FR-027).
+    this.rate.record(this.clock.nowMs());
     await frame
       .locator(XTM.tabs.active)
       .first()
@@ -168,6 +169,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     // The inbox defaults to Active, but be explicit: if the ACTIVE marker is not
     // present, click the Active tab (keyed off aria-controls, not display text).
     if ((await frame.locator(XTM.active.stateMarker).count()) === 0) {
+      this.rate.record(this.clock.nowMs()); // tab switch is a grid reload (FR-027)
       await frame
         .locator(XTM.tabs.active)
         .first()

@@ -163,8 +163,12 @@ export async function readActiveSnapshot(
       words: parseXtmWords(row.wordsRaw),
       step: row.step,
       role: row.role,
-      // The grid cannot reliably show acceptability (D6); the accept step gates on
-      // the row menu showing "Accept task" at accept time. Optimistic here.
+      // UNRESOLVED (D6) — the grid does not expose acceptability, set true optimistically.
+      // CONSEQUENCE: determineAcceptOutcomes (xtmAccept.ts) reads acceptAvailable to tell
+      // accepted (false = owned) from failed (true = still claimable). With this placeholder
+      // EVERY accepted job re-reads as failed, so ACCEPT_ENABLED MUST stay 0 until the
+      // per-row menu signal ("Accept task" vs "Finish task") is captured live and computed
+      // here (research.md D4/D6). The detect/log/notify path does not use this field.
       acceptAvailable: true,
     };
     const parsed = rawXtmJobSchema.safeParse(candidate);

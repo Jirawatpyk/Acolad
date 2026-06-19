@@ -65,12 +65,13 @@ export async function acceptEligibleTasks(
   const targetLang = targets[0]?.targetLang ?? '';
   try {
     await openBulkAcceptForLanguage(scope, targetLang);
-  } catch (err) {
+  } catch {
     const evidencePath = await deps.captureEvidence('accept_unconfirmed');
-    const reason = err instanceof Error ? err.message : 'accept menu path not found (unconfirmed)';
-    void evidencePath;
+    // Bounded reason only — the raw Playwright message must NOT reach Sheets/Chat
+    // (contracts/sheets.md "Note = evidence ref only"); the screenshot/HTML holds detail.
+    const reason = `accept menu path not found; evidence: ${evidencePath ?? 'n/a'}`;
     // Never assume success — mark all targets failed pending the FR-024 re-read.
-    return targets.map((t) => ({ jobKey: t.jobKey, outcome: 'failed', reason }));
+    return targets.map((t) => ({ jobKey: t.jobKey, outcome: 'failed' as const, reason }));
   }
   const reRead = await deps.reReadActive();
   return determineAcceptOutcomes(targets, reRead, deps.nowIso());
