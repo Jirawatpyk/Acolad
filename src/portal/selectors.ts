@@ -178,15 +178,29 @@ export const XTM = {
   },
 
   // ── Accept control + success signal — D4/D6 ───────────────────────────────
-  // UNCONFIRMED — FAIL LOUD: no un-accepted job existed during recon, so NO
-  // accept widget was on screen and NO accept/reserve endpoint appears in the
-  // network log. The accept path (a kebab menu item and/or the row Details
-  // dialog) and its success signal MUST be captured evidence-first on the first
-  // real Malay job before ACCEPT_ENABLED is turned on. These are hypotheses:
+  // PATH CONFIRMED from recon screenshots + DOM capture: open the row kebab →
+  // a Radix dropdown renders into `#context-menus-container` (inside the iframe)
+  // → its submenu parent is STATE-DEPENDENT text: "Accept task" for an
+  // acceptable job, "Finish task" for an in-progress/finished one. The bot acts
+  // ONLY when "Accept task" is present (⇒ this job is acceptable). Expanding it
+  // reveals 6 options; the bulk one (FR-006) is "Accept all tasks for this
+  // language in this group".
+  //
+  // These item texts are LOCALE-dependent (UI is en_GB) — treat them as
+  // config-adjacent and FAIL LOUD if not found on an eligible job rather than
+  // clicking a wrong item. The exact submenu DOM + the success signal still
+  // need an evidence-first capture on a real un-accepted Malay job; until then
+  // T026 confirms the outcome by RE-READING Active (FR-024), never by trusting
+  // the click. ACCEPT_ENABLED stays 0 until that capture lands.
   accept: {
-    control: null, // TODO(evidence-first): kebab "Accept" item OR Details-dialog button
-    successToast: 'div.xtm-toast, div.Toastify', // HYPOTHESIS — never observed firing
+    rowKebab: 'button[data-testid="context-menu-button"]', // open row menu (row-scoped)
+    menuContainer: '#context-menus-container', // Radix menu portal (in iframe)
+    acceptTaskItemText: 'Accept task', // submenu parent on an acceptable job — FAIL LOUD if absent
+    finishTaskItemText: 'Finish task', // same slot when the job is in-progress/done (NOT acceptable)
+    bulkForLanguageInGroupText: 'Accept all tasks for this language in this group', // FR-006
+    // UNCONFIRMED — success signal: re-fetch of the in-progress list after accept.
     successRefetchEndpoint: '/project-manager-gui/myinbox/getInProgressElements.serv',
+    successToast: 'div.xtm-toast, div.Toastify', // HYPOTHESIS — never observed firing
   },
 } as const;
 

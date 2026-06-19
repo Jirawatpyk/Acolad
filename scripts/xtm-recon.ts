@@ -106,6 +106,62 @@ async function inboxFrame(page: Page): Promise<Frame | null> {
   }
 }
 
+/**
+ * D4 capture: open a real row's kebab menu, then HOVER "Accept task" to expand
+ * its submenu, capturing the DOM at each step. SAFETY: clicks ONLY the kebab
+ * (opens the menu, no action) and HOVERS the "Accept task" parent (expands the
+ * submenu, no action). It NEVER clicks an "Accept this/all ..." option — so no
+ * task is ever accepted on the shared account.
+ */
+async function captureAcceptMenu(page: Page, dir: string): Promise<void> {
+  const frame = await inboxFrame(page);
+  if (!frame) {
+    console.log('[recon] accept-menu: no inbox frame');
+    return;
+  }
+  try {
+    const kebab = frame.locator('button[data-testid="context-menu-button"]').first();
+    if ((await kebab.count()) === 0) {
+      console.log('[recon] accept-menu: no kebab button (Active empty?)');
+      return;
+    }
+    await kebab.click({ timeout: 5_000 }); // opens the row menu — safe, no action
+    await page.waitForTimeout(700);
+    // The menu may render in the iframe document or a top-document portal — dump both.
+    await dumpFrameHtml(frame, dir, '07-accept-menu-iframe');
+    writeFileSync(join(dir, '07-accept-menu-page.html'), await page.content(), 'utf8');
+    await snapshot(page, dir, '07-accept-menu-fullpage');
+
+    // Expand the "Accept task" submenu by HOVER only (exact text → never an action item).
+    let hovered = false;
+    for (const scope of [frame, page] as Scope[]) {
+      const item = scope.getByText('Accept task', { exact: true }).first();
+      try {
+        if ((await item.count()) > 0) {
+          await item.hover({ timeout: 5_000 });
+          hovered = true;
+          break;
+        }
+      } catch {
+        // try next scope
+      }
+    }
+    if (hovered) {
+      await page.waitForTimeout(800);
+      await dumpFrameHtml(frame, dir, '07b-accept-submenu-iframe');
+      writeFileSync(join(dir, '07b-accept-submenu-page.html'), await page.content(), 'utf8');
+      await snapshot(page, dir, '07b-accept-submenu-fullpage');
+      console.log('[recon] captured Accept submenu (hover only — NO accept performed)');
+    } else {
+      console.log('[recon] accept-menu: "Accept task" not found by exact text — captured top menu only');
+    }
+  } catch (err) {
+    console.warn(`[recon] accept-menu failed: ${err instanceof Error ? err.message : err}`);
+  } finally {
+    await page.keyboard.press('Escape').catch(() => undefined); // close menu, no action
+  }
+}
+
 async function snapshot(page: Page, dir: string, name: string): Promise<void> {
   try {
     writeFileSync(join(dir, `${name}.html`), await page.content(), 'utf8');
@@ -215,28 +271,10 @@ async function main(): Promise<void> {
       await dumpFrameHtml(await inboxFrame(page), dir, `${tab.name}-iframe`);
       await snapshot(page, dir, `${tab.name}-fullpage`);
 
-      // On the NEW tab, try to open a row action / Accept menu — OPEN ONLY, never confirm.
-      if (tab.name.includes('new')) {
-        const f2 = await inboxFrame(page);
-        const opened =
-          f2 &&
-          (await clickFirst(f2, [
-            'button[aria-label*="more" i]',
-            'button[aria-label*="action" i]',
-            'button[title*="more" i]',
-            '.context-menu-trigger',
-            'a[onclick*="accept" i]',
-            'button:has-text("⋮")',
-            '[aria-haspopup="menu"]',
-          ]));
-        if (opened) {
-          await page.waitForTimeout(700);
-          await dumpFrameHtml(await inboxFrame(page), dir, '04b-new-accept-menu-iframe');
-          await snapshot(page, dir, '04b-new-accept-menu-fullpage');
-          console.log('[recon] opened a row action menu on NEW tab (accept path candidate)');
-        } else {
-          console.log('[recon] NEW tab: no row action menu (tab may be empty right now)');
-        }
+      // On the ACTIVE (in-progress) tab, capture the Accept menu DOM from a real
+      // row — kebab click + "Accept task" hover only (D4). No accept is performed.
+      if (tab.name.includes('in-progress')) {
+        await captureAcceptMenu(page, dir);
       }
     }
 
