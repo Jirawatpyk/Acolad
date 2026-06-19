@@ -181,3 +181,53 @@ describe('XtmPollCycle (US1 — detect, accept, record)', () => {
     expect(only().lifecycleStatus).toBe('missing');
   });
 });
+
+function outboxPayloads(
+  channel: 'chat' | 'sheets',
+): Array<{ row?: { status: string }; text?: string }> {
+  return (
+    db.prepare('SELECT payload_json FROM outbox WHERE channel = ?').all(channel) as {
+      payload_json: string;
+    }[]
+  ).map((r) => JSON.parse(r.payload_json) as { row?: { status: string }; text?: string });
+}
+
+describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
+  it('enqueues an Accepted sheets row + a ✅ chat for an accepted Malay job', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone(); // past baseline → per-job chat fires
+    await new XtmPollCycle(db, cfg(), new StubAcceptor()).run(snap([xraw()]));
+    const sheets = outboxPayloads('sheets');
+    expect(sheets).toHaveLength(1);
+    expect(sheets[0]?.row?.status).toBe('Accepted');
+    expect(outboxPayloads('chat').some((c) => c.text?.includes('✅'))).toBe(true);
+  });
+
+  it('enqueues a Skipped sheets row + a 🆕 chat for a non-Malay job', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    await new XtmPollCycle(db, cfg(), new StubAcceptor()).run(snap([xraw({ targetLang: 'Thai' })]));
+    expect(outboxPayloads('sheets')[0]?.row?.status).toBe('Skipped');
+    expect(outboxPayloads('chat').some((c) => c.text?.includes('🆕'))).toBe(true);
+  });
+
+  it('posts ONE cold-start summary (not per-job chat) during baseline, logs all to Sheets', async () => {
+    fresh();
+    await new XtmPollCycle(db, cfg(), new StubAcceptor()).run(
+      snap([xraw({ fileName: 'a.docx' }), xraw({ fileName: 'b.docx', targetLang: 'Thai' })]),
+    );
+    const chat = outboxPayloads('chat');
+    expect(chat).toHaveLength(1);
+    expect(chat[0]?.text).toContain('📋');
+    expect(outboxPayloads('sheets')).toHaveLength(2);
+  });
+
+  it('enqueues a New sheets row when auto-accept is disabled', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), new StubAcceptor()).run(
+      snap([xraw()]),
+    );
+    expect(outboxPayloads('sheets')[0]?.row?.status).toBe('New');
+  });
+});

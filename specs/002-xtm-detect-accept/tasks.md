@@ -183,7 +183,7 @@ log โดยไม่ต้องมี Sheets/Chat)
       updateRow upsert by job_key) ผ่าน googleapis service account, scope spreadsheets
 - [x] T040 [US2] outbox channel `'sheets'` + routing ใน `src/reporting/dispatcher.ts`
       (payload append/update) — reuse retry/backoff เดิม
-- [ ] T041 [US2] คำนวณ `lifecycle_status` + enqueue outbox sheets/chat ตอน transition
+- [x] T041 [US2] คำนวณ `lifecycle_status` + enqueue outbox sheets/chat ตอน transition
       ใน `src/runtime/pollLoop.ts` + `src/state/jobStore.ts` (ไม่ใส่ logic นี้ใน diff)
 - [ ] T042 [US2] Closed-tab targeted check → Closed/Removed (FR-014) ใน pollLoop ใช้
       `xtmInbox.readClosed` (เฉพาะตอน accepted หายจาก Active ≥ 2 รอบ; นับในงบ
@@ -206,15 +206,15 @@ log โดยไม่ต้องมี Sheets/Chat)
 - [x] T044 [P] [US3] `tests/unit/notifier.test.ts`: 🆕 งานใหม่ (eligible/skip),
       ✅ รับงานแล้ว, ⚠️ กดรับไม่สำเร็จ/โดนแย่ง — เวลา ISO 8601 +07:00
       (contracts/notifications.md)
-- [ ] T045 [P] [US3] `tests/integration/coldStartSummary.test.ts`: 1 ข้อความสรุป
+- [x] T045 [P] [US3] `tests/integration/coldStartSummary.test.ts`: 1 ข้อความสรุป
       งานค้างตอน start (FR-005)
 
 ### Implementation for US3
 
 - [x] T046 [US3] เพิ่ม template ข้อความใหม่ใน `src/reporting/notifier.ts` (new/
       accepted/failed) — reuse formatter เดิม
-- [ ] T047 [US3] cold-start summary message + wire ใน bootstrap/pollLoop
-- [ ] T048 [US3] wire เหตุการณ์ (new/accepted/failed) → outbox channel `chat` ใน
+- [x] T047 [US3] cold-start summary message + wire ใน bootstrap/pollLoop
+- [x] T048 [US3] wire เหตุการณ์ (new/accepted/failed) → outbox channel `chat` ใน
       `src/runtime/pollLoop.ts` (1 ข้อความ/งาน ไม่ batch)
 
 **Checkpoint**: ทั้ง 3 stories ทำงานจบอิสระ

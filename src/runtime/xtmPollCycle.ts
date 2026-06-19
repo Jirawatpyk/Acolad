@@ -6,9 +6,16 @@ import { JobStore } from '../state/jobStore.js';
 import { MetaStore } from '../state/meta.js';
 import { Outbox, createOutbox } from '../state/outbox.js';
 import { raiseAlert } from '../reporting/systemAlerts.js';
+import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
+import {
+  renderXtmNewJob,
+  renderXtmAccepted,
+  renderXtmAcceptFailed,
+  renderXtmColdStartSummary,
+} from '../reporting/xtmNotifier.js';
 import type { DB } from '../state/db.js';
 import type { AppConfig } from '../config/index.js';
-import type { XtmJobSnapshot, XtmJobState } from '../detection/types.js';
+import type { AppearanceEventType, XtmJobSnapshot, XtmJobState } from '../detection/types.js';
 import type { AcceptTarget, AcceptResult } from '../portal/errors.js';
 
 /** The portal capability the cycle needs (injectable; the real impl is xtmClient). */
@@ -118,23 +125,38 @@ export class XtmPollCycle {
         targets.push({ jobKey: s.jobKey, targetLang: s.targetLang ?? '' });
       }
     }
+    const acceptResults = new Map<string, AcceptResult>();
     if (targets.length > 0) {
       const results = await this.acceptor.acceptEligibleTasks(targets);
       for (const r of results) {
+        acceptResults.set(r.jobKey, r);
         this.accept.recordAcceptOutcome(
           r.jobKey,
           r.outcome,
           r.outcome === 'accepted' ? r.at : null,
         );
+        const s = result.nextStates.get(r.jobKey);
         if (r.outcome === 'accepted') {
           summary.accepted++;
+          if (s) {
+            s.lifecycleStatus = 'accepted';
+            s.acceptStatus = 'accepted';
+            s.acceptedAt = r.at;
+          }
         } else if (r.outcome === 'missing') {
           summary.missing++;
+          if (s) {
+            s.lifecycleStatus = 'missing';
+            s.acceptStatus = 'none';
+          }
         } else {
           summary.failed++;
+          if (s) {
+            s.lifecycleStatus = 'accept_failed';
+            s.acceptStatus = 'failed';
+          }
           // T032 / Constitution V: an accept that could not be confirmed must
           // never be silent — raise a per-job system alert through the outbox.
-          const s = result.nextStates.get(r.jobKey);
           const detail = `${s?.projectName ?? '-'} / ${s?.fileName ?? r.jobKey}: ${r.reason}`;
           raiseAlert(
             this.db,
@@ -149,8 +171,96 @@ export class XtmPollCycle {
       }
     }
 
+    // Enqueue the per-job Sheets row (every changed job, all statuses) + the Chat
+    // message (T041/T048). One event_id per transition per cycle; the outbox dedups
+    // by (event_id, channel) so a re-run never duplicates (Constitution VII).
+    for (const ev of result.events) {
+      const s = result.nextStates.get(ev.jobKey);
+      if (!s) continue;
+      const base = `${ev.jobKey}|${s.lifecycleStatus}|${snapshot.pollCycleId}`;
+      const outcome = acceptResults.get(ev.jobKey);
+      const note =
+        outcome?.outcome === 'failed'
+          ? outcome.reason
+          : outcome?.outcome === 'missing'
+            ? 'snatched'
+            : null;
+      this.outbox.enqueue(
+        `sheet:${base}`,
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, note) }),
+        snapshot.capturedAt,
+        'sheets',
+      );
+      // During baseline a single cold-start summary replaces per-job Chat (FR-005).
+      if (!baseline) {
+        const text = this.chatForEvent(ev.eventType, s, outcome, snapshot.capturedAt);
+        if (text) {
+          this.outbox.enqueue(
+            `chat:${base}`,
+            JSON.stringify({ text }),
+            snapshot.capturedAt,
+            'chat',
+          );
+        }
+      }
+    }
+    if (baseline) {
+      const text = renderXtmColdStartSummary([...result.nextStates.values()], snapshot.capturedAt);
+      this.outbox.enqueue(
+        `coldstart:${snapshot.pollCycleId}`,
+        JSON.stringify({ text }),
+        snapshot.capturedAt,
+        'chat',
+      );
+    }
+
     if (baseline) this.meta.markBaselineDone();
     this.meta.recordSuccessfulPoll(snapshot.capturedAt);
     return summary;
+  }
+
+  private toSheetRow(s: XtmJobState, note: string | null): SheetRow {
+    return {
+      jobKey: s.jobKey,
+      receivedDate: s.firstSeenAt,
+      status: lifecycleToSheetStatus(s.lifecycleStatus),
+      projectName: s.projectName,
+      fileName: s.fileName,
+      sourceLang: s.sourceLang,
+      targetLang: s.targetLang,
+      dueDate: s.dueDate ?? s.dueRaw,
+      words: s.words,
+      step: s.step,
+      role: s.role,
+      acceptedAt: s.acceptedAt,
+      note,
+    };
+  }
+
+  /** The Chat message for an appearance, or undefined for sheet-only events. */
+  private chatForEvent(
+    eventType: AppearanceEventType,
+    s: XtmJobState,
+    outcome: AcceptResult | undefined,
+    at: string,
+  ): string | undefined {
+    if (outcome) {
+      // An accept attempt happened → report its outcome (acceptance outcome → Chat).
+      if (outcome.outcome === 'accepted') return renderXtmAccepted(s);
+      return renderXtmAcceptFailed(
+        s,
+        outcome.outcome,
+        outcome.outcome === 'failed' ? outcome.reason : null,
+        at,
+      );
+    }
+    // A job the bot never accepted leaving Active is sheet-only (contracts §sheet-only).
+    if (eventType === 'missing') return undefined;
+    const note = s.eligible
+      ? this.cfg.ACCEPT_ENABLED
+        ? 'เข้าเกณฑ์มาเลย์ (MS) — กำลังกดรับ'
+        : 'เข้าเกณฑ์มาเลย์ (MS) — auto-accept ปิดอยู่'
+      : 'ไม่ใช่มาเลย์ — บันทึกไว้เฉย ๆ';
+    return renderXtmNewJob(s, at, note);
   }
 }
