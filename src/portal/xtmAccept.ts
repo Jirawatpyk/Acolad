@@ -21,6 +21,9 @@ export function determineAcceptOutcomes(
   targets: AcceptTarget[],
   reRead: XtmRawJob[],
   at: string,
+  /** When the confirm-click fired (V16). Carried on accepted results for the
+   *  latency split; omitted by callers that don't measure it (e.g. unit tests). */
+  clickedAt?: string,
 ): AcceptResult[] {
   const byKey = new Map<string, XtmRawJob>();
   for (const r of reRead) byKey.set(computeXtmJobKey(r), r);
@@ -34,7 +37,9 @@ export function determineAcceptOutcomes(
         reason: 'still acceptable after accept (not claimed)',
       };
     }
-    return { jobKey: t.jobKey, outcome: 'accepted', at };
+    return clickedAt
+      ? { jobKey: t.jobKey, outcome: 'accepted', at, clickedAt }
+      : { jobKey: t.jobKey, outcome: 'accepted', at };
   });
 }
 
@@ -73,8 +78,11 @@ export async function acceptEligibleTasks(
     // Never assume success — mark all targets failed pending the FR-024 re-read.
     return targets.map((t) => ({ jobKey: t.jobKey, outcome: 'failed' as const, reason }));
   }
+  // Stamp the confirm-click moment BEFORE the re-read so click latency (V16)
+  // excludes the re-read cost that outcome latency (V16b) includes.
+  const clickedAt = deps.nowIso();
   const reRead = await deps.reReadActive();
-  return determineAcceptOutcomes(targets, reRead, deps.nowIso());
+  return determineAcceptOutcomes(targets, reRead, deps.nowIso(), clickedAt);
 }
 
 /** Drive the row menu to the bulk "for this language in this group" option. */

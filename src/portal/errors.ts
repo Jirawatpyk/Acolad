@@ -64,6 +64,8 @@ export interface AcceptTarget {
  * orchestration can record lifecycle per row.
  */
 export type AcceptResult =
-  | { jobKey: string; outcome: 'accepted'; at: string }
+  // `at` = FR-024-confirmed timestamp (after the re-read); `clickedAt` = when the
+  // confirm-click fired (before the re-read). Both feed the V16/V16b latency split.
+  | { jobKey: string; outcome: 'accepted'; at: string; clickedAt?: string }
   | { jobKey: string; outcome: 'missing' } // snatched / no longer acceptable
   | { jobKey: string; outcome: 'failed'; reason: string }; // success not confirmable

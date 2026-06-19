@@ -32,6 +32,15 @@ export interface ClosedReader {
   readClosedKeys(): Promise<Set<string>>;
 }
 
+/** Per-accept latency sample (T050) — both measured from detection (capturedAt). */
+export interface AcceptLatencySample {
+  jobKey: string;
+  /** detection → confirm-click (V16, ≤ 5 s); null if the acceptor didn't stamp it. */
+  clickLatencyMs: number | null;
+  /** detection → FR-024-confirmed outcome (V16b/SC-003, ≤ 60 s). */
+  outcomeLatencyMs: number;
+}
+
 export interface XtmCycleSummary {
   jobs: number;
   baseline: boolean;
@@ -42,6 +51,8 @@ export interface XtmCycleSummary {
   eligibleDisabled: number;
   closed: number;
   removed: number;
+  /** One entry per confirmed accept this cycle (empty while ACCEPT_ENABLED=0). */
+  acceptLatencies: AcceptLatencySample[];
 }
 
 /**
@@ -116,7 +127,9 @@ export class XtmPollCycle {
       eligibleDisabled: 0,
       closed: 0,
       removed: 0,
+      acceptLatencies: [],
     };
+    const detectedMs = Date.parse(snapshot.capturedAt);
     const candidates: XtmJobState[] = [];
     const disappearedAccepted: XtmJobState[] = [];
     let acceptedThisCycle = 0;
@@ -210,6 +223,12 @@ export class XtmPollCycle {
             s.acceptStatus = 'accepted';
             s.acceptedAt = r.at;
           }
+          // Latency split for the report (T050 / V16 + V16b), measured from detection.
+          summary.acceptLatencies.push({
+            jobKey: r.jobKey,
+            clickLatencyMs: r.clickedAt ? Date.parse(r.clickedAt) - detectedMs : null,
+            outcomeLatencyMs: Date.parse(r.at) - detectedMs,
+          });
         } else if (r.outcome === 'missing') {
           summary.missing++;
           if (s) {

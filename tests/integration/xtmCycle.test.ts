@@ -86,6 +86,25 @@ describe('XtmPollCycle (US1 — detect, accept, record)', () => {
     expect(s.lifecycleStatus).toBe('accepted');
   });
 
+  it('records the accept latency split from detection (T050 / V16 + V16b)', async () => {
+    fresh();
+    // capturedAt = NOW (detection). clicked +2s, FR-024 outcome confirmed +8s.
+    const clickedAt = new Date(Date.parse(NOW) + 2_000).toISOString();
+    const confirmedAt = new Date(Date.parse(NOW) + 8_000).toISOString();
+    const acc = {
+      async acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]> {
+        return targets.map(
+          (t) =>
+            ({ jobKey: t.jobKey, outcome: 'accepted', at: confirmedAt, clickedAt }) as AcceptResult,
+        );
+      },
+    };
+    const summary = await new XtmPollCycle(db, cfg(), acc).run(snap([xraw()]));
+    expect(summary.acceptLatencies).toHaveLength(1);
+    expect(summary.acceptLatencies[0]?.clickLatencyMs).toBe(2_000); // ≤ 5 s budget (V16)
+    expect(summary.acceptLatencies[0]?.outcomeLatencyMs).toBe(8_000); // ≤ 60 s budget (V16b)
+  });
+
   it('skips a non-Malay job and never calls accept for it (FR-007)', async () => {
     fresh();
     const acc = new StubAcceptor();

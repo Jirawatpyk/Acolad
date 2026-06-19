@@ -101,6 +101,23 @@ export class XtmPollLoop {
       const snapshot = await this.client.fetchJobSnapshot(pollCycleId);
       const summary = await this.cycle.run(snapshot);
       this.onCycleSuccess();
+
+      // Per-accept latency lines for `npm run report:latency` (T050 / V16+V16b).
+      // Empty while ACCEPT_ENABLED=0, so this is silent until accept is live.
+      for (const lat of summary.acceptLatencies) {
+        this.logger.info(
+          {
+            module: 'xtmPollLoop',
+            action: 'accept',
+            outcome: 'ok',
+            jobKey: lat.jobKey,
+            clickLatencyMs: lat.clickLatencyMs,
+            outcomeLatencyMs: lat.outcomeLatencyMs,
+          },
+          'accept latency',
+        );
+      }
+
       const disp = await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
 
       if (snapshot.malformed.length > 0) {

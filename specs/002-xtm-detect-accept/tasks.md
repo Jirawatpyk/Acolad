@@ -223,11 +223,11 @@ log โดยไม่ต้องมี Sheets/Chat)
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T049 [P] Failure-mode suite `tests/integration/failureModes.xtm.test.ts`:
+- [X] T049 [P] Failure-mode suite `tests/integration/failureModes.xtm.test.ts`:
       login fail (บัญชีแชร์→lockout), session expiry **กลางอ่าน & กลาง accept**
       (re-login เงียบ ไม่ alert), accept timeout, malformed rows quarantine, Sheets
       quota/auth, **restart กลาง accept** (re-read แล้วไม่กดซ้ำ) — Constitution II
-- [ ] T050 [P] extend `src/runtime/latencyReport.ts` + npm `report:latency`: วัด **2
+- [X] T050 [P] extend `src/runtime/latencyReport.ts` + npm `report:latency`: วัด **2
       เมตริกแยก (N1)** — (a) **click latency** detection→คลิกยืนยัน p95 ≤ 5 วิ
       (Constitution VIII, V16); (b) **outcome-confirmed latency** รวม FR-024 re-read,
       end-to-end ≤ 60 วิ (SC-003, V16b)
