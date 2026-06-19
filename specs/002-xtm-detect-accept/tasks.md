@@ -118,11 +118,11 @@ log โดยไม่ต้องมี Sheets/Chat)
 
 ### Tests for US1 (MANDATORY — Constitution II) ⚠️ เขียนก่อน ต้อง FAIL
 
-- [ ] T020 [P] [US1] `tests/unit/eligibility.test.ts`: exact match "Malay (Malaysia)",
+- [x] T020 [P] [US1] `tests/unit/eligibility.test.ts`: exact match "Malay (Malaysia)",
       config-driven list, ไม่ใช่มาเลย์ = ไม่ eligible
 - [ ] T021 [P] [US1] `tests/integration/accept.test.ts`: ตัดสินผลจาก **re-read
       Active (FR-024)** — accepted/missing/failed; bulk partial (รับบาง โดนแย่งบาง)
-- [ ] T022 [P] [US1] `tests/unit/acceptState.test.ts`: state machine
+- [x] T022 [P] [US1] `tests/unit/acceptState.test.ts`: state machine
       none→accepting→accepted/failed; at-most-once; restart กลาง accept ไม่กดซ้ำ
 - [ ] T023 [P] [US1] `tests/integration/coldStartAccept.test.ts`: กดรับงานมาเลย์ค้าง
       ที่ยังกดได้, ข้ามที่รับแล้ว, สรุปครั้งเดียว (FR-005)
@@ -131,12 +131,12 @@ log โดยไม่ต้องมี Sheets/Chat)
 
 ### Implementation for US1
 
-- [ ] T025 [P] [US1] `src/detection/eligibility.ts` (pure): map target_lang → eligible
+- [x] T025 [P] [US1] `src/detection/eligibility.ts` (pure): map target_lang → eligible
 - [ ] T026 [US1] `src/portal/xtmAccept.ts`: bulk "Accept all for language in group"
       + **FR-024 re-read** ตัดสินผลราย jobKey + timeout 15s + evidence on unconfirmed
       (re-read นับในงบ RateLimiter เดียวกัน — FR-027)
 - [ ] T027 [US1] เพิ่ม `acceptEligibleTasks()` ใน `src/portal/xtmClient.ts`
-- [ ] T028 [US1] accept_status state machine ใน `src/state/jobStore.ts` (txn guard
+- [x] T028 [US1] accept_status state machine ใน `src/state/jobStore.ts` (txn guard
       ก่อนกด — Constitution VII)
 - [ ] T029 [US1] accept orchestration ใน `src/runtime/pollLoop.ts`: detect→[eligible
       & ใหม่]→**accept ก่อน** log/แจ้ง→record (accept-first, POLL 20s, R7); **wire

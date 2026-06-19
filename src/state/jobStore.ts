@@ -1,6 +1,10 @@
 import type { DB } from './db.js';
 import type { JobState } from '../detection/types.js';
 
+export type AcceptStatus = 'none' | 'accepting' | 'accepted' | 'failed';
+/** Confirmed accept outcome (after the FR-024 re-read), mirrors AcceptResult. */
+export type AcceptOutcome = 'accepted' | 'missing' | 'failed';
+
 interface JobRow {
   job_key: string;
   portal_job_id: string | null;
@@ -46,6 +50,59 @@ export class JobStore {
         snapshot_hash=excluded.snapshot_hash, consecutive_misses=excluded.consecutive_misses
     `);
     for (const s of states) stmt.run(s);
+  }
+
+  // ── Accept state machine (FR-008, Constitution VII) ───────────────────────
+  // accept_status is separate from the diff's visible/missing status so a
+  // concurrent claim or a restart cannot cause a double accept.
+
+  /**
+   * Atomically claim a job for accepting. Succeeds ONLY when accept_status is
+   * 'none', flipping it to 'accepting' in a single statement — so two cycles
+   * racing, or a restart mid-flight, cannot both proceed to click Accept.
+   * Returns true iff this caller won the claim and should perform the accept.
+   */
+  claimForAccept(jobKey: string): boolean {
+    const r = this.db
+      .prepare("UPDATE jobs SET accept_status='accepting' WHERE job_key=? AND accept_status='none'")
+      .run(jobKey);
+    return r.changes === 1;
+  }
+
+  /**
+   * Record the confirmed outcome of an accept attempt (determined by the FR-024
+   * re-read of Active), updating accept_status, accepted_at, and lifecycle_status
+   * together. `missing` (snatched) resets accept_status to 'none' since the job
+   * was never actually accepted.
+   */
+  recordAcceptOutcome(jobKey: string, outcome: AcceptOutcome, at: string | null): void {
+    const map: Record<AcceptOutcome, { accept: AcceptStatus; lifecycle: string }> = {
+      accepted: { accept: 'accepted', lifecycle: 'accepted' },
+      missing: { accept: 'none', lifecycle: 'missing' },
+      failed: { accept: 'failed', lifecycle: 'accept_failed' },
+    };
+    const m = map[outcome];
+    this.db
+      .prepare('UPDATE jobs SET accept_status=?, accepted_at=?, lifecycle_status=? WHERE job_key=?')
+      .run(m.accept, outcome === 'accepted' ? at : null, m.lifecycle, jobKey);
+  }
+
+  getAcceptStatus(jobKey: string): AcceptStatus | undefined {
+    const r = this.db.prepare('SELECT accept_status FROM jobs WHERE job_key=?').get(jobKey) as
+      | { accept_status: AcceptStatus }
+      | undefined;
+    return r?.accept_status;
+  }
+
+  /**
+   * Recovery: a job left 'accepting' by a crash, whose FR-024 re-read shows it is
+   * still acceptable (not owned), is reset to 'none' so it can be retried. Only
+   * touches rows still in 'accepting' — never disturbs an 'accepted' job.
+   */
+  resetAcceptClaim(jobKey: string): void {
+    this.db
+      .prepare("UPDATE jobs SET accept_status='none' WHERE job_key=? AND accept_status='accepting'")
+      .run(jobKey);
   }
 }
 
