@@ -34,6 +34,7 @@ export class XtmPollLoop {
   private readonly cycle: XtmPollCycle;
   private readonly dispatcher: Dispatcher;
   private readonly heartbeat: HeartbeatPinger;
+  private readonly sheetSender: SheetSender | undefined;
   private loginFailures = 0;
   private lockoutUntilMs = 0;
   private firstPortalErrorMs = 0;
@@ -55,6 +56,7 @@ export class XtmPollLoop {
       new Heartbeat(cfg.HEALTHCHECKS_PING_URL, (e, action) =>
         logger.warn({ module: 'heartbeat', action, outcome: 'error', err: String(e) }),
       );
+    this.sheetSender = deps.sheetSender;
     const chatSender = deps.chatSender ?? new GoogleChatSender(cfg.GOOGLE_CHAT_WEBHOOK_SYSTEM);
     this.dispatcher = new Dispatcher(
       this.outbox,
@@ -98,6 +100,18 @@ export class XtmPollLoop {
     const startMs = this.clock.nowMs();
     try {
       await this.client.maybeRecycle();
+      // Proactively create the Sheet's v2 header on the first healthy cycle so an
+      // empty Active list still leaves a headed sheet (idempotent; never blocks
+      // detection — Constitution IV). A Sheets outage just retries next cycle.
+      if (this.sheetSender?.ensureReady) {
+        const ready = await this.sheetSender.ensureReady();
+        if (ready !== 'ok') {
+          this.logger.warn(
+            { module: 'xtmPollLoop', action: 'sheet_ensure', outcome: ready },
+            'sheet header not ensured yet (will retry next cycle)',
+          );
+        }
+      }
       const snapshot = await this.client.fetchJobSnapshot(pollCycleId);
       const summary = await this.cycle.run(snapshot);
       this.onCycleSuccess();

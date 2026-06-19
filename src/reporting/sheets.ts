@@ -139,24 +139,45 @@ export class SheetSink {
  */
 export interface SheetSender {
   send(row: SheetRow): Promise<SendOutcome>;
+  /**
+   * Best-effort: ensure the v2 header exists up front (once per process) so an
+   * empty Active list still leaves a headed sheet — without waiting for the first
+   * job. No-op after the first success. Called by the poll loop each cycle.
+   */
+  ensureReady?(): Promise<SendOutcome>;
+}
+
+/** googleapis error → dispatcher retry semantics: 401/403 permanent, else transient. */
+function classifyError(err: unknown): SendOutcome {
+  const code =
+    (err as { code?: number; status?: number }).code ?? (err as { status?: number }).status;
+  return code === 401 || code === 403 ? 'permanent' : 'transient';
 }
 
 export class GoogleSheetSender implements SheetSender {
   private headerEnsured = false;
   constructor(private readonly sink: SheetSink) {}
 
-  async send(row: SheetRow): Promise<SendOutcome> {
+  async ensureReady(): Promise<SendOutcome> {
     try {
       if (!this.headerEnsured) {
         await this.sink.ensureHeader();
         this.headerEnsured = true;
       }
+      return 'ok';
+    } catch (err) {
+      return classifyError(err);
+    }
+  }
+
+  async send(row: SheetRow): Promise<SendOutcome> {
+    const ready = await this.ensureReady();
+    if (ready !== 'ok') return ready; // header not in place yet → retry via outbox
+    try {
       await this.sink.upsertRow(row);
       return 'ok';
     } catch (err) {
-      const code =
-        (err as { code?: number; status?: number }).code ?? (err as { status?: number }).status;
-      return code === 401 || code === 403 ? 'permanent' : 'transient';
+      return classifyError(err);
     }
   }
 }

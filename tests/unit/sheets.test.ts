@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { SheetSink, V2_HEADER, type SheetsApi, type SheetRow } from '../../src/reporting/sheets.js';
+import {
+  SheetSink,
+  GoogleSheetSender,
+  V2_HEADER,
+  type SheetsApi,
+  type SheetRow,
+} from '../../src/reporting/sheets.js';
 
 /** In-memory fake of the row/header operations (rows[0] = header). */
 class FakeSheets implements SheetsApi {
@@ -115,5 +121,49 @@ describe('SheetSink.upsertRow (upsert by job_key, Constitution VII / FR-017)', (
     expect(api.rows[1]?.[4]).toBe(''); // source
     expect(api.rows[1]?.[7]).toBe(''); // words
     expect(api.rows[1]?.[11]).toBe('snatched'); // note col L
+  });
+});
+
+describe('GoogleSheetSender.ensureReady (proactive header so an empty sheet is still headed)', () => {
+  it('writes the v2 header up front with no data rows', async () => {
+    const api = new FakeSheets();
+    const sender = new GoogleSheetSender(new SheetSink(api));
+    expect(await sender.ensureReady()).toBe('ok');
+    expect(api.rows[0]).toEqual(V2_HEADER);
+    expect(api.rows).toHaveLength(1); // header only — no job logged
+  });
+
+  it('ensures the header only once per process (idempotent across ensureReady + send)', async () => {
+    const api = new FakeSheets();
+    let getHeaderCalls = 0;
+    const origGet = api.getHeader.bind(api);
+    api.getHeader = async () => {
+      getHeaderCalls++;
+      return origGet();
+    };
+    const sender = new GoogleSheetSender(new SheetSink(api));
+    await sender.ensureReady();
+    await sender.ensureReady();
+    await sender.send(row());
+    expect(getHeaderCalls).toBe(1); // header checked exactly once
+    expect(api.rows).toHaveLength(2); // header + the one upserted row
+  });
+
+  it('maps a 403 (permission) to permanent so the outbox does not silently drop it', async () => {
+    const api = new FakeSheets();
+    api.getHeader = async () => {
+      throw Object.assign(new Error('forbidden'), { code: 403 });
+    };
+    const sender = new GoogleSheetSender(new SheetSink(api));
+    expect(await sender.ensureReady()).toBe('permanent');
+  });
+
+  it('maps a 5xx/transient to transient (retry next cycle)', async () => {
+    const api = new FakeSheets();
+    api.getHeader = async () => {
+      throw Object.assign(new Error('backend error'), { code: 503 });
+    };
+    const sender = new GoogleSheetSender(new SheetSink(api));
+    expect(await sender.ensureReady()).toBe('transient');
   });
 });

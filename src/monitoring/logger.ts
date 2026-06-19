@@ -56,10 +56,16 @@ export function createLogger(cfg: AppConfig): Logger {
     transport,
   );
 
+  // pino's `formatters.log` scrubs the object FIELDS, but the message string (2nd
+  // arg) bypasses it — and that is exactly where a Playwright error echoes a
+  // `.fill("<password>")` call. Mask the message here too so no secret can leak
+  // through a logged error message (FR-012, Constitution V — defense in depth).
+  const mask = (msg?: string): string | undefined =>
+    msg === undefined ? undefined : maskString(msg, secrets);
   return {
-    info: (fields, msg) => logger.info(fields, msg),
-    warn: (fields, msg) => logger.warn(fields, msg),
-    error: (fields, msg) => logger.error(fields, msg),
+    info: (fields, msg) => logger.info(fields, mask(msg)),
+    warn: (fields, msg) => logger.warn(fields, mask(msg)),
+    error: (fields, msg) => logger.error(fields, mask(msg)),
   };
 }
 

@@ -74,8 +74,13 @@ const okChat: ChatSender = {
 };
 class CapturingSheet implements SheetSender {
   rows: SheetRow[] = [];
+  ready = 0;
   async send(row: SheetRow): Promise<SendOutcome> {
     this.rows.push(row);
+    return 'ok';
+  }
+  async ensureReady(): Promise<SendOutcome> {
+    this.ready++;
     return 'ok';
   }
 }
@@ -114,6 +119,21 @@ describe('XtmPollLoop (runtime driver)', () => {
     expect(heartbeat.ok).toHaveBeenCalledTimes(1);
     expect(heartbeat.fail).not.toHaveBeenCalled();
     expect(sheet.rows.length).toBeGreaterThanOrEqual(1); // job logged to Sheets
+  });
+
+  it('ensures the Sheet header even when Active is empty (no jobs → still headed)', async () => {
+    fresh();
+    const client = new StubClient(); // default snapshot = snap([]) → empty Active
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const sheet = new CapturingSheet();
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: okChat,
+      sheetSender: sheet,
+      heartbeat,
+    });
+    expect(await loop.runOnce()).toBe(true);
+    expect(sheet.ready).toBe(1); // header ensured up front...
+    expect(sheet.rows.length).toBe(0); // ...without any job row written
   });
 
   it('on a portal error returns false and pings heartbeat fail (dead-man switch)', async () => {
