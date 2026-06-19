@@ -1,0 +1,197 @@
+import type { Frame, Page } from 'playwright';
+import { z } from 'zod';
+import { XTM } from './selectors.js';
+import { LayoutChangedError, PortalTimeoutError } from './errors.js';
+import type { XtmRawJob, XtmJobSnapshot } from '../detection/types.js';
+
+/**
+ * Either a Page or a Frame works — production reads the Active grid inside
+ * `iframe#myInboxIframe` (a Frame); tests load a fixture into a Page. Both expose
+ * `.locator()`, which is all this parser needs.
+ */
+export type GridScope = Frame | Page;
+
+/** Minimal structural DOM shape — avoids pulling the whole DOM lib into Node. */
+interface Queryable {
+  querySelector(q: string): { textContent: string | null } | null;
+}
+
+export interface XtmReadTimeoutsMs {
+  /** Wait for the grid container / state marker to attach. */
+  settle: number;
+  /** Wait for the first row to attach once the container is present. */
+  content: number;
+}
+
+const DEFAULT_READ_TIMEOUTS: XtmReadTimeoutsMs = { settle: 15_000, content: 10_000 };
+
+// project_name + file_name MUST be present (else quarantine, FR-022). Everything
+// else is best-effort/nullable so a missing optional column never drops a job.
+const rawXtmJobSchema = z.object({
+  projectName: z.string().trim().min(1),
+  fileName: z.string().trim().min(1),
+  xtmTaskId: z.string().trim().min(1).nullable(),
+  sourceLang: z.string().trim().min(1).nullable(),
+  targetLang: z.string().trim().min(1).nullable(),
+  dueDate: z.string().nullable(),
+  dueRaw: z.string().nullable(),
+  words: z.number().int().nonnegative().nullable(),
+  step: z.string().trim().min(1).nullable(),
+  role: z.string().trim().min(1).nullable(),
+  acceptAvailable: z.boolean(),
+});
+
+/** Digits-only word count ("1,200" / "37 words" -> number); null when absent. */
+export function parseXtmWords(raw: string | null): number | null {
+  if (!raw) return null;
+  const digits = raw.replace(/[^\d]/g, '');
+  if (digits === '') return null;
+  const n = Number(digits);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Pull the XTM `ID-<hex>` token out of the File cell (reference only — not the key). */
+export function extractXtmTaskId(fileCell: string | null): string | null {
+  if (!fileCell) return null;
+  const m = fileCell.match(/ID-([0-9a-z]+)/i);
+  return m ? `ID-${m[1]}` : null;
+}
+
+/** Best-effort ISO-8601 +07:00 normalization of the Due cell; null when unparseable. */
+export function normalizeXtmDue(raw: string | null): string | null {
+  if (!raw) return null;
+  const t = Date.parse(raw);
+  if (Number.isNaN(t)) return null;
+  const d = new Date(t + 7 * 3_600_000);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}:${p(d.getUTCMinutes())}+07:00`;
+}
+
+/** Total item count from the footer ("1 - 2 of 2" -> 2); null when unparseable. */
+export function parseItemsTotal(footer: string | null): number | null {
+  if (!footer) return null;
+  // Digits only so the locale word ("of"/"von"/...) never matters.
+  const m = footer.match(/(\d+)\s*-\s*(\d+)\D+(\d+)/);
+  return m ? Number(m[3]) : null;
+}
+
+/**
+ * Read the Active (IN_PROGRESS) task grid from the inbox frame (contracts/
+ * xtm-portal-adapter.md). Fails loud (LayoutChangedError) when the structural
+ * container / state marker is missing — the line between "genuinely empty" and
+ * "failed to read" (FR-016). Uses the items-count footer to tell a truly empty
+ * tab (total 0) from a still-loading one (total > 0 but no rows yet → transient).
+ */
+export async function readActiveSnapshot(
+  scope: GridScope,
+  pollCycleId: string,
+  capturedAt: string,
+  captureEvidence: (reason: string) => Promise<string | undefined>,
+  timeouts: XtmReadTimeoutsMs = DEFAULT_READ_TIMEOUTS,
+): Promise<XtmJobSnapshot> {
+  const container = scope.locator(XTM.active.gridContainer).first();
+
+  await scope
+    .locator(`${XTM.active.gridContainer}, ${XTM.active.stateMarker}`)
+    .first()
+    .waitFor({ state: 'attached', timeout: timeouts.settle })
+    .catch(() => undefined);
+
+  // The grid container AND the ACTIVE state marker must both be present, else we
+  // cannot trust we are reading the right tab — fail loud rather than guess.
+  const onActive = (await scope.locator(XTM.active.stateMarker).count()) > 0;
+  if ((await container.count()) === 0 || !onActive) {
+    const evidencePath = await captureEvidence('layout_changed');
+    throw new LayoutChangedError(
+      'XTM Active grid container or ACTIVE state marker not found',
+      evidencePath,
+    );
+  }
+
+  await scope
+    .locator(`${XTM.active.gridContainer} tbody tr`)
+    .first()
+    .waitFor({ state: 'attached', timeout: timeouts.content })
+    .catch(() => undefined);
+
+  // Scrape data rows only — rows that carry the per-row kebab (header/placeholder
+  // rows do not), keyed by fixed column position (locale- and hash-independent).
+  const scraped = await scope.locator(`${XTM.active.gridContainer} tbody tr`).evaluateAll(
+    (rows, sel) => {
+      const text = (el: Queryable, q: string): string | null => {
+        const n = el.querySelector(q);
+        return n && n.textContent ? n.textContent.trim() : null;
+      };
+      return (rows as unknown as Queryable[])
+        .filter((r) => r.querySelector(sel.kebab) !== null)
+        .map((el) => ({
+          project: text(el, sel.project),
+          file: text(el, sel.file),
+          source: text(el, sel.source),
+          target: text(el, sel.target),
+          dueRaw: text(el, sel.due),
+          step: text(el, sel.step),
+          role: text(el, sel.role),
+          wordsRaw: text(el, sel.words),
+        }));
+    },
+    {
+      kebab: XTM.active.rowKebab,
+      project: XTM.active.cell.project,
+      file: XTM.active.cell.file,
+      source: XTM.active.cell.source,
+      target: XTM.active.cell.target,
+      due: XTM.active.cell.dueDate,
+      step: XTM.active.cell.step,
+      role: XTM.active.cell.role,
+      words: XTM.active.cell.words,
+    },
+  );
+
+  const jobs: XtmRawJob[] = [];
+  const malformed: unknown[] = [];
+  for (const row of scraped) {
+    const candidate = {
+      projectName: row.project,
+      fileName: row.file,
+      xtmTaskId: extractXtmTaskId(row.file),
+      sourceLang: row.source,
+      targetLang: row.target,
+      dueDate: normalizeXtmDue(row.dueRaw),
+      dueRaw: row.dueRaw,
+      words: parseXtmWords(row.wordsRaw),
+      step: row.step,
+      role: row.role,
+      // The grid cannot reliably show acceptability (D6); the accept step gates on
+      // the row menu showing "Accept task" at accept time. Optimistic here.
+      acceptAvailable: true,
+    };
+    const parsed = rawXtmJobSchema.safeParse(candidate);
+    if (parsed.success) jobs.push(parsed.data);
+    else malformed.push(row);
+  }
+
+  // Disambiguate empty vs still-loading via the authoritative count footer.
+  if (jobs.length === 0 && malformed.length === 0) {
+    const footer = await scope
+      .locator(XTM.active.itemsCount)
+      .first()
+      .textContent()
+      .catch(() => null);
+    const total = parseItemsTotal(footer);
+    if (total === null) {
+      const evidencePath = await captureEvidence('layout_changed');
+      throw new LayoutChangedError(
+        'Active grid present but no rows and no items-count footer',
+        evidencePath,
+      );
+    }
+    if (total > 0) {
+      // Footer claims rows but none rendered yet — transient, retry next cycle.
+      throw new PortalTimeoutError('Active grid loaded but rows not present yet (count > 0)');
+    }
+    return { jobs, malformed, capturedAt, pollCycleId, emptyListConfirmed: true };
+  }
+
+  return { jobs, malformed, capturedAt, pollCycleId, emptyListConfirmed: false };
+}

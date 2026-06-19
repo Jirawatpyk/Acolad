@@ -83,6 +83,10 @@ export const SELECTORS = {
 export const XTM = {
   base: 'https://xtm.acolad.com/project-manager-gui',
 
+  // Human-verification challenge — XTM has is2FAEnabled=false today, but if any
+  // CAPTCHA/2FA ever appears we refuse to proceed (no auto-bypass, Constitution VI).
+  challenge: 'iframe[src*="recaptcha"], iframe[title*="captcha" i], [data-test*="2fa" i], #captcha',
+
   // ── Login (outer page; AngularJS, client-side rendered) ───────────────────
   login: {
     appShell: '[ng-app="xtm.login"]',

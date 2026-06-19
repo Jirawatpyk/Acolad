@@ -88,18 +88,18 @@ Single project ตาม plan.md: `src/`, `tests/` ที่ root
 - [x] T012 สร้าง selector registry `src/portal/selectors.ts` ของ XTM จาก evidence
       T006: login fields, Active table/row/columns, เมนู Accept, marker สำเร็จ,
       marker Closed (รวมศูนย์ไฟล์เดียว R9) — **depends on T006**
-- [ ] T013 (TDD) `tests/integration/xtmLogin.test.ts` ก่อน — login สำเร็จ,
+- [x] T013 (TDD) `tests/integration/xtmLogin.test.ts` ก่อน — login สำเร็จ,
       ตรวจ logged-out, CAPTCHA→error, layout→evidence (fixtures T006)
-- [ ] T014 implement `src/portal/xtmLogin.ts`: company/user/pass `.jsp`, detect
+- [x] T014 implement `src/portal/xtmLogin.ts`: company/user/pass `.jsp`, detect
       logged-out, CAPTCHA guard, retry/lockout, evidence on layout change
-- [ ] T015 (TDD) `tests/integration/xtmInbox.test.ts` ก่อน — parse Active, หลายแถว/
+- [x] T015 (TDD) `tests/integration/xtmInbox.test.ts` ก่อน — parse Active, หลายแถว/
       ไฟล์, malformed→quarantine, empty confirmed (marker), layout→LayoutChangedError
-- [ ] T016 implement `src/portal/xtmInbox.ts`: อ่าน Active → `JobSnapshot` (zod
+- [x] T016 implement `src/portal/xtmInbox.ts`: อ่าน Active → `JobSnapshot` (zod
       RawJob + `acceptAvailable`), helper อ่าน Closed (targeted), evidence on layout
 - [x] T017 [P] (TDD) `tests/unit/jobKey.test.ts` ก่อน — composite `fileId|step|role`
       unique ข้าม step/role, normalize deterministic
 - [x] T018 [P] extend `src/detection/jobKey.ts`: composite key ของ XTM (R3)
-- [ ] T019 ประกอบ `src/portal/xtmClient.ts` implements `XtmPortalClient`
+- [x] T019 ประกอบ `src/portal/xtmClient.ts` implements `XtmPortalClient`
       (ensureLoggedIn/fetchJobSnapshot/dispose) wiring browser(reuse)+login+inbox
 
 **Checkpoint**: login + อ่าน Active/Closed เป็น JobSnapshot ได้จาก fixtures;
