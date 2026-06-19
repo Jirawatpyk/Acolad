@@ -1,16 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { loadConfig, secretValues } from '../../src/config/index.js';
 
-/**
- * Minimal valid env for 002. Includes the transitional partner (ACOLAD_*) keys
- * which remain required until the partner code is removed (T052, expand-then-
- * contract), plus the new XTM / Sheets required keys.
- */
+/** Minimal valid env for 002 (XTM + Sheets + shared required keys). */
 const base = {
-  // partner portal (001) — transitional, still required until T052
-  ACOLAD_PORTAL_URL: 'https://partner.acolad.com/login',
-  ACOLAD_EMAIL: 'team@example.com',
-  ACOLAD_PASSWORD: 'secret-pw',
   // XTM Cloud (002 target)
   XTM_ACOLAD_PORTAL_URL: 'https://www.xtm-cloud.com/project-manager-ui/login.jsp',
   XTM_ACOLAD_OFFERS_URL: 'https://www.xtm-cloud.com/project-manager-ui/',
@@ -39,11 +31,6 @@ describe('loadConfig', () => {
     expect(cfg.ACCEPT_MAX_WORDS).toBe(0);
     expect(cfg.ACCEPT_MAX_PER_CYCLE).toBe(0);
     expect(cfg.GOOGLE_SERVICE_ACCOUNT_KEY_PATH).toBe('google-credentials.json');
-  });
-
-  it('names the offending variable when a required partner one is missing', () => {
-    const { ACOLAD_PASSWORD: _omit, ...rest } = base;
-    expect(() => loadConfig(rest)).toThrow(/ACOLAD_PASSWORD/);
   });
 
   it('names the offending variable when a required XTM one is missing', () => {

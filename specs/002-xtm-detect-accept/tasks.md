@@ -234,7 +234,7 @@ log โดยไม่ต้องมี Sheets/Chat)
 - [x] T051 [P] `src/runtime/catchRateReport.ts` + npm `report:catch-rate`: SC-001
       (Accepted ÷ Accepted+Missing+Accept failed บนมาเลย์ จากชีต) + SC-009
       reconciliation รายสัปดาห์
-- [ ] T052 [P] ลบโค้ด partner-portal ที่เลิกใช้ (`src/portal/login.ts`,
+- [x] T052 [P] ลบโค้ด partner-portal ที่เลิกใช้ (`src/portal/login.ts`,
       `jobList.ts` เวอร์ชัน partner) — ไม่เหลือ dead code (Constitution I)
 - [ ] T053 [P] [ops] อัปเดต `.env` จริงจาก partner→XTM + แชร์ชีตให้ service account
       (Editor) + map `SHEETS_TAB_NAME`/gid (D7)

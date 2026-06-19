@@ -30,7 +30,7 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     title: 'เข้าสู่ระบบไม่สำเร็จ',
     impact: 'หยุดเฝ้างานชั่วคราว (lockout)',
     action:
-      'ลอง login ด้วยมือ; ถ้ารหัสผ่านเปลี่ยน แก้ ACOLAD_PASSWORD ใน .env แล้ว pm2 restart acolad-bot',
+      'ลอง login ด้วยมือ; ถ้ารหัสผ่านเปลี่ยน แก้ XTM_ACOLAD_Password ใน .env แล้ว pm2 restart acolad-bot',
     hasRecovered: true,
   },
   captcha: {

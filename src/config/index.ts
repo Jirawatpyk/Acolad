@@ -9,20 +9,8 @@ loadDotenv();
  * schema level to [20000, 25000] so interval + jitter stays within [20s, 30s]
  * (FR-003) and no faster than 20s between requests (FR-011). 002 defaults the
  * poll to the 20s floor to win the <1min snatch window (R7).
- *
- * The partner-portal keys (ACOLAD_*) are transitional: still required so the
- * 001 partner code keeps compiling/running until it is removed in T052
- * (expand-then-contract). The XTM_* keys are the live 002 target.
  */
 const schema = z.object({
-  // --- Partner portal (001) — DEPRECATED, transitional until T052 ---
-  ACOLAD_PORTAL_URL: z.string().url(),
-  ACOLAD_OFFERS_URL: z
-    .string()
-    .url()
-    .default('https://partner.acolad.com/project/offer/list/pending?view=card&grouped=false'),
-  ACOLAD_EMAIL: z.string().min(1),
-  ACOLAD_PASSWORD: z.string().min(1),
   // --- XTM Cloud (002 target) ---
   XTM_ACOLAD_PORTAL_URL: z.string().url(),
   XTM_ACOLAD_OFFERS_URL: z.string().url(),
@@ -73,8 +61,6 @@ export type AppConfig = z.infer<typeof schema>;
 
 /** Variable names that MUST never appear in logs/alerts/evidence (FR-012). */
 export const SECRET_KEYS = [
-  'ACOLAD_PASSWORD',
-  'ACOLAD_EMAIL',
   'XTM_ACOLAD_Password',
   'XTM_ACOLAD_Username',
   'XTM_ACOLAD_Company',

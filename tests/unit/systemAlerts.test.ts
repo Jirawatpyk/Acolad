@@ -29,7 +29,7 @@ describe('raiseAlert', () => {
     const text = (JSON.parse(due[0]!.payload_json) as { text: string }).text;
     expect(text).toContain('🚨 [CRITICAL]');
     expect(text).toContain('ต้องทำ:');
-    expect(text).toContain('ACOLAD_PASSWORD');
+    expect(text).toContain('XTM_ACOLAD_Password');
   });
 
   it('dedupes a second active alert of the same kind', () => {
