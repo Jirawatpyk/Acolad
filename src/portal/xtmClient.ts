@@ -174,6 +174,15 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     const handle = await page.waitForSelector(XTM.iframe.el, { timeout: 20_000 });
     const frame = await handle.contentFrame();
     if (!frame) throw new LayoutChangedError('inbox iframe present but has no content frame');
+    // The iframe element mounts immediately but navigates to its grid asynchronously
+    // (we load with domcontentloaded, which does not wait for it). Wait for the grid
+    // to actually render inside before reading/clicking — otherwise, esp. right after
+    // a fresh login, the marker/grid is briefly absent and the read fails loud.
+    await frame
+      .locator(XTM.active.gridLoadedMarker)
+      .first()
+      .waitFor({ state: 'attached', timeout: 20_000 })
+      .catch(() => undefined);
     // The inbox defaults to Active, but be explicit: if the ACTIVE marker is not
     // present, click the Active tab (keyed off aria-controls, not display text).
     if ((await frame.locator(XTM.active.stateMarker).count()) === 0) {
