@@ -7,9 +7,11 @@ import type { XtmJobSnapshot } from '../detection/types.js';
 import { BrowserSession } from './browser.js';
 import { performXtmLogin, isXtmLoggedOut, type XtmCredentials } from './xtmLogin.js';
 import { readActiveSnapshot } from './xtmInbox.js';
+import { acceptEligibleTasks } from './xtmAccept.js';
 import { captureEvidence } from './evidence.js';
 import { XTM } from './selectors.js';
 import { LayoutChangedError, SessionExpiredError } from './errors.js';
+import type { AcceptTarget, AcceptResult } from './errors.js';
 
 /**
  * The single surface the orchestrator uses to talk to XTM (contracts/
@@ -21,6 +23,8 @@ export interface XtmPortalClient {
   ensureLoggedIn(): Promise<void>;
   /** Read the current Active (IN_PROGRESS) task list once. */
   fetchJobSnapshot(pollCycleId: string): Promise<XtmJobSnapshot>;
+  /** Bulk-accept eligible (Malay) tasks; outcome per job from the FR-024 re-read. */
+  acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]>;
   /** Recycle the browser if its scheduled lifetime elapsed (Constitution VIII). */
   maybeRecycle(): Promise<void>;
   dispose(): Promise<void>;
@@ -81,6 +85,30 @@ export class PlaywrightXtmClient implements XtmPortalClient {
       }
       throw err;
     }
+  }
+
+  async acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]> {
+    if (targets.length === 0) return [];
+    const page = await this.browser.page();
+    const frame = await this.activeFrame(page);
+    const secrets = secretValues(this.cfg);
+    const evidence = (reason: string): Promise<string | undefined> =>
+      captureEvidence(page, this.cfg.STATE_DIR, reason, this.clock.nowIso(), secrets);
+    return acceptEligibleTasks(frame, targets, {
+      // FR-027: the post-accept re-read counts against the same rate budget.
+      reReadActive: async () => {
+        this.rate.record(this.clock.nowMs());
+        const snap = await readActiveSnapshot(
+          frame,
+          `reread-${this.clock.nowIso()}`,
+          this.clock.nowIso(),
+          evidence,
+        );
+        return snap.jobs;
+      },
+      captureEvidence: evidence,
+      nowIso: () => this.clock.nowIso(),
+    });
   }
 
   async maybeRecycle(): Promise<void> {

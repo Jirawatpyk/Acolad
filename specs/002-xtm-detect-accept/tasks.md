@@ -120,32 +120,32 @@ log โดยไม่ต้องมี Sheets/Chat)
 
 - [x] T020 [P] [US1] `tests/unit/eligibility.test.ts`: exact match "Malay (Malaysia)",
       config-driven list, ไม่ใช่มาเลย์ = ไม่ eligible
-- [ ] T021 [P] [US1] `tests/integration/accept.test.ts`: ตัดสินผลจาก **re-read
+- [x] T021 [P] [US1] `tests/integration/accept.test.ts`: ตัดสินผลจาก **re-read
       Active (FR-024)** — accepted/missing/failed; bulk partial (รับบาง โดนแย่งบาง)
 - [x] T022 [P] [US1] `tests/unit/acceptState.test.ts`: state machine
       none→accepting→accepted/failed; at-most-once; restart กลาง accept ไม่กดซ้ำ
-- [ ] T023 [P] [US1] `tests/integration/coldStartAccept.test.ts`: กดรับงานมาเลย์ค้าง
+- [x] T023 [P] [US1] `tests/integration/coldStartAccept.test.ts`: กดรับงานมาเลย์ค้าง
       ที่ยังกดได้, ข้ามที่รับแล้ว, สรุปครั้งเดียว (FR-005)
-- [ ] T024 [P] [US1] `tests/integration/acceptControl.test.ts`: `ACCEPT_ENABLED=0`
+- [x] T024 [P] [US1] `tests/integration/acceptControl.test.ts`: `ACCEPT_ENABLED=0`
       → ไม่กด; caps (MAX_WORDS/PER_CYCLE) → Skipped + แจ้ง (FR-012/025)
 
 ### Implementation for US1
 
 - [x] T025 [P] [US1] `src/detection/eligibility.ts` (pure): map target_lang → eligible
-- [ ] T026 [US1] `src/portal/xtmAccept.ts`: bulk "Accept all for language in group"
+- [x] T026 [US1] `src/portal/xtmAccept.ts`: bulk "Accept all for language in group"
       + **FR-024 re-read** ตัดสินผลราย jobKey + timeout 15s + evidence on unconfirmed
       (re-read นับในงบ RateLimiter เดียวกัน — FR-027)
-- [ ] T027 [US1] เพิ่ม `acceptEligibleTasks()` ใน `src/portal/xtmClient.ts`
+- [x] T027 [US1] เพิ่ม `acceptEligibleTasks()` ใน `src/portal/xtmClient.ts`
 - [x] T028 [US1] accept_status state machine ใน `src/state/jobStore.ts` (txn guard
       ก่อนกด — Constitution VII)
-- [ ] T029 [US1] accept orchestration ใน `src/runtime/pollLoop.ts`: detect→[eligible
+- [x] T029 [US1] accept orchestration ใน `src/runtime/pollLoop.ts`: detect→[eligible
       & ใหม่]→**accept ก่อน** log/แจ้ง→record (accept-first, POLL 20s, R7); **wire
       RateLimiter (reuse `src/runtime/rateLimiter.ts`) ให้ครอบทุก read ในรอบ — Active
       read + FR-024 re-read + FR-014 Closed-check — ไม่ให้เกินเพดาน (FR-027, N2)**;
       re-login ≤ 1 ครั้ง/รอบ (FR-021)
-- [ ] T030 [US1] cold-start accept (FR-005) ใน `src/runtime/{pollLoop,bootstrap}.ts`:
+- [x] T030 [US1] cold-start accept (FR-005) ใน `src/runtime/{pollLoop,bootstrap}.ts`:
       baseline + กดรับงานค้างที่ยังกดได้ (fallback baseline-only ถ้าแยกไม่ได้)
-- [ ] T031 [US1] kill-switch + caps ใน pollLoop: `ACCEPT_ENABLED`, `ACCEPT_MAX_WORDS`,
+- [x] T031 [US1] kill-switch + caps ใน pollLoop: `ACCEPT_ENABLED`, `ACCEPT_MAX_WORDS`,
       `ACCEPT_MAX_PER_CYCLE` (default ไม่จำกัด) → เกิน=Skipped+แจ้ง (FR-025)
 - [ ] T032 [US1] accept_failed → system alert (reuse `src/state/systemEvents.ts` +
       evidence ref) — Constitution V (ห้ามเงียบ)
