@@ -163,23 +163,23 @@ log โดยไม่ต้องมี Sheets/Chat)
 
 ### Tests for US2 (MANDATORY — Constitution II) ⚠️ เขียนก่อน ต้อง FAIL
 
-- [ ] T033 [P] [US2] `tests/unit/sheets.test.ts` (mock googleapis): append `New`,
+- [x] T033 [P] [US2] `tests/unit/sheets.test.ts` (mock googleapis): append `New`,
       `updateRow` by job_key in place, ไม่มีแถวซ้ำ
-- [ ] T034 [P] [US2] `tests/unit/sheetsHeader.test.ts`: ensureHeader v1→v2 เติม I–M
+- [x] T034 [P] [US2] `tests/unit/sheetsHeader.test.ts`: ensureHeader v1→v2 เติม I–M
       ไม่ย้ายของเดิม, header แปลก→alert ไม่ทับ (contracts/sheets.md)
 - [ ] T035 [P] [US2] `tests/integration/sheetsLifecycle.test.ts`: New→Accepted/
       Missing/Skipped/Accept failed→Closed/Removed sync ลงชีต — **ใช้ fixture สถานะ
       ไม่เรียก accept จริง (คงความอิสระจาก US1, N6)**
 - [ ] T036 [P] [US2] `tests/integration/closedCheck.test.ts`: accepted หายจาก Active
       → เช็ค Closed → `Closed` (เจอ)/`Removed` (ไม่เจอ) (FR-014)
-- [ ] T037 [P] [US2] `tests/unit/sheetsHistorical.test.ts`: แถวเดิมไม่มี job_key =
+- [x] T037 [P] [US2] `tests/unit/sheetsHistorical.test.ts`: แถวเดิมไม่มี job_key =
       historical → ไม่ claim/ไม่ update (FR-026)
 - [ ] T038 [P] [US2] `tests/integration/sheetsOutbox.test.ts`: Sheets 5xx → outbox
       retry, ฟื้นแล้วครบ ไม่ซ้ำ, accept ไม่ถูกบล็อก (FR-018, Constitution IV)
 
 ### Implementation for US2
 
-- [ ] T039 [US2] `src/reporting/sheets.ts`: `SheetSink` (ensureHeader/appendRow/
+- [x] T039 [US2] `src/reporting/sheets.ts`: `SheetSink` (ensureHeader/appendRow/
       updateRow upsert by job_key) ผ่าน googleapis service account, scope spreadsheets
 - [ ] T040 [US2] outbox channel `'sheets'` + routing ใน `src/reporting/dispatcher.ts`
       (payload append/update) — reuse retry/backoff เดิม
@@ -188,7 +188,7 @@ log โดยไม่ต้องมี Sheets/Chat)
 - [ ] T042 [US2] Closed-tab targeted check → Closed/Removed (FR-014) ใน pollLoop ใช้
       `xtmInbox.readClosed` (เฉพาะตอน accepted หายจาก Active ≥ 2 รอบ; นับในงบ
       RateLimiter — FR-027)
-- [ ] T043 [US2] FR-026 historical-rows guard ใน `src/reporting/sheets.ts`
+- [x] T043 [US2] FR-026 historical-rows guard ใน `src/reporting/sheets.ts`
 
 **Checkpoint**: US1 + US2 ทำงานจบอิสระ — ทุกงานลงชีต + สถานะครบวงจร
 
