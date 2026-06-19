@@ -162,6 +162,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     this.rate.record(this.clock.nowMs());
     await this.ops.login(page, {
       loginUrl: this.cfg.XTM_ACOLAD_PORTAL_URL,
+      company: this.cfg.XTM_ACOLAD_Company,
       username: this.cfg.XTM_ACOLAD_Username,
       password: this.cfg.XTM_ACOLAD_Password,
     });

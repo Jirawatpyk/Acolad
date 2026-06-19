@@ -4,6 +4,7 @@ import { CaptchaDetectedError, LoginFailedError } from './errors.js';
 
 export interface XtmCredentials {
   loginUrl: string;
+  company: string;
   username: string;
   password: string;
 }
@@ -25,16 +26,17 @@ export async function hasXtmChallenge(page: Page): Promise<boolean> {
 
 /**
  * Perform the XTM login flow (AngularJS SPA, contracts/xtm-portal-adapter.md).
- * The client/company field is pre-set (multitenant default AMPLEXOR) so only
- * username + password are typed. A successful login client-side routes away
- * from login.jsp to the inbox; staying on the login page means the credentials
- * were rejected (LoginFailedError). A challenge at any point stops the flow.
+ * The rendered form has THREE visible fields — company (client), username,
+ * password — all empty; all three are typed (the client field is NOT pre-filled).
+ * A successful login client-side routes away from login.jsp to the inbox; staying
+ * on the login page means the credentials were rejected (LoginFailedError). A
+ * challenge at any point stops the flow.
  *
  * Idempotent: if called when already authenticated it returns immediately.
  */
 export async function performXtmLogin(page: Page, creds: XtmCredentials): Promise<void> {
   await page.goto(creds.loginUrl, { waitUntil: 'domcontentloaded' });
-  // Let the SPA render the login form (the ui-view is empty until JS runs).
+  // Let the SPA render the login form (the ui-view template loads via XHR).
   await page
     .locator(XTM.login.password)
     .first()
@@ -48,6 +50,7 @@ export async function performXtmLogin(page: Page, creds: XtmCredentials): Promis
   // Already authenticated (no login shell) — nothing to do.
   if (!(await isXtmLoggedOut(page))) return;
 
+  await page.locator(XTM.login.client).first().fill(creds.company);
   await page.locator(XTM.login.username).first().fill(creds.username);
   await page.locator(XTM.login.password).first().fill(creds.password);
   // AngularJS controlled inputs need a tick to commit before the submit handler

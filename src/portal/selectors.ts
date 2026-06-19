@@ -92,14 +92,15 @@ export const XTM = {
     appShell: '[ng-app="xtm.login"]',
     view: '.login-view', // ui-view target where the form renders
     submitEndpoint: '/project-manager-gui/login.serv',
-    // UNCONFIRMED — FAIL LOUD: the form body (views/xtm-login/loginForm.html)
-    // renders via XHR and was not captured, so the exact field ids/ng-models
-    // are unknown. Wait for the password field; if neither candidate matches,
-    // alert + dump the rendered DOM. Do NOT guess-fill. client=AMPLEXOR is a
-    // pre-set hidden field (multitenant) — do NOT type it. is2FAEnabled=false.
-    password: '.login-view input[type="password"], [ng-model$="assword" i]',
-    username:
-      '.login-view input[type="text"]:not([readonly]), [ng-model$="sername" i], [ng-model$="serName" i]',
+    // Real rendered form (captured 2026-06-19 via scripts/capture-login-dom.ts):
+    // the .login-view template loads via XHR and exposes THREE visible fields, each
+    // with a stable id/name — client, username, password. The client field is NOT
+    // pre-filled; it must be typed with XTM_ACOLAD_Company (AMPLEXOR). Target by id
+    // (never positional .first() — the first visible text input is `client`, not
+    // `username`, which silently mis-fills and gets the login rejected).
+    client: '#client, input[name="client"], [ng-model="loginFormCtrl.formModel.client"]',
+    username: '#username, input[name="username"], [ng-model="loginFormCtrl.formModel.username"]',
+    password: '#password, input[name="password"], [ng-model="loginFormCtrl.formModel.password"]',
     submit: '.login-view button[type="submit"], .login-view input[type="submit"]',
   },
 
