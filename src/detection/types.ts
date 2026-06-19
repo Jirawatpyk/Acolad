@@ -45,16 +45,13 @@ export interface JobSnapshot {
   emptyListConfirmed: boolean;
 }
 
-/** Persisted state of a job between poll cycles. */
-export interface JobState {
+/**
+ * The appearance bookkeeping every persisted job state carries (owned by diff).
+ * Both the partner JobState and XtmJobState extend this so the diff algorithm is
+ * generic over the portal-specific fields.
+ */
+export interface BaseJobState {
   jobKey: string;
-  portalJobId: string | null;
-  title: string;
-  languagePair: string | null;
-  deadline: string | null;
-  deadlineRaw: string | null;
-  fee: string | null;
-  url: string | null;
   status: 'visible' | 'missing';
   firstSeenAt: string;
   lastSeenAt: string;
@@ -62,18 +59,60 @@ export interface JobState {
   consecutiveMisses: number;
 }
 
+/** Persisted state of a partner-portal job between poll cycles. */
+export interface JobState extends BaseJobState {
+  portalJobId: string | null;
+  title: string;
+  languagePair: string | null;
+  deadline: string | null;
+  deadlineRaw: string | null;
+  fee: string | null;
+  url: string | null;
+}
+
+export type XtmLifecycleStatus =
+  | 'new'
+  | 'accepted'
+  | 'skipped'
+  | 'missing'
+  | 'accept_failed'
+  | 'closed'
+  | 'removed';
+
+export type XtmAcceptStatus = 'none' | 'accepting' | 'accepted' | 'failed';
+
+/** Persisted state of an XTM job between poll cycles (appearance + business fields). */
+export interface XtmJobState extends BaseJobState {
+  xtmTaskId: string | null;
+  projectName: string;
+  fileName: string;
+  sourceLang: string | null;
+  targetLang: string | null;
+  dueDate: string | null;
+  dueRaw: string | null;
+  words: number | null;
+  step: string | null;
+  role: string | null;
+  eligible: boolean;
+  lifecycleStatus: XtmLifecycleStatus;
+  acceptStatus: XtmAcceptStatus;
+  acceptedAt: string | null;
+}
+
 export type AppearanceEventType = 'first_seen' | 'relisted' | 'missing' | 'cold_start';
 
-export interface AppearanceEvent {
+/** An appearance event, generic over the job-state shape it carries. */
+export interface AppearanceEventOf<S> {
   jobKey: string;
   eventType: AppearanceEventType;
   occurredAt: string;
   pollCycleId: string;
   /** Snapshot of job fields at event time, for rendering notifications. */
-  job: JobState;
+  job: S;
   /** For relisted events: when this job was originally first seen. */
   firstSeenAt?: string;
 }
+export type AppearanceEvent = AppearanceEventOf<JobState>;
 
 /** A field-level change on a still-visible job (FR-019: silent, no notification). */
 export interface DetailsChange {
@@ -81,8 +120,23 @@ export interface DetailsChange {
   changes: { field: string; from: string | null; to: string | null }[];
 }
 
-export interface DiffResult {
-  events: AppearanceEvent[];
-  nextStates: Map<string, JobState>;
+export interface DiffResultOf<S> {
+  events: AppearanceEventOf<S>[];
+  nextStates: Map<string, S>;
   detailsChanges: DetailsChange[];
+}
+export type DiffResult = DiffResultOf<JobState>;
+
+/**
+ * Injected per-portal hooks that let the generic diff produce/refresh states and
+ * keys without knowing the portal-specific fields (Constitution I). The appearance
+ * algorithm (first_seen / missing / relisted) lives once in diff; partner and XTM
+ * each provide an adapter.
+ */
+export interface DiffAdapter<Raw, State extends BaseJobState> {
+  key(raw: Raw): string;
+  hash(raw: Raw): string;
+  build(key: string, raw: Raw, at: string, hash: string): State;
+  apply(existing: State, raw: Raw, hash: string): State;
+  changes(prev: State, raw: Raw): DetailsChange['changes'];
 }

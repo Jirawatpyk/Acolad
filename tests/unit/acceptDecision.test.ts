@@ -57,8 +57,8 @@ describe('decideAccept (FR-006/007/012/025)', () => {
   });
 
   it('zero caps mean unlimited (default)', () => {
-    expect(decideAccept({ ...base, maxWords: 0, words: 999999, maxPerCycle: 0, acceptedThisCycle: 99 })).toEqual(
-      { action: 'accept' },
-    );
+    expect(
+      decideAccept({ ...base, maxWords: 0, words: 999999, maxPerCycle: 0, acceptedThisCycle: 99 }),
+    ).toEqual({ action: 'accept' });
   });
 });
