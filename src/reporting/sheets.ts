@@ -1,5 +1,6 @@
 import { google } from 'googleapis';
 import type { XtmLifecycleStatus } from '../detection/types.js';
+import type { SendOutcome } from './googleChat.js';
 
 export type SheetStatus =
   | 'New'
@@ -127,6 +128,36 @@ export class SheetSink {
     const idx = keys.indexOf(row.jobKey);
     if (idx === -1) await this.api.appendRow(values);
     else await this.api.writeRow(idx + 1, values);
+  }
+}
+
+/**
+ * Sends a queued Sheets row (the outbox 'sheets' channel target — mirrors
+ * ChatSender). Maps googleapis errors to the dispatcher's retry semantics:
+ * 401/403 (auth/permission) → permanent; everything else (5xx/429/network) →
+ * transient. Ensures the v2 header once per process before the first write.
+ */
+export interface SheetSender {
+  send(row: SheetRow): Promise<SendOutcome>;
+}
+
+export class GoogleSheetSender implements SheetSender {
+  private headerEnsured = false;
+  constructor(private readonly sink: SheetSink) {}
+
+  async send(row: SheetRow): Promise<SendOutcome> {
+    try {
+      if (!this.headerEnsured) {
+        await this.sink.ensureHeader();
+        this.headerEnsured = true;
+      }
+      await this.sink.upsertRow(row);
+      return 'ok';
+    } catch (err) {
+      const code =
+        (err as { code?: number; status?: number }).code ?? (err as { status?: number }).status;
+      return code === 401 || code === 403 ? 'permanent' : 'transient';
+    }
   }
 }
 

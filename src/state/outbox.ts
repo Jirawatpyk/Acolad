@@ -1,10 +1,12 @@
 import type { DB } from './db.js';
 import type { AppConfig } from '../config/index.js';
 
+export type OutboxChannel = 'chat' | 'sheets';
+
 export interface OutboxRow {
   outbox_id: number;
   event_id: string;
-  channel: 'chat';
+  channel: OutboxChannel;
   payload_json: string;
   status: 'pending' | 'sent' | 'dead';
   attempts: number;
@@ -37,13 +39,18 @@ export class Outbox {
   ) {}
 
   /** Idempotent enqueue (unique on event_id+channel). Returns false if already queued. */
-  enqueue(eventId: string, payloadJson: string, nowIso: string): boolean {
+  enqueue(
+    eventId: string,
+    payloadJson: string,
+    nowIso: string,
+    channel: OutboxChannel = 'chat',
+  ): boolean {
     const res = this.db
       .prepare(
         `INSERT OR IGNORE INTO outbox (event_id, channel, payload_json, status, attempts, next_attempt_at, created_at)
-         VALUES (?, 'chat', ?, 'pending', 0, ?, ?)`,
+         VALUES (?, ?, ?, 'pending', 0, ?, ?)`,
       )
-      .run(eventId, payloadJson, nowIso, nowIso);
+      .run(eventId, channel, payloadJson, nowIso, nowIso);
     return res.changes > 0;
   }
 

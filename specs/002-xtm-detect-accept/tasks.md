@@ -174,14 +174,14 @@ log โดยไม่ต้องมี Sheets/Chat)
       → เช็ค Closed → `Closed` (เจอ)/`Removed` (ไม่เจอ) (FR-014)
 - [x] T037 [P] [US2] `tests/unit/sheetsHistorical.test.ts`: แถวเดิมไม่มี job_key =
       historical → ไม่ claim/ไม่ update (FR-026)
-- [ ] T038 [P] [US2] `tests/integration/sheetsOutbox.test.ts`: Sheets 5xx → outbox
+- [x] T038 [P] [US2] `tests/integration/sheetsOutbox.test.ts`: Sheets 5xx → outbox
       retry, ฟื้นแล้วครบ ไม่ซ้ำ, accept ไม่ถูกบล็อก (FR-018, Constitution IV)
 
 ### Implementation for US2
 
 - [x] T039 [US2] `src/reporting/sheets.ts`: `SheetSink` (ensureHeader/appendRow/
       updateRow upsert by job_key) ผ่าน googleapis service account, scope spreadsheets
-- [ ] T040 [US2] outbox channel `'sheets'` + routing ใน `src/reporting/dispatcher.ts`
+- [x] T040 [US2] outbox channel `'sheets'` + routing ใน `src/reporting/dispatcher.ts`
       (payload append/update) — reuse retry/backoff เดิม
 - [ ] T041 [US2] คำนวณ `lifecycle_status` + enqueue outbox sheets/chat ตอน transition
       ใน `src/runtime/pollLoop.ts` + `src/state/jobStore.ts` (ไม่ใส่ logic นี้ใน diff)
