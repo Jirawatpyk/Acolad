@@ -33,6 +33,7 @@ export default tseslint.config(
     files: [
       'src/runtime/requeue.ts',
       'src/runtime/latencyReport.ts',
+      'src/runtime/catchRateReport.ts',
       'src/runtime/once.ts',
       'src/runtime/main.ts',
     ],

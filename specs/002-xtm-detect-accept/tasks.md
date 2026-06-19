@@ -231,7 +231,7 @@ log โดยไม่ต้องมี Sheets/Chat)
       เมตริกแยก (N1)** — (a) **click latency** detection→คลิกยืนยัน p95 ≤ 5 วิ
       (Constitution VIII, V16); (b) **outcome-confirmed latency** รวม FR-024 re-read,
       end-to-end ≤ 60 วิ (SC-003, V16b)
-- [ ] T051 [P] `src/runtime/catchRateReport.ts` + npm `report:catch-rate`: SC-001
+- [x] T051 [P] `src/runtime/catchRateReport.ts` + npm `report:catch-rate`: SC-001
       (Accepted ÷ Accepted+Missing+Accept failed บนมาเลย์ จากชีต) + SC-009
       reconciliation รายสัปดาห์
 - [ ] T052 [P] ลบโค้ด partner-portal ที่เลิกใช้ (`src/portal/login.ts`,
