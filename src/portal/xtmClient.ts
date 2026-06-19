@@ -6,7 +6,7 @@ import type { RateLimiter } from '../runtime/rateLimiter.js';
 import type { XtmJobSnapshot } from '../detection/types.js';
 import { BrowserSession } from './browser.js';
 import { performXtmLogin, isXtmLoggedOut, type XtmCredentials } from './xtmLogin.js';
-import { readActiveSnapshot } from './xtmInbox.js';
+import { readActiveSnapshot, readClosedKeys as readClosedKeysFromGrid } from './xtmInbox.js';
 import { acceptEligibleTasks } from './xtmAccept.js';
 import { captureEvidence } from './evidence.js';
 import { XTM } from './selectors.js';
@@ -25,6 +25,8 @@ export interface XtmPortalClient {
   fetchJobSnapshot(pollCycleId: string): Promise<XtmJobSnapshot>;
   /** Bulk-accept eligible (Malay) tasks; outcome per job from the FR-024 re-read. */
   acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]>;
+  /** Job keys in the Closed tab (FR-014 Closed-vs-Removed; only on disappearance). */
+  readClosedKeys(): Promise<Set<string>>;
   /** Recycle the browser if its scheduled lifetime elapsed (Constitution VIII). */
   maybeRecycle(): Promise<void>;
   dispose(): Promise<void>;
@@ -109,6 +111,30 @@ export class PlaywrightXtmClient implements XtmPortalClient {
       captureEvidence: evidence,
       nowIso: () => this.clock.nowIso(),
     });
+  }
+
+  async readClosedKeys(): Promise<Set<string>> {
+    const page = await this.browser.page();
+    const frame = await this.activeFrame(page);
+    this.rate.record(this.clock.nowMs()); // FR-027: the Closed read counts against the budget
+    await frame
+      .locator(XTM.tabs.closed)
+      .first()
+      .click({ timeout: 10_000 })
+      .catch(() => undefined);
+    await frame
+      .locator(XTM.closed.stateMarker)
+      .first()
+      .waitFor({ state: 'attached', timeout: 10_000 })
+      .catch(() => undefined);
+    const keys = await readClosedKeysFromGrid(frame);
+    // Return to Active so the next fetch reads the right tab.
+    await frame
+      .locator(XTM.tabs.active)
+      .first()
+      .click({ timeout: 10_000 })
+      .catch(() => undefined);
+    return keys;
   }
 
   async maybeRecycle(): Promise<void> {

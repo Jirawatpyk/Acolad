@@ -1,7 +1,7 @@
 import { MetaStore } from '../state/meta.js';
 import { raiseAlert } from '../reporting/systemAlerts.js';
 import { ColdStartHistory } from './coldStartHistory.js';
-import { createBot } from './bootstrap.js';
+import { createXtmBot } from './bootstrap.js';
 import { computeNextDelay, jitter } from './scheduler.js';
 import { systemClock } from '../clock.js';
 
@@ -10,7 +10,7 @@ const stamp = (): string => new Date().toLocaleTimeString('en-GB');
 
 /** Long-running 24/7 entrypoint under PM2 (npm start). */
 async function main(): Promise<void> {
-  const { cfg, logger, db, outbox, rate, client, loop } = createBot();
+  const { cfg, logger, db, outbox, rate, client, loop } = createXtmBot();
 
   // Cold-start-repeat detection (FR-015): only counts when there is no baseline yet.
   if (!new MetaStore(db).baselineDone) {
@@ -34,16 +34,17 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  logger.info({ module: 'main', action: 'startup', outcome: 'ok' }, 'acolad-bot started');
-  console.log(`[${stamp()}] acolad-bot เริ่มทำงาน — เฝ้า ${cfg.ACOLAD_OFFERS_URL}`);
+  logger.info({ module: 'main', action: 'startup', outcome: 'ok' }, 'acolad-xtm-bot started');
+  console.log(
+    `[${stamp()}] acolad-bot (XTM) เริ่มทำงาน — เฝ้า ${cfg.XTM_ACOLAD_OFFERS_URL} | accept=${cfg.ACCEPT_ENABLED ? 'ON' : 'OFF'}`,
+  );
   console.log(`[${stamp()}] log ละเอียดอยู่ที่ ${cfg.LOG_DIR}/  (Ctrl+C เพื่อหยุด)`);
 
   while (running) {
     const cycleStart = systemClock.nowMs();
+    // The loop recycles the browser on schedule (Constitution VIII) internally.
     const ok = await loop.runOnce();
     console.log(`[${stamp()}] รอบตรวจ: ${ok ? 'OK' : 'มีปัญหา (ดู log/Google Chat)'}`);
-
-    await client.maybeRecycle();
 
     const cycleDurationMs = systemClock.nowMs() - cycleStart;
     // Pseudo-random jitter; varies by cycle. Math.random is fine in the running app.

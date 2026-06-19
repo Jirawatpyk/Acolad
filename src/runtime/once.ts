@@ -1,10 +1,10 @@
 import { ColdStartHistory } from './coldStartHistory.js';
-import { createBot } from './bootstrap.js';
+import { createXtmBot } from './bootstrap.js';
 import { systemClock } from '../clock.js';
 
 /** Run a single poll cycle then exit (smoke test — npm run poll:once). */
 async function main(): Promise<void> {
-  const { cfg, db, client, loop } = createBot();
+  const { cfg, db, client, loop } = createXtmBot();
   try {
     const ok = await loop.runOnce();
     console.log(ok ? 'poll:once OK' : 'poll:once completed with errors (see logs/alerts)');

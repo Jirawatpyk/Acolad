@@ -2,6 +2,7 @@ import type { Frame, Page } from 'playwright';
 import { z } from 'zod';
 import { XTM } from './selectors.js';
 import { LayoutChangedError, PortalTimeoutError } from './errors.js';
+import { computeXtmJobKey } from '../detection/jobKey.js';
 import type { XtmRawJob, XtmJobSnapshot } from '../detection/types.js';
 
 /**
@@ -171,6 +172,17 @@ export async function readActiveSnapshot(
     else malformed.push(row);
   }
 
+  return finalizeSnapshot(scope, jobs, malformed, capturedAt, pollCycleId, captureEvidence);
+}
+
+async function finalizeSnapshot(
+  scope: GridScope,
+  jobs: XtmRawJob[],
+  malformed: unknown[],
+  capturedAt: string,
+  pollCycleId: string,
+  captureEvidence: (reason: string) => Promise<string | undefined>,
+): Promise<XtmJobSnapshot> {
   // Disambiguate empty vs still-loading via the authoritative count footer.
   if (jobs.length === 0 && malformed.length === 0) {
     const footer = await scope
@@ -194,4 +206,49 @@ export async function readActiveSnapshot(
   }
 
   return { jobs, malformed, capturedAt, pollCycleId, emptyListConfirmed: false };
+}
+
+/**
+ * Read the job keys currently in the Closed tab (FR-014). Used only when an
+ * accepted job disappears from Active, to tell Closed from Removed. Returns an
+ * empty set when the grid is genuinely empty; the Closed grid shares the Active
+ * column positions (indices 1–11), so the same file/step/role cells apply.
+ */
+export async function readClosedKeys(scope: GridScope): Promise<Set<string>> {
+  await scope
+    .locator(XTM.closed.gridContainer)
+    .first()
+    .waitFor({ state: 'attached', timeout: 10_000 })
+    .catch(() => undefined);
+  const scraped = await scope.locator(`${XTM.closed.gridContainer} tbody tr`).evaluateAll(
+    (rows, sel) => {
+      const cell = (
+        el: { querySelector(q: string): { textContent: string | null } | null },
+        q: string,
+      ): string | null => {
+        const n = el.querySelector(q);
+        return n && n.textContent ? n.textContent.trim() : null;
+      };
+      return (
+        rows as unknown as { querySelector(q: string): { textContent: string | null } | null }[]
+      )
+        .filter((r) => r.querySelector(sel.kebab) !== null)
+        .map((el) => ({
+          file: cell(el, sel.file),
+          step: cell(el, sel.step),
+          role: cell(el, sel.role),
+        }));
+    },
+    {
+      kebab: XTM.closed.rowKebab,
+      file: XTM.closed.cell.file,
+      step: XTM.active.cell.step,
+      role: XTM.active.cell.role,
+    },
+  );
+  const keys = new Set<string>();
+  for (const r of scraped) {
+    keys.add(computeXtmJobKey({ fileName: r.file ?? '', step: r.step, role: r.role }));
+  }
+  return keys;
 }
