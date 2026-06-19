@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest';
-import { determineAcceptOutcomes } from '../../src/portal/xtmAccept.js';
+import { describe, it, expect, vi } from 'vitest';
+import type { Frame } from 'playwright';
+import {
+  determineAcceptOutcomes,
+  acceptEligibleTasks,
+  type AcceptDeps,
+} from '../../src/portal/xtmAccept.js';
 import type { AcceptTarget } from '../../src/portal/errors.js';
 import type { XtmRawJob } from '../../src/detection/types.js';
 import { computeXtmJobKey } from '../../src/detection/jobKey.js';
@@ -65,5 +70,63 @@ describe('determineAcceptOutcomes (FR-024 — outcome from re-read of Active)', 
 
   it('returns an empty result for no targets', () => {
     expect(determineAcceptOutcomes([], [xraw()], AT)).toEqual([]);
+  });
+});
+
+describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 mode 3)', () => {
+  const targets: AcceptTarget[] = [
+    { jobKey: 'k1', targetLang: 'Malay (Malaysia)' },
+    { jobKey: 'k2', targetLang: 'Malay (Malaysia)' },
+  ];
+
+  // A frame whose first grid query times out, so openBulkAcceptForLanguage throws
+  // (the Playwright failure mode for an accept timeout / changed menu).
+  const timingOutFrame = (): Frame =>
+    ({
+      locator: () => ({
+        count: async () => {
+          throw new Error('Timeout 15000ms exceeded waiting for locator');
+        },
+      }),
+    }) as unknown as Frame;
+
+  it('marks every target failed with a bounded, evidence-only reason and never re-reads', async () => {
+    const captured: string[] = [];
+    const reReadActive = vi.fn(async (): Promise<XtmRawJob[]> => []);
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async (reason) => {
+        captured.push(reason);
+        return 'state/evidence/accept_unconfirmed-2026';
+      },
+      nowIso: () => AT,
+    };
+
+    const out = await acceptEligibleTasks(timingOutFrame(), targets, deps);
+
+    // Never assumes success — all targets failed, awaiting the human/next re-read.
+    expect(out).toHaveLength(2);
+    expect(out.every((o) => o.outcome === 'failed')).toBe(true);
+    // Evidence captured once; the re-read is skipped (we bailed before it).
+    expect(captured).toEqual(['accept_unconfirmed']);
+    expect(reReadActive).not.toHaveBeenCalled();
+    // Reason is bounded to an evidence ref — the raw Playwright message must NOT leak
+    // (contracts/sheets.md: Note = evidence ref only; Constitution — no secret/raw spill).
+    for (const o of out) {
+      if (o.outcome !== 'failed') continue;
+      expect(o.reason).toContain('evidence:');
+      expect(o.reason).toContain('accept_unconfirmed-2026');
+      expect(o.reason).not.toContain('Timeout 15000ms');
+    }
+  });
+
+  it('returns an empty result without touching the page for no targets', async () => {
+    const deps: AcceptDeps = {
+      reReadActive: vi.fn(async () => []),
+      captureEvidence: vi.fn(async () => undefined),
+      nowIso: () => AT,
+    };
+    expect(await acceptEligibleTasks(timingOutFrame(), [], deps)).toEqual([]);
+    expect(deps.captureEvidence).not.toHaveBeenCalled();
   });
 });

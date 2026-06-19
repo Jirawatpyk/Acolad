@@ -9,16 +9,18 @@ import type { AppConfig } from '../../src/config/index.js';
 import type { XtmRawJob, XtmJobSnapshot } from '../../src/detection/types.js';
 import type { ChatSender, SendOutcome } from '../../src/reporting/googleChat.js';
 import type { SheetSender, SheetRow } from '../../src/reporting/sheets.js';
-import { LoginFailedError, SessionExpiredError } from '../../src/portal/errors.js';
+import { LoginFailedError } from '../../src/portal/errors.js';
 
 /**
  * Consolidated failure-mode suite (Constitution II). Maps the six T049 modes to
- * integrated loop-level coverage here, plus the dedicated tests that already
- * exercise the accept-path modes (gated by ACCEPT_ENABLED, off by default):
+ * integrated loop-level coverage here, plus the dedicated tests that exercise the
+ * client/accept-path modes (the loop is the wrong layer for those):
  *
  *   1. login fail (shared acct) → lockout ............. here ("login lockout")
- *   2. session expiry mid-read → silent re-login ...... here ("session expiry")
- *   3. accept timeout ................................. accept.test (determineAcceptOutcomes)
+ *   2. session expiry mid-READ → silent re-login ...... xtmClient.test (fetchJobSnapshot recovery).
+ *        mid-ACCEPT expiry is deliberately NOT silently re-logged-in (it would risk a double-claim);
+ *        it surfaces and is recovered as accept_failed by the stranded-'accepting' path (mode 6).
+ *   3. accept timeout / menu-not-found ............... accept.test ("accept timeout" — acceptEligibleTasks)
  *   4. malformed rows quarantine ..................... here ("malformed") + xtmInbox.test
  *   5. Sheets quota/auth ............................. here ("Sheets outage") + sheetsOutbox.test
  *   6. restart mid-accept (re-read, no double-click) . xtmCycle.test (stranded-'accepting' recovery)
@@ -92,12 +94,6 @@ class FlakySheet implements SheetSender {
     return this.outcome;
   }
 }
-const okSheet: SheetSender = {
-  async send(): Promise<SendOutcome> {
-    return 'ok';
-  },
-};
-
 let now = Date.parse(NOW);
 const clock = { nowMs: () => now, nowIso: () => new Date(now).toISOString() };
 
@@ -198,33 +194,8 @@ describe('XTM failure modes (integrated, Constitution II/IV)', () => {
     expect(client.fetchJobSnapshot).not.toHaveBeenCalled();
   });
 
-  it('session expiry is absorbed by the client (silent re-login) — the loop raises no alert (FR-021)', async () => {
-    fresh();
-    // The client owns session recovery: a mid-read expiry is re-logged-in
-    // internally and a valid snapshot is returned. The loop must see plain
-    // success and add zero noise.
-    let firstCall = true;
-    const client = new StubClient();
-    client.fetchJobSnapshot = vi.fn(async () => {
-      if (firstCall) {
-        firstCall = false;
-        // simulate the client transparently recovering from SessionExpiredError
-        // (the real PlaywrightXtmClient re-logins and retries before returning)
-        void new SessionExpiredError('expired');
-      }
-      return snap([xraw()]);
-    });
-    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
-    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
-      chatSender: okChat,
-      sheetSender: okSheet,
-      heartbeat,
-    });
-    expect(await loop.runOnce()).toBe(true);
-    const alerts = db
-      .prepare("SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert'")
-      .get() as { n: number };
-    expect(alerts.n).toBe(0); // no login_failed, no portal_down, no layout_changed
-    expect(heartbeat.ok).toHaveBeenCalled();
-  });
+  // Mode 2 (session expiry mid-read → silent re-login, NO alert) is verified where
+  // the recovery actually lives — PlaywrightXtmClient.fetchJobSnapshot — in
+  // tests/unit/xtmClient.test.ts. The loop is the wrong layer: it has no
+  // SessionExpiredError handling, so a leaked expiry would be a generic transient.
 });

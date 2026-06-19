@@ -75,13 +75,16 @@ export function computeLatencyMetrics(lines: Iterable<string>): LatencyReport {
     } catch {
       continue; // skip non-JSON lines
     }
-    if (e.action === 'cycle' && e.outcome === 'ok' && typeof e.latencyMs === 'number') {
-      cycle.push(e.latencyMs);
-    } else if (e.action === 'send' && e.outcome === 'ok' && typeof e.latencyMs === 'number') {
-      send.push(e.latencyMs);
+    // Number.isFinite (not typeof === 'number') so a NaN/Infinity latency can never
+    // skew p95 or flip a budget verdict. (JSON neutralizes NaN→null upstream, so this
+    // is defense-in-depth for any non-JSON caller of computeLatencyMetrics.)
+    if (e.action === 'cycle' && e.outcome === 'ok' && Number.isFinite(e.latencyMs)) {
+      cycle.push(e.latencyMs as number);
+    } else if (e.action === 'send' && e.outcome === 'ok' && Number.isFinite(e.latencyMs)) {
+      send.push(e.latencyMs as number);
     } else if (e.action === 'accept') {
-      if (typeof e.clickLatencyMs === 'number') acceptClick.push(e.clickLatencyMs);
-      if (typeof e.outcomeLatencyMs === 'number') acceptOutcome.push(e.outcomeLatencyMs);
+      if (Number.isFinite(e.clickLatencyMs)) acceptClick.push(e.clickLatencyMs as number);
+      if (Number.isFinite(e.outcomeLatencyMs)) acceptOutcome.push(e.outcomeLatencyMs as number);
     }
   }
 

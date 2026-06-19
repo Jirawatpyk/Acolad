@@ -32,10 +32,12 @@ export interface XtmPortalClient {
   dispose(): Promise<void>;
 }
 
-/** Page-level ops, injectable so navigation/rate logic is unit-testable via stubs. */
+/** Page-level ops, injectable so navigation/rate/recovery logic is unit-testable via stubs. */
 export interface XtmOps {
   isLoggedOut(page: Page): Promise<boolean>;
   login(page: Page, creds: XtmCredentials): Promise<void>;
+  /** Resolve the Active frame and read it once (the unit the re-login retry repeats). */
+  readActiveOnce(page: Page, pollCycleId: string): Promise<XtmJobSnapshot>;
 }
 
 /**
@@ -58,6 +60,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     this.ops = ops ?? {
       isLoggedOut: (page) => isXtmLoggedOut(page),
       login: (page, creds) => performXtmLogin(page, creds),
+      readActiveOnce: (page, pollCycleId) => this.readActiveOnceImpl(page, pollCycleId),
     };
   }
 
@@ -75,18 +78,22 @@ export class PlaywrightXtmClient implements XtmPortalClient {
       await this.navigateToInbox(page);
     }
     try {
-      const frame = await this.activeFrame(page);
-      return await this.readActive(page, frame, pollCycleId);
+      return await this.ops.readActiveOnce(page, pollCycleId);
     } catch (err) {
       // Session expired mid-read (shared account) → re-login once, silently.
       if (err instanceof SessionExpiredError || (await this.ops.isLoggedOut(page))) {
         await this.login(page);
         await this.navigateToInbox(page);
-        const frame = await this.activeFrame(page);
-        return this.readActive(page, frame, pollCycleId);
+        return this.ops.readActiveOnce(page, pollCycleId);
       }
       throw err;
     }
+  }
+
+  /** Default readActiveOnce: resolve the Active frame, then read it (overridable via ops). */
+  private async readActiveOnceImpl(page: Page, pollCycleId: string): Promise<XtmJobSnapshot> {
+    const frame = await this.activeFrame(page);
+    return this.readActive(page, frame, pollCycleId);
   }
 
   async acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]> {

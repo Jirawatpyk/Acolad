@@ -224,11 +224,17 @@ export class XtmPollCycle {
             s.acceptedAt = r.at;
           }
           // Latency split for the report (T050 / V16 + V16b), measured from detection.
-          summary.acceptLatencies.push({
-            jobKey: r.jobKey,
-            clickLatencyMs: r.clickedAt ? Date.parse(r.clickedAt) - detectedMs : null,
-            outcomeLatencyMs: Date.parse(r.at) - detectedMs,
-          });
+          // Bot-stamped timestamps always parse; guard anyway so a clock/parse
+          // anomaly drops the telemetry sample rather than emitting a NaN latency.
+          const outcomeLatencyMs = Date.parse(r.at) - detectedMs;
+          if (Number.isFinite(outcomeLatencyMs)) {
+            const click = r.clickedAt ? Date.parse(r.clickedAt) - detectedMs : null;
+            summary.acceptLatencies.push({
+              jobKey: r.jobKey,
+              clickLatencyMs: click !== null && Number.isFinite(click) ? click : null,
+              outcomeLatencyMs,
+            });
+          }
         } else if (r.outcome === 'missing') {
           summary.missing++;
           if (s) {

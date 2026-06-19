@@ -105,6 +105,20 @@ describe('XtmPollCycle (US1 — detect, accept, record)', () => {
     expect(summary.acceptLatencies[0]?.outcomeLatencyMs).toBe(8_000); // ≤ 60 s budget (V16b)
   });
 
+  it('drops the latency sample (no NaN) when an accept timestamp is unparseable (T050 guard)', async () => {
+    fresh();
+    const acc = {
+      async acceptEligibleTasks(t: AcceptTarget[]): Promise<AcceptResult[]> {
+        return t.map(
+          (x) => ({ jobKey: x.jobKey, outcome: 'accepted', at: 'not-a-date' }) as AcceptResult,
+        );
+      },
+    };
+    const summary = await new XtmPollCycle(db, cfg(), acc).run(snap([xraw()]));
+    expect(only().lifecycleStatus).toBe('accepted'); // accept still recorded
+    expect(summary.acceptLatencies).toHaveLength(0); // but no NaN sample emitted
+  });
+
   it('skips a non-Malay job and never calls accept for it (FR-007)', async () => {
     fresh();
     const acc = new StubAcceptor();
