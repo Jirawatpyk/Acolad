@@ -18,13 +18,18 @@ coverage ~98% บน core. selector ของ "การ์ดงานจริ
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
 
-**Current feature**: 001-login-job-detection
-**Current plan**: specs/001-login-job-detection/plan.md
-**Spec**: specs/001-login-job-detection/spec.md
-**Tasks**: specs/001-login-job-detection/tasks.md (51 tasks — ลำดับการ implement)
-**Design artifacts**: specs/001-login-job-detection/ (research.md, data-model.md, quickstart.md, contracts/)
+**Current feature**: 002-xtm-detect-accept
+**Current plan**: specs/002-xtm-detect-accept/plan.md
+**Spec**: specs/002-xtm-detect-accept/spec.md
+**Tasks**: specs/002-xtm-detect-accept/tasks.md (สร้างด้วย /speckit-tasks)
+**Design artifacts**: specs/002-xtm-detect-accept/ (research.md, data-model.md, quickstart.md, contracts/)
 **Constitution**: .specify/memory/constitution.md (v1.0.1 — 8 principles, gate ทุก plan/PR)
-**Stack**: Node.js 22 + TypeScript strict, Playwright (Chromium), SQLite (better-sqlite3), pino, zod, PM2 บน Windows 11
+**Stack**: Node.js 22 + TypeScript strict, Playwright (Chromium), SQLite (better-sqlite3), googleapis (Sheets), pino, zod, PM2 บน Windows 11
+
+> 002 ย้ายเป้าหมายจาก partner.acolad.com → **XTM Cloud (Tasks→Active)** + กดรับงาน
+> มาเลย์อัตโนมัติ (bulk) + log ทุกงานลง Google Sheets. แกน 001 (diff/state/outbox/
+> dispatcher/heartbeat) reuse — เปลี่ยนแค่ src/portal/ (XTM) + เพิ่ม reporting/sheets.ts.
+> งานแรก = recon XTM จริงเก็บ evidence. ดู [[acolad-jobs-live-in-xtm-not-partner]]
 <!-- SPECKIT END -->
 
 ## Workflow

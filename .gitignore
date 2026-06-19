@@ -3,6 +3,8 @@
 *.env.local
 docs/Auth.txt
 *service-account*.json
+google-credentials.json
+*google-credentials*.json
 
 # Runtime state & logs (root-anchored so src/state/ source is NOT ignored)
 *.log
