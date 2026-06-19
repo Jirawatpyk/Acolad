@@ -6,6 +6,7 @@ import { openDatabase, type DB } from '../../src/state/db.js';
 import { XtmPollCycle } from '../../src/runtime/xtmPollCycle.js';
 import { XtmJobStore } from '../../src/state/xtmJobStore.js';
 import { MetaStore } from '../../src/state/meta.js';
+import { computeXtmJobKey } from '../../src/detection/jobKey.js';
 import type { AppConfig } from '../../src/config/index.js';
 import type { XtmRawJob, XtmJobSnapshot, XtmJobState } from '../../src/detection/types.js';
 import type { AcceptTarget, AcceptResult } from '../../src/portal/errors.js';
@@ -191,6 +192,32 @@ function outboxPayloads(
     }[]
   ).map((r) => JSON.parse(r.payload_json) as { row?: { status: string }; text?: string });
 }
+
+describe('XtmPollCycle Closed/Removed (FR-014, T042)', () => {
+  async function acceptThenDisappear(closedKeys: Set<string>): Promise<void> {
+    const reader = {
+      async readClosedKeys(): Promise<Set<string>> {
+        return closedKeys;
+      },
+    };
+    const cycle = new XtmPollCycle(db, cfg(), new StubAcceptor(), reader);
+    await cycle.run(snap([xraw()], 'c1')); // accept
+    await cycle.run(snap([], 'c2')); // absent once (flicker)
+    await cycle.run(snap([], 'c3')); // absent twice → missing → Closed check
+  }
+
+  it('an accepted job found in the Closed tab becomes Closed', async () => {
+    fresh();
+    await acceptThenDisappear(new Set([computeXtmJobKey(xraw())]));
+    expect(only().lifecycleStatus).toBe('closed');
+  });
+
+  it('an accepted job NOT in the Closed tab becomes Removed (cancelled/reassigned)', async () => {
+    fresh();
+    await acceptThenDisappear(new Set<string>());
+    expect(only().lifecycleStatus).toBe('removed');
+  });
+});
 
 describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
   it('enqueues an Accepted sheets row + a ✅ chat for an accepted Malay job', async () => {

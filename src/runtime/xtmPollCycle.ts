@@ -23,6 +23,14 @@ export interface XtmAcceptor {
   acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]>;
 }
 
+/**
+ * Reads the job keys currently in the Closed tab (FR-014). Queried ONLY when an
+ * accepted job disappears from Active (cost-bounded) to tell Closed from Removed.
+ */
+export interface ClosedReader {
+  readClosedKeys(): Promise<Set<string>>;
+}
+
 export interface XtmCycleSummary {
   jobs: number;
   baseline: boolean;
@@ -31,6 +39,8 @@ export interface XtmCycleSummary {
   missing: number;
   skipped: number;
   eligibleDisabled: number;
+  closed: number;
+  removed: number;
 }
 
 /**
@@ -50,6 +60,7 @@ export class XtmPollCycle {
     private readonly db: DB,
     private readonly cfg: AppConfig,
     private readonly acceptor: XtmAcceptor,
+    private readonly closedReader?: ClosedReader,
   ) {
     this.store = new XtmJobStore(db);
     this.accept = new JobStore(db);
@@ -75,8 +86,11 @@ export class XtmPollCycle {
       missing: 0,
       skipped: 0,
       eligibleDisabled: 0,
+      closed: 0,
+      removed: 0,
     };
     const candidates: XtmJobState[] = [];
+    const disappearedAccepted: XtmJobState[] = [];
     let acceptedThisCycle = 0;
 
     for (const ev of result.events) {
@@ -85,8 +99,10 @@ export class XtmPollCycle {
 
       if (ev.eventType === 'missing') {
         // A job the bot never accepted leaving Active → Missing (FR-014). An
-        // accepted job that disappears is resolved Closed/Removed in US2 — leave it.
-        if (s.acceptStatus !== 'accepted') {
+        // accepted job that left Active is resolved Closed vs Removed below.
+        if (s.acceptStatus === 'accepted') {
+          disappearedAccepted.push(s);
+        } else {
           s.lifecycleStatus = 'missing';
           summary.missing++;
         }
@@ -112,6 +128,22 @@ export class XtmPollCycle {
       } else {
         candidates.push(s);
         acceptedThisCycle++; // counts toward the per-cycle cap for the next decision
+      }
+    }
+
+    // FR-014: an accepted job that left Active is Closed (found in the Closed tab)
+    // or Removed (cancelled/reassigned). Checked ONLY on disappearance to respect
+    // the rate budget (FR-027). Without a closedReader the job is left as-is.
+    if (disappearedAccepted.length > 0 && this.closedReader) {
+      const closedKeys = await this.closedReader.readClosedKeys();
+      for (const s of disappearedAccepted) {
+        if (closedKeys.has(s.jobKey)) {
+          s.lifecycleStatus = 'closed';
+          summary.closed++;
+        } else {
+          s.lifecycleStatus = 'removed';
+          summary.removed++;
+        }
       }
     }
 

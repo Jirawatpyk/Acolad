@@ -167,10 +167,10 @@ log โดยไม่ต้องมี Sheets/Chat)
       `updateRow` by job_key in place, ไม่มีแถวซ้ำ
 - [x] T034 [P] [US2] `tests/unit/sheetsHeader.test.ts`: ensureHeader v1→v2 เติม I–M
       ไม่ย้ายของเดิม, header แปลก→alert ไม่ทับ (contracts/sheets.md)
-- [ ] T035 [P] [US2] `tests/integration/sheetsLifecycle.test.ts`: New→Accepted/
+- [x] T035 [P] [US2] `tests/integration/sheetsLifecycle.test.ts`: New→Accepted/
       Missing/Skipped/Accept failed→Closed/Removed sync ลงชีต — **ใช้ fixture สถานะ
       ไม่เรียก accept จริง (คงความอิสระจาก US1, N6)**
-- [ ] T036 [P] [US2] `tests/integration/closedCheck.test.ts`: accepted หายจาก Active
+- [x] T036 [P] [US2] `tests/integration/closedCheck.test.ts`: accepted หายจาก Active
       → เช็ค Closed → `Closed` (เจอ)/`Removed` (ไม่เจอ) (FR-014)
 - [x] T037 [P] [US2] `tests/unit/sheetsHistorical.test.ts`: แถวเดิมไม่มี job_key =
       historical → ไม่ claim/ไม่ update (FR-026)
@@ -185,7 +185,7 @@ log โดยไม่ต้องมี Sheets/Chat)
       (payload append/update) — reuse retry/backoff เดิม
 - [x] T041 [US2] คำนวณ `lifecycle_status` + enqueue outbox sheets/chat ตอน transition
       ใน `src/runtime/pollLoop.ts` + `src/state/jobStore.ts` (ไม่ใส่ logic นี้ใน diff)
-- [ ] T042 [US2] Closed-tab targeted check → Closed/Removed (FR-014) ใน pollLoop ใช้
+- [x] T042 [US2] Closed-tab targeted check → Closed/Removed (FR-014) ใน pollLoop ใช้
       `xtmInbox.readClosed` (เฉพาะตอน accepted หายจาก Active ≥ 2 รอบ; นับในงบ
       RateLimiter — FR-027)
 - [x] T043 [US2] FR-026 historical-rows guard ใน `src/reporting/sheets.ts`
