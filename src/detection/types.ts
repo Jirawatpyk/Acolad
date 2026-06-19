@@ -1,4 +1,4 @@
-/** Raw job parsed from the portal (contracts/portal-adapter.md). */
+/** Raw job parsed from the partner portal (contracts/portal-adapter.md). */
 export interface RawJob {
   portalJobId: string | null;
   title: string;
@@ -7,6 +7,34 @@ export interface RawJob {
   deadlineRaw: string | null;
   fee: string | null;
   url: string | null;
+}
+
+/**
+ * Raw job parsed from an XTM Active row (contracts/xtm-portal-adapter.md). Lives
+ * in the detection layer (not portal) so jobKey/eligibility/diff can operate on
+ * it without importing Playwright types (Constitution I).
+ */
+export interface XtmRawJob {
+  xtmTaskId: string | null;
+  projectName: string;
+  fileName: string;
+  sourceLang: string | null;
+  targetLang: string | null;
+  dueDate: string | null;
+  dueRaw: string | null;
+  words: number | null;
+  step: string | null;
+  role: string | null;
+  /** Whether the Accept menu is still actionable (distinguishes free vs taken). */
+  acceptAvailable: boolean;
+}
+
+export interface XtmJobSnapshot {
+  jobs: XtmRawJob[];
+  malformed: unknown[];
+  capturedAt: string;
+  pollCycleId: string;
+  emptyListConfirmed: boolean;
 }
 
 export interface JobSnapshot {

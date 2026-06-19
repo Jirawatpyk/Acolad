@@ -16,6 +16,7 @@ google-credentials.json
 # Dependencies & build
 node_modules/
 dist/
+dist-recon/
 coverage/
 __pycache__/
 .venv/

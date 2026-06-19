@@ -1,26 +1,64 @@
 import { describe, it, expect } from 'vitest';
 import { loadConfig, secretValues } from '../../src/config/index.js';
 
+/**
+ * Minimal valid env for 002. Includes the transitional partner (ACOLAD_*) keys
+ * which remain required until the partner code is removed (T052, expand-then-
+ * contract), plus the new XTM / Sheets required keys.
+ */
 const base = {
+  // partner portal (001) — transitional, still required until T052
   ACOLAD_PORTAL_URL: 'https://partner.acolad.com/login',
   ACOLAD_EMAIL: 'team@example.com',
   ACOLAD_PASSWORD: 'secret-pw',
+  // XTM Cloud (002 target)
+  XTM_ACOLAD_PORTAL_URL: 'https://www.xtm-cloud.com/project-manager-ui/login.jsp',
+  XTM_ACOLAD_OFFERS_URL: 'https://www.xtm-cloud.com/project-manager-ui/',
+  XTM_ACOLAD_Company: 'AMPLEXOR',
+  XTM_ACOLAD_Username: 'EQHO',
+  XTM_ACOLAD_Password: 'xtm-secret-pw',
+  // Google Sheets (002 required)
+  GOOGLE_SHEETS_ID: '1IC7kTfKTr5uN0ZHEB',
+  SHEETS_TAB_NAME: 'Tasks',
+  // shared (001) — still required
   GOOGLE_CHAT_WEBHOOK_SYSTEM: 'https://chat.googleapis.com/v1/spaces/X/messages?key=k&token=t',
   HEALTHCHECKS_PING_URL: 'https://hc-ping.com/abc',
 };
 
 describe('loadConfig', () => {
-  it('applies defaults for optional vars', () => {
+  it('applies defaults for optional vars (002 values)', () => {
     const cfg = loadConfig({ ...base });
-    expect(cfg.POLL_INTERVAL_MS).toBe(25_000);
+    // 002 lowers the poll floor to 20s to win the <1min snatch window (R7).
+    expect(cfg.POLL_INTERVAL_MS).toBe(20_000);
     expect(cfg.LOGIN_MAX_RETRY).toBe(3);
     expect(cfg.TZ_DISPLAY).toBe('Asia/Bangkok');
     expect(cfg.LIVE_PORTAL).toBe(false);
+    // accept control — safe defaults (FR-012/025)
+    expect(cfg.ACCEPT_ENABLED).toBe(false);
+    expect(cfg.ACCEPT_LANGUAGES).toEqual(['Malay (Malaysia)']);
+    expect(cfg.ACCEPT_MAX_WORDS).toBe(0);
+    expect(cfg.ACCEPT_MAX_PER_CYCLE).toBe(0);
+    expect(cfg.GOOGLE_SERVICE_ACCOUNT_KEY_PATH).toBe('google-credentials.json');
   });
 
-  it('names the offending variable when a required one is missing', () => {
+  it('names the offending variable when a required partner one is missing', () => {
     const { ACOLAD_PASSWORD: _omit, ...rest } = base;
     expect(() => loadConfig(rest)).toThrow(/ACOLAD_PASSWORD/);
+  });
+
+  it('names the offending variable when a required XTM one is missing', () => {
+    const { XTM_ACOLAD_Password: _omit, ...rest } = base;
+    expect(() => loadConfig(rest)).toThrow(/XTM_ACOLAD_Password/);
+  });
+
+  it('requires SHEETS_TAB_NAME', () => {
+    const { SHEETS_TAB_NAME: _omit, ...rest } = base;
+    expect(() => loadConfig(rest)).toThrow(/SHEETS_TAB_NAME/);
+  });
+
+  it('requires GOOGLE_SHEETS_ID', () => {
+    const { GOOGLE_SHEETS_ID: _omit, ...rest } = base;
+    expect(() => loadConfig(rest)).toThrow(/GOOGLE_SHEETS_ID/);
   });
 
   it('rejects POLL_INTERVAL_MS below 20000 (FR-011)', () => {
@@ -35,10 +73,26 @@ describe('loadConfig', () => {
     expect(loadConfig({ ...base, LIVE_PORTAL: '1' }).LIVE_PORTAL).toBe(true);
   });
 
-  it('secretValues excludes empty optional webhook', () => {
+  it('accepts ACCEPT_ENABLED=1 as boolean true (kill-switch on)', () => {
+    expect(loadConfig({ ...base, ACCEPT_ENABLED: '1' }).ACCEPT_ENABLED).toBe(true);
+  });
+
+  it('parses ACCEPT_LANGUAGES as a trimmed csv list', () => {
+    const cfg = loadConfig({ ...base, ACCEPT_LANGUAGES: 'Malay (Malaysia), Thai , ' });
+    expect(cfg.ACCEPT_LANGUAGES).toEqual(['Malay (Malaysia)', 'Thai']);
+  });
+
+  it('coerces ACCEPT_MAX_WORDS from string to a non-negative int', () => {
+    expect(loadConfig({ ...base, ACCEPT_MAX_WORDS: '500' }).ACCEPT_MAX_WORDS).toBe(500);
+    expect(() => loadConfig({ ...base, ACCEPT_MAX_WORDS: '-1' })).toThrow(/ACCEPT_MAX_WORDS/);
+  });
+
+  it('secretValues redacts XTM credentials and excludes empty optionals', () => {
     const cfg = loadConfig({ ...base });
     const secrets = secretValues(cfg);
-    expect(secrets).toContain('secret-pw');
+    expect(secrets).toContain('xtm-secret-pw');
+    expect(secrets).toContain('EQHO');
+    expect(secrets).toContain('AMPLEXOR');
     expect(secrets).toContain('https://hc-ping.com/abc');
     expect(secrets).not.toContain('');
   });

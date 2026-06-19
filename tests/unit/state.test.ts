@@ -179,7 +179,7 @@ describe('openDatabase corruption recovery (FR-017)', () => {
     const res = openDatabase(dir, NOW);
     expect(res.recoveredFromCorruption).toBe(true);
     expect(res.corruptCopyPath).toBeDefined();
-    expect(new MetaStore(res.db).get('schema_version')).toBe('1');
+    expect(new MetaStore(res.db).get('schema_version')).toBe('2');
     res.db.close();
   });
 });

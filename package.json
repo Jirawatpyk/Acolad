@@ -17,11 +17,14 @@
     "poll:once": "npm run build && node dist/runtime/once.js",
     "start": "npm run build && node dist/runtime/main.js",
     "outbox:requeue": "npm run build && node dist/runtime/requeue.js",
-    "report:latency": "npm run build && node dist/runtime/latencyReport.js"
+    "report:latency": "npm run build && node dist/runtime/latencyReport.js",
+    "report:catch-rate": "npm run build && node dist/runtime/catchRateReport.js",
+    "xtm:recon": "tsc scripts/xtm-recon.ts --outDir dist-recon --module nodenext --moduleResolution nodenext --target ES2022 --skipLibCheck && node dist-recon/xtm-recon.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.0",
     "dotenv": "^16.4.7",
+    "googleapis": "^173.0.0",
     "pino": "^9.6.0",
     "pino-roll": "^2.2.0",
     "playwright": "^1.50.0",

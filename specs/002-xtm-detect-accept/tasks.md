@@ -37,17 +37,17 @@ Single project ตาม plan.md: `src/`, `tests/` ที่ root
 
 **Purpose**: เพิ่ม dependency + config surface ของ 002
 
-- [ ] T001 เพิ่ม `googleapis` ใน dependencies + npm scripts ใหม่ (`xtm:recon`,
+- [x] T001 เพิ่ม `googleapis` ใน dependencies + npm scripts ใหม่ (`xtm:recon`,
       `report:catch-rate`) ใน `package.json`; ยืนยัน `playwright`/`better-sqlite3`/
       `pino`/`zod` เดิมยังครบ
-- [ ] T002 [P] อัปเดต `.env.example`: ลบคีย์ partner (`ACOLAD_*`), เพิ่ม
+- [x] T002 [P] อัปเดต `.env.example`: ลบคีย์ partner (`ACOLAD_*`), เพิ่ม
       `XTM_ACOLAD_{PORTAL_URL,OFFERS_URL,CLOSED_URL,Company,Username,Password}`,
       `GOOGLE_SERVICE_ACCOUNT_KEY_PATH`, `SHEETS_TAB_NAME`, `ACCEPT_ENABLED=0`,
       `ACCEPT_LANGUAGES=Malay (Malaysia)`, `ACCEPT_MAX_WORDS=0`,
       `ACCEPT_MAX_PER_CYCLE=0`, `POLL_INTERVAL_MS=20000` (contracts/config.md)
-- [ ] T003 [P] ยืนยัน `.gitignore` ครอบ `google-credentials.json` และ
+- [x] T003 [P] ยืนยัน `.gitignore` ครอบ `google-credentials.json` และ
       `state/storageState.json` (กัน secret หลุดเข้า repo)
-- [ ] T004 [P] ยืนยัน `vitest.config.ts` coverage gate ครอบ glob ใหม่
+- [x] T004 [P] ยืนยัน `vitest.config.ts` coverage gate ครอบ glob ใหม่
       (`src/detection/eligibility.ts`, `src/reporting/sheets.ts`) — ยังอยู่ใต้
       `src/{detection,state,reporting}` ≥ 80% (Constitution II)
 
@@ -62,30 +62,30 @@ Single project ตาม plan.md: `src/`, `tests/` ที่ root
 **⚠️ CRITICAL**: ห้ามเริ่ม US ใดจนกว่า phase นี้เสร็จ — โดยเฉพาะ **T005/T006
 (recon)** ที่ปลดล็อก selector/job-key/accept-signal (D1–D8)
 
-- [ ] T005 สร้าง recon tool `scripts/xtm-recon.ts` (npm `xtm:recon`, gate ด้วย
+- [x] T005 สร้าง recon tool `scripts/xtm-recon.ts` (npm `xtm:recon`, gate ด้วย
       `LIVE_PORTAL=1`): login XTM → เปิด Active + Closed → เปิดเมนู Accept (ไม่กดจริง)
       → เก็บ **HTML + screenshot + network log (sanitized)** ลง
       `state/evidence/xtm-recon-<ts>/` ตาม contracts/xtm-portal-adapter.md
-- [ ] T006 รัน recon (LIVE, มีคนกำกับ) → บันทึกผล **D1–D8** กลับเข้า `research.md`
+- [x] T006 รัน recon (LIVE, มีคนกำกับ) → บันทึกผล **D1–D8** กลับเข้า `research.md`
       (URL Active/Closed, stable job key, สัญญาณ accept สำเร็จ, ค่า "Malay (Malaysia)",
       network endpoint) และ save HTML จริงเป็น fixtures `tests/fixtures/xtm/*.html`
       (Active ว่าง/1งาน/หลายแถว/มาเลย์/ไม่ใช่มาเลย์/พัง, accept dialog, Closed) —
       **gate ของทุก task ที่อิง selector/fixture**
-- [ ] T007 [P] อัปเดต config zod schema `src/config/index.ts`: คีย์ XTM/Sheets/
+- [x] T007 [P] อัปเดต config zod schema `src/config/index.ts`: คีย์ XTM/Sheets/
       ACCEPT_* (contracts/config.md) + เพิ่ม password/username/company/cred ใน
       pino redaction list
-- [ ] T008 [P] (TDD) `tests/unit/config.test.ts`: required keys, defaults
+- [x] T008 [P] (TDD) `tests/unit/config.test.ts`: required keys, defaults
       (ACCEPT_ENABLED=0, POLL=20000, caps=0), redaction — เขียนก่อน ต้อง FAIL
-- [ ] T009 DB migration `src/state/db.ts`: ขยาย `jobs` (xtm_task_id, project_name,
+- [x] T009 DB migration `src/state/db.ts`: ขยาย `jobs` (xtm_task_id, project_name,
       file_name, source_lang, target_lang, due_date, due_raw, words, step, role,
       eligible, lifecycle_status, accept_status, accepted_at, sheet_synced_status),
       outbox channel `'sheets'`, meta keys ใหม่; bump `schema_version` (data-model.md)
-- [ ] T010 [P] (TDD) `tests/unit/db.migration.test.ts`: คอลัมน์/CHECK ใหม่, migrate
+- [x] T010 [P] (TDD) `tests/unit/db.migration.test.ts`: คอลัมน์/CHECK ใหม่, migrate
       idempotent, channel 'sheets' ผ่าน — เขียนก่อน ต้อง FAIL
-- [ ] T011 [P] นิยาม error taxonomy `src/portal/errors.ts`: เพิ่ม
+- [x] T011 [P] นิยาม error taxonomy `src/portal/errors.ts`: เพิ่ม
       `AcceptUnconfirmedError` + types `AcceptTarget`/`AcceptResult` (contracts/
       xtm-portal-adapter.md)
-- [ ] T012 สร้าง selector registry `src/portal/selectors.ts` ของ XTM จาก evidence
+- [x] T012 สร้าง selector registry `src/portal/selectors.ts` ของ XTM จาก evidence
       T006: login fields, Active table/row/columns, เมนู Accept, marker สำเร็จ,
       marker Closed (รวมศูนย์ไฟล์เดียว R9) — **depends on T006**
 - [ ] T013 (TDD) `tests/integration/xtmLogin.test.ts` ก่อน — login สำเร็จ,
@@ -96,9 +96,9 @@ Single project ตาม plan.md: `src/`, `tests/` ที่ root
       ไฟล์, malformed→quarantine, empty confirmed (marker), layout→LayoutChangedError
 - [ ] T016 implement `src/portal/xtmInbox.ts`: อ่าน Active → `JobSnapshot` (zod
       RawJob + `acceptAvailable`), helper อ่าน Closed (targeted), evidence on layout
-- [ ] T017 [P] (TDD) `tests/unit/jobKey.test.ts` ก่อน — composite `fileId|step|role`
+- [x] T017 [P] (TDD) `tests/unit/jobKey.test.ts` ก่อน — composite `fileId|step|role`
       unique ข้าม step/role, normalize deterministic
-- [ ] T018 [P] extend `src/detection/jobKey.ts`: composite key ของ XTM (R3)
+- [x] T018 [P] extend `src/detection/jobKey.ts`: composite key ของ XTM (R3)
 - [ ] T019 ประกอบ `src/portal/xtmClient.ts` implements `XtmPortalClient`
       (ensureLoggedIn/fetchJobSnapshot/dispose) wiring browser(reuse)+login+inbox
 

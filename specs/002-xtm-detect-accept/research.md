@@ -213,3 +213,54 @@ scaffolding**, **`browser.ts`** (Chromium lifecycle ไม่ผูก portal)
 
 D1–D6 ปิดด้วย evidence-capture script (เก็บ HTML+screenshot+network log ของ Active
 และ flow Accept, sanitized); D7 เป็น config/ops step
+
+---
+
+## ผล recon จริง (2026-06-19) — `scripts/xtm-recon.ts` + วิเคราะห์ adversarial
+
+Evidence: `state/evidence/xtm-recon-2026-06-19T07-31-59-976Z/` (gitignored ใต้ `state/`).
+ทุก finding ยืนยันกับ HTML/network.json ดิบ แล้วผ่านการ refute แบบ adversarial.
+
+### สถาปัตยกรรมที่เจอ (กระทบดีไซน์ adapter ทั้งหมด)
+
+1. **XTM เป็น AngularJS SPA** — ฟอร์ม login + ตารางงาน render ฝั่ง client; adapter
+   ต้อง **รอ marker ที่ render แล้ว** ก่อนอ่าน (อ่าน HTML แรกไม่เจอฟอร์ม/แถว)
+2. **ตารางงานอยู่ใน `iframe#myInboxIframe`** (`my-inbox-start.action`) — **ทุก
+   selector ของ grid/tab/cell ต้อง frame-scoped** (`page.frameLocator('#myInboxIframe')`)
+3. **Label แสดงผล ≠ internal id** (สลับชวนงง): label **"Active" = `IN_PROGRESS`**
+   = เป้าหมายกดรับ; label "Planned" = `NEW_TASKS` (ไม่ใช้); "Closed" = `CLOSED_TASKS`.
+   selector ยึด `aria-controls` / `input#tasksState` ไม่ยึด text
+4. **CSS-module hash class** (`--nG61D` ฯลฯ) เป็น build-specific (release 25.6.0) —
+   ใช้ id/`data-testid` เป็นหลัก, ระบุแถวด้วยโครงสร้าง (มีปุ่ม kebab) ไม่พึ่ง hash
+
+### ตารางปิด D1–D8
+
+| D# | สถานะ | ผล |
+|----|-------|-----|
+| **D1** Active URL+columns | ✅ **CONFIRMED** | outer `my-inbox-pages.action` โฮสต์ `iframe#myInboxIframe`; แท็บ Active = doc `my-inbox-in-progress-tasks-page.action` (default ผ่าน `my-inbox-start.action`→302); grid = `table#TaskListingTable` ใน iframe; **15 คอลัมน์** (1-based nth-child): 2=Project, 5=File, 6=Source, 7=Target, 9=Step, 11=Role, 12=Segments, 13=Words, 14=Progress, 14=`[data-testid]` due/words/progress |
+| **D2** login + 2FA/multi-session | ⚠️ **PARTIAL** | AngularJS client-rendered; **client=`AMPLEXOR` pre-set (hidden) → กรอกแค่ user+pass**; `is2FAEnabled=false` (ไม่เจอ 2FA/CAPTCHA); POST→`login.serv`, สำเร็จ→`my-inbox-pages.action`; logged-in marker `#uust` (secret)+`body#root.xtm-app`, logged-out `body.loginPage`; **selector ช่อง user/pass ยังไม่ยืนยัน** (ฟอร์มโหลดผ่าน XHR `loginForm.html` ไม่ถูกเก็บ) → **FAIL LOUD**; multi-session ยังไม่ทดสอบ |
+| **D3** stable job key | ✅ key / ⚠️ uniqueness | key = **`fileName\|step\|role`** (cols 5/9/11). **ไม่มี id นิ่งระดับแถว** (ไม่มี `taskId`/`workflowInstanceId`/`data-id`); token `ID-<hex>` ในเซลล์ File **ไม่ unique** (2 แถวใช้ token เดียวกัน) → `xtm_task_id` เก็บเป็น hash ของ composite จนกว่าจะเจอ id จริง; **uniqueness ของ composite ต้องยืนยันกับงาน relist จริง** |
+| **D4** accept flow + สัญญาณสำเร็จ | 🔴 **NEEDS CAPTURE (BLOCKER)** | **ไม่มีปุ่ม/เมนู accept ในหน้าเลย** (ตอน recon Active มีแต่งานที่รับแล้ว + Planned ว่าง) + **ไม่มี accept endpoint ใน network**. ปุ่ม Accept (เมนู kebab `[data-testid=context-menu-button]` หรือ dialog Details `[aria-haspopup=dialog]`) + สัญญาณสำเร็จ (toast? re-fetch `getInProgressElements.serv`?) = **สมมติฐาน** ต้องเก็บ evidence ตอนงาน Malay ตัวแรกเข้า → **`ACCEPT_ENABLED=0` จนกว่าจะยืนยัน** |
+| **D5** network/JSON endpoint | ⚠️ **PARTIAL** | `getInProgressElements.serv` (GET) = list งาน; `getTasksProgress.serv` (POST) = progress; query/body ถูกตัดใน log → เก็บ request เต็มครั้งเดียว อาจอ่าน JSON แทน scrape DOM + ได้ language code/real id แบบ locale-independent (optimization) |
+| **D6** ค่าภาษา Malay | ✅ **CONFIRMED** | **`Malay (Malaysia)`** (text ตรงทั้ง 2 แถว, col 7); source = `English (USA)`. เป็น text แปลตาม locale (`en_GB`) → เก็บใน config (`ACCEPT_LANGUAGES`) + parser **fail loud** ถ้าเจอภาษาที่ไม่รู้จัก (กัน fail-silent) |
+| **D7** sheet tab/gid | n/a | ฝั่ง Google ไม่อยู่ใน recon นี้ (config/ops step — gid `285987136`) |
+| **D8** Closed URL/marker | ✅ struct / ⚠️ removed | แท็บ Closed = `aria-controls="CLOSED_TASKS"` doc `my-inbox-closed-tasks-page.action`; marker `input#tasksState[value="FINISHED"]`; **12 คอลัมน์ ไม่มีคอลัมน์ status** → **Closed-vs-Removed ตัดสินด้วย presence/absence** (หายจาก Active + เจอใน Closed = Closed; หาย + ไม่เจอ = Removed); **semantics ของ Removed ต้องเก็บ evidence** (ไม่เจอตัวอย่างงานที่ถูกยกเลิก) |
+
+### URL ที่ควรตั้งใน `.env` (ยืนยันจาก network.json)
+
+```
+XTM_ACOLAD_PORTAL_URL=https://xtm.acolad.com/project-manager-gui/login.jsp
+XTM_ACOLAD_OFFERS_URL=https://xtm.acolad.com/project-manager-gui/my-inbox-pages.action   # outer page (โฮสต์ iframe; default = Active)
+XTM_ACOLAD_CLOSED_URL=https://xtm.acolad.com/project-manager-gui/my-inbox-closed-tasks-page.action
+```
+
+> หมายเหตุ: bot โหลดหน้า outer แล้ว **คลิกแท็บใน iframe** (`aria-controls`) เพื่อสลับ
+> Active/Closed — ไม่ top-navigate iframe โดยตรง; CLOSED_URL ไว้เป็น fallback/อ้างอิง
+
+### ยังต้องเก็บ evidence-first (ตอนงาน Malay ตัวแรกเข้า)
+
+1. **D4 ปุ่ม Accept + endpoint + สัญญาณสำเร็จ** (BLOCKER ของการเปิด `ACCEPT_ENABLED=1`)
+2. **D3 real task id** จาก popover Details/kebab (ถ้ามี) — ไม่งั้นใช้ hash ต่อ
+3. **D2 selector ช่อง login จริง** (id/ng-model ของ user/pass)
+4. **D8 ตัวอย่างงาน Removed** เพื่อยืนยันกติกา presence/absence + ช่วง retention ของ Closed
+5. **D5 JSON ของ `getInProgressElements.serv`** (optimization: อ่าน JSON แทน DOM)
