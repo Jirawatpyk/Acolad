@@ -203,7 +203,7 @@ log โดยไม่ต้องมี Sheets/Chat)
 
 ### Tests for US3 (MANDATORY — Constitution II) ⚠️ เขียนก่อน ต้อง FAIL
 
-- [ ] T044 [P] [US3] `tests/unit/notifier.test.ts`: 🆕 งานใหม่ (eligible/skip),
+- [x] T044 [P] [US3] `tests/unit/notifier.test.ts`: 🆕 งานใหม่ (eligible/skip),
       ✅ รับงานแล้ว, ⚠️ กดรับไม่สำเร็จ/โดนแย่ง — เวลา ISO 8601 +07:00
       (contracts/notifications.md)
 - [ ] T045 [P] [US3] `tests/integration/coldStartSummary.test.ts`: 1 ข้อความสรุป
@@ -211,7 +211,7 @@ log โดยไม่ต้องมี Sheets/Chat)
 
 ### Implementation for US3
 
-- [ ] T046 [US3] เพิ่ม template ข้อความใหม่ใน `src/reporting/notifier.ts` (new/
+- [x] T046 [US3] เพิ่ม template ข้อความใหม่ใน `src/reporting/notifier.ts` (new/
       accepted/failed) — reuse formatter เดิม
 - [ ] T047 [US3] cold-start summary message + wire ใน bootstrap/pollLoop
 - [ ] T048 [US3] wire เหตุการณ์ (new/accepted/failed) → outbox channel `chat` ใน
