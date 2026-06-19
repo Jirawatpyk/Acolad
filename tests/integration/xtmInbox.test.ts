@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { readActiveSnapshot } from '../../src/portal/xtmInbox.js';
 import { LayoutChangedError, PortalTimeoutError } from '../../src/portal/errors.js';

@@ -4,7 +4,16 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['dist/', 'node_modules/', 'coverage/', 'logs/', 'state/', '.remember/', '*.cjs'],
+    ignores: [
+      'dist/',
+      'dist-recon/',
+      'node_modules/',
+      'coverage/',
+      'logs/',
+      'state/',
+      '.remember/',
+      '*.cjs',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
@@ -28,5 +37,19 @@ export default tseslint.config(
       'src/runtime/main.ts',
     ],
     rules: { 'no-console': 'off' },
+  },
+  {
+    // Standalone Node CLI tools (recon, etc.) — outside tsconfig; print to stdout
+    // by design and use node globals (process/console). TS checks undefined names,
+    // so no-undef is off here as it is for src/ under typescript-eslint.
+    files: ['scripts/**/*.ts'],
+    rules: {
+      'no-console': 'off',
+      'no-undef': 'off',
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
+    },
   },
 );

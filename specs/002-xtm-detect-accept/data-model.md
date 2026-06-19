@@ -26,8 +26,8 @@ Meta: baseline_done, accept_enabled_effective, ...
 
 | Field | Type | Constraint | ที่มา |
 |-------|------|-----------|-------|
-| job_key | TEXT | PRIMARY KEY | R3 — `fileId\|step\|role` (normalize lower/trim, คั่น `\|`) — ยืนยัน recon |
-| xtm_task_id | TEXT | NULLABLE | id/`ID-xxxx` ดิบจาก XTM (ถ้ามี data-id ใช้ตัวนั้น) |
+| job_key | TEXT | PRIMARY KEY | R3 — **`fileName\|step\|role`** (recon ยืนยัน: XTM ไม่มี stable row-id/`fileId`; token `ID-<hex>` **ไม่ unique**) normalize lower/trim คั่น `\|`; uniqueness ของ composite ยังต้องยืนยันกับงาน relist จริง |
+| xtm_task_id | TEXT | NULLABLE | token `ID-<hex>` จากเซลล์ File — **อ้างอิงเท่านั้น ไม่ใช้เป็น key** (ไม่ unique); ถ้า recon เจอ real id ภายหลังค่อยเก็บตัวนั้น |
 | project_name | TEXT | NOT NULL | คอลัมน์ Project (malformed ถ้าว่าง → quarantine) |
 | file_name | TEXT | NOT NULL | คอลัมน์ File |
 | source_lang | TEXT | NULLABLE | คอลัมน์ Source |

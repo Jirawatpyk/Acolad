@@ -134,7 +134,9 @@ describe('db migration v1 -> v2 (existing production db)', () => {
     for (const col of NEW_COLS) expect(c).toContain(col);
 
     // Legacy job row preserved and given safe defaults.
-    const j = db.prepare("SELECT title, accept_status, eligible FROM jobs WHERE job_key='legacy'").get() as {
+    const j = db
+      .prepare("SELECT title, accept_status, eligible FROM jobs WHERE job_key='legacy'")
+      .get() as {
       title: string;
       accept_status: string;
       eligible: number;

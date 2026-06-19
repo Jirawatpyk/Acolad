@@ -153,7 +153,9 @@ async function captureAcceptMenu(page: Page, dir: string): Promise<void> {
       await snapshot(page, dir, '07b-accept-submenu-fullpage');
       console.log('[recon] captured Accept submenu (hover only — NO accept performed)');
     } else {
-      console.log('[recon] accept-menu: "Accept task" not found by exact text — captured top menu only');
+      console.log(
+        '[recon] accept-menu: "Accept task" not found by exact text — captured top menu only',
+      );
     }
   } catch (err) {
     console.warn(`[recon] accept-menu failed: ${err instanceof Error ? err.message : err}`);
@@ -180,7 +182,6 @@ async function main(): Promise<void> {
 
   const portalUrl = requireEnv('XTM_ACOLAD_PORTAL_URL');
   const offersUrl = requireEnv('XTM_ACOLAD_OFFERS_URL');
-  const closedUrl = process.env.XTM_ACOLAD_CLOSED_URL?.trim() ?? '';
   const company = requireEnv('XTM_ACOLAD_Company');
   const username = requireEnv('XTM_ACOLAD_Username');
   const password = requireEnv('XTM_ACOLAD_Password');
@@ -202,10 +203,20 @@ async function main(): Promise<void> {
     const page = await context.newPage();
 
     page.on('request', (r) =>
-      net.push({ phase: 'request', method: r.method(), url: stripQuery(r.url()), resourceType: r.resourceType() }),
+      net.push({
+        phase: 'request',
+        method: r.method(),
+        url: stripQuery(r.url()),
+        resourceType: r.resourceType(),
+      }),
     );
     page.on('response', (r) =>
-      net.push({ phase: 'response', method: r.request().method(), url: stripQuery(r.url()), status: r.status() }),
+      net.push({
+        phase: 'response',
+        method: r.request().method(),
+        url: stripQuery(r.url()),
+        status: r.status(),
+      }),
     );
 
     // 1) Login page (D3 — login field selectors)
@@ -215,20 +226,40 @@ async function main(): Promise<void> {
     // 2) Best-effort login (selectors unconfirmed — candidates only)
     const filledCompany = await fillFirst(
       page,
-      ['#j_company', 'input[name="companyName"]', 'input[name="j_company"]', 'input[name="company"]', '#company'],
+      [
+        '#j_company',
+        'input[name="companyName"]',
+        'input[name="j_company"]',
+        'input[name="company"]',
+        '#company',
+      ],
       company,
     );
     const filledUser = await fillFirst(
       page,
-      ['#j_username', 'input[name="userId"]', 'input[name="userName"]', 'input[name="j_username"]', 'input[name="username"]', '#username'],
+      [
+        '#j_username',
+        'input[name="userId"]',
+        'input[name="userName"]',
+        'input[name="j_username"]',
+        'input[name="username"]',
+        '#username',
+      ],
       username,
     );
     const filledPass = await fillFirst(
       page,
-      ['#j_password', 'input[type="password"]', 'input[name="password"]', 'input[name="j_password"]'],
+      [
+        '#j_password',
+        'input[type="password"]',
+        'input[name="password"]',
+        'input[name="j_password"]',
+      ],
       password,
     );
-    console.log(`[recon] login fields filled — company:${filledCompany} user:${filledUser} pass:${filledPass}`);
+    console.log(
+      `[recon] login fields filled — company:${filledCompany} user:${filledUser} pass:${filledPass}`,
+    );
     await clickFirst(page, [
       'button[type="submit"]',
       'input[type="submit"]',
