@@ -8,7 +8,12 @@ import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
 import { Heartbeat, type HeartbeatPinger } from '../monitoring/heartbeat.js';
 import type { XtmPortalClient } from '../portal/xtmClient.js';
 import { XtmPollCycle } from './xtmPollCycle.js';
-import { CaptchaDetectedError, LayoutChangedError, LoginFailedError } from '../portal/errors.js';
+import {
+  CaptchaDetectedError,
+  LayoutChangedError,
+  LoginFailedError,
+  PaginationDetectedError,
+} from '../portal/errors.js';
 import type { AppConfig } from '../config/index.js';
 import type { Logger } from '../monitoring/logger.js';
 import { type Clock, systemClock } from '../clock.js';
@@ -227,6 +232,10 @@ export class XtmPollLoop {
         await this.dispatcher.flush(at, this.clock.nowMs());
       } else if (err instanceof LayoutChangedError) {
         raiseAlert(this.db, this.outbox, 'layout_changed', at, err.message);
+        await this.dispatcher.flush(at, this.clock.nowMs());
+      } else if (err instanceof PaginationDetectedError) {
+        // FR-009: more jobs than one page — surface so read scope can be widened.
+        raiseAlert(this.db, this.outbox, 'pagination', at, err.message);
         await this.dispatcher.flush(at, this.clock.nowMs());
       } else {
         // Transient (network/timeout/session): track the portal-down window.

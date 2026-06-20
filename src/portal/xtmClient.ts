@@ -10,7 +10,12 @@ import { readActiveSnapshot, readClosedKeys as readClosedKeysFromGrid } from './
 import { acceptEligibleTasks } from './xtmAccept.js';
 import { captureEvidence } from './evidence.js';
 import { XTM } from './selectors.js';
-import { LayoutChangedError, SessionExpiredError } from './errors.js';
+import {
+  LayoutChangedError,
+  SessionExpiredError,
+  PaginationDetectedError,
+  CaptchaDetectedError,
+} from './errors.js';
 import type { AcceptTarget, AcceptResult } from './errors.js';
 
 /**
@@ -80,8 +85,22 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     try {
       return await this.ops.readActiveOnce(page, pollCycleId);
     } catch (err) {
+      // A classified non-session portal failure (layout/pagination/captcha) keeps its
+      // classification — never let the logged-out probe demote it to a silent re-login.
+      const classified =
+        err instanceof LayoutChangedError ||
+        err instanceof PaginationDetectedError ||
+        err instanceof CaptchaDetectedError;
+      let loggedOut = false;
+      if (!classified) {
+        try {
+          loggedOut = await this.ops.isLoggedOut(page);
+        } catch {
+          throw err; // probe itself failed → preserve the ORIGINAL classification
+        }
+      }
       // Session expired mid-read (shared account) → re-login once, silently.
-      if (err instanceof SessionExpiredError || (await this.ops.isLoggedOut(page))) {
+      if (err instanceof SessionExpiredError || loggedOut) {
         await this.login(page);
         await this.navigateToInbox(page);
         return this.ops.readActiveOnce(page, pollCycleId);

@@ -67,22 +67,45 @@ export async function acceptEligibleTasks(
   deps: AcceptDeps,
 ): Promise<AcceptResult[]> {
   if (targets.length === 0) return [];
-  const targetLang = targets[0]?.targetLang ?? '';
-  try {
-    await openBulkAcceptForLanguage(scope, targetLang);
-  } catch {
-    const evidencePath = await deps.captureEvidence('accept_unconfirmed');
-    // Bounded reason only — the raw Playwright message must NOT reach Sheets/Chat
-    // (contracts/sheets.md "Note = evidence ref only"); the screenshot/HTML holds detail.
-    const reason = `accept menu path not found; evidence: ${evidencePath ?? 'n/a'}`;
-    // Never assume success — mark all targets failed pending the FR-024 re-read.
-    return targets.map((t) => ({ jobKey: t.jobKey, outcome: 'failed' as const, reason }));
+
+  // The bulk action claims "Accept all tasks for THIS language in this group", so
+  // each distinct eligible language needs its own menu pass. Grouping keeps a
+  // multi-language ACCEPT_LANGUAGES correct (today it is Malay-only, but a second
+  // language must not be silently stranded as failed — the pre-fix bug used only
+  // targets[0].targetLang).
+  const byLang = new Map<string, AcceptTarget[]>();
+  for (const t of targets) {
+    const lang = t.targetLang ?? '';
+    const group = byLang.get(lang);
+    if (group) group.push(t);
+    else byLang.set(lang, [t]);
   }
+
+  const failed: AcceptResult[] = [];
   // Stamp the confirm-click moment BEFORE the re-read so click latency (V16)
   // excludes the re-read cost that outcome latency (V16b) includes.
-  const clickedAt = deps.nowIso();
+  let clickedAt: string | undefined;
+  for (const [lang, group] of byLang) {
+    try {
+      await openBulkAcceptForLanguage(scope, lang);
+      clickedAt = deps.nowIso();
+    } catch {
+      const evidencePath = await deps.captureEvidence('accept_unconfirmed');
+      // Bounded reason only — the raw Playwright message must NOT reach Sheets/Chat
+      // (contracts/sheets.md "Note = evidence ref only"); the screenshot/HTML holds detail.
+      const reason = `accept menu path not found; evidence: ${evidencePath ?? 'n/a'}`;
+      // Never assume success — mark this language's targets failed.
+      for (const t of group) failed.push({ jobKey: t.jobKey, outcome: 'failed' as const, reason });
+    }
+  }
+
+  const attempted = targets.filter((t) => !failed.some((f) => f.jobKey === t.jobKey));
+  // No menu opened (every language failed) → skip the re-read (rate budget, FR-027).
+  if (attempted.length === 0) return failed;
+  // One authoritative re-read of Active attributes every claimed target (FR-024).
   const reRead = await deps.reReadActive();
-  return determineAcceptOutcomes(targets, reRead, deps.nowIso(), clickedAt);
+  const outcomes = determineAcceptOutcomes(attempted, reRead, deps.nowIso(), clickedAt);
+  return [...outcomes, ...failed];
 }
 
 /** Drive the row menu to the bulk "for this language in this group" option. */

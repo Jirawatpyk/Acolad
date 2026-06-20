@@ -1,7 +1,7 @@
 import type { Frame, Page } from 'playwright';
 import { z } from 'zod';
 import { XTM } from './selectors.js';
-import { LayoutChangedError, PortalTimeoutError } from './errors.js';
+import { LayoutChangedError, PortalTimeoutError, PaginationDetectedError } from './errors.js';
 import { computeXtmJobKey } from '../detection/jobKey.js';
 import type { XtmRawJob, XtmJobSnapshot } from '../detection/types.js';
 
@@ -68,12 +68,17 @@ export function normalizeXtmDue(raw: string | null): string | null {
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}:${p(d.getUTCMinutes())}+07:00`;
 }
 
-/** Total item count from the footer ("1 - 2 of 2" -> 2); null when unparseable. */
-export function parseItemsTotal(footer: string | null): number | null {
+/** Footer range ("1 - 50 of 120" -> {end:50, total:120}); null when unparseable. */
+export function parseItemsRange(footer: string | null): { end: number; total: number } | null {
   if (!footer) return null;
   // Digits only so the locale word ("of"/"von"/...) never matters.
   const m = footer.match(/(\d+)\s*-\s*(\d+)\D+(\d+)/);
-  return m ? Number(m[3]) : null;
+  return m ? { end: Number(m[2]), total: Number(m[3]) } : null;
+}
+
+/** Total item count from the footer ("1 - 2 of 2" -> 2); null when unparseable. */
+export function parseItemsTotal(footer: string | null): number | null {
+  return parseItemsRange(footer)?.total ?? null;
 }
 
 /**
@@ -174,6 +179,23 @@ export async function readActiveSnapshot(
     const parsed = rawXtmJobSchema.safeParse(candidate);
     if (parsed.success) jobs.push(parsed.data);
     else malformed.push(row);
+  }
+
+  // FR-009: the bot reads exactly ONE page. If the footer's last-shown index is
+  // below the total, later pages exist and their jobs would be silently dropped —
+  // fail loud (the spec assumes a single page; revisit before scaling read scope).
+  const footerForRange = await scope
+    .locator(XTM.active.itemsCount)
+    .first()
+    .textContent()
+    .catch(() => null);
+  const range = parseItemsRange(footerForRange);
+  if (range && range.end < range.total) {
+    const evidencePath = await captureEvidence('pagination');
+    throw new PaginationDetectedError(
+      `Active grid paginated: showing ${range.end} of ${range.total} — page 2+ would be missed`,
+      evidencePath,
+    );
   }
 
   return finalizeSnapshot(scope, jobs, malformed, capturedAt, pollCycleId, captureEvidence);

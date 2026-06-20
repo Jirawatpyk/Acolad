@@ -94,4 +94,28 @@ describe('PlaywrightXtmClient.fetchJobSnapshot — session recovery (FR-021 / T0
     expect(ops.login).not.toHaveBeenCalled(); // never re-logins on a real layout failure
     expect(ops.readActiveOnce).toHaveBeenCalledTimes(1); // no silent retry
   });
+
+  it('does not let a logged-out probe demote a classified layout error (I3)', async () => {
+    const { browser, rate } = fakes();
+    let probes = 0;
+    const ops: XtmOps = {
+      // First call = the initial pre-read check (logged in, no pre-login). A SECOND
+      // call would only come from the catch probe and would say "logged out". The
+      // fix must NOT make that second call for a classified error — so the layout
+      // error survives instead of being demoted to a silent re-login.
+      isLoggedOut: vi.fn(async () => {
+        probes++;
+        return probes > 1;
+      }),
+      login: vi.fn(async () => {}),
+      readActiveOnce: vi.fn(async () => {
+        throw new LayoutChangedError('grid marker gone');
+      }),
+    };
+    const client = new PlaywrightXtmClient(browser, cfg, rate, clock, ops);
+
+    await expect(client.fetchJobSnapshot('c4')).rejects.toBeInstanceOf(LayoutChangedError);
+    expect(probes).toBe(1); // only the initial check — the catch did NOT probe
+    expect(ops.login).not.toHaveBeenCalled(); // not demoted to a silent re-login
+  });
 });

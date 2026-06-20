@@ -120,6 +120,33 @@ describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 
     }
   });
 
+  it('attempts the accept menu once per distinct language, not just targets[0] (I2)', async () => {
+    const captured: string[] = [];
+    const reReadActive = vi.fn(async (): Promise<XtmRawJob[]> => []);
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async (reason) => {
+        captured.push(reason);
+        return 'state/evidence/accept_unconfirmed';
+      },
+      nowIso: () => AT,
+    };
+    const out = await acceptEligibleTasks(
+      timingOutFrame(),
+      [
+        { jobKey: 'k1', targetLang: 'Malay (Malaysia)' },
+        { jobKey: 'k2', targetLang: 'Indonesian' },
+      ],
+      deps,
+    );
+    expect(out).toHaveLength(2);
+    expect(out.every((o) => o.outcome === 'failed')).toBe(true);
+    // Both language groups get their own menu pass → evidence captured twice (the
+    // pre-fix single-group bug captured once and stranded the second language).
+    expect(captured).toHaveLength(2);
+    expect(reReadActive).not.toHaveBeenCalled(); // every group failed → no re-read
+  });
+
   it('returns an empty result without touching the page for no targets', async () => {
     const deps: AcceptDeps = {
       reReadActive: vi.fn(async () => []),

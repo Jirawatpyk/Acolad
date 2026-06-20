@@ -87,10 +87,14 @@ export function thaiRow(over: Partial<XtmRowSpec> = {}): string {
 
 export function xtmActivePage(
   rows: string[],
-  opts: { state?: string; total?: number } = {},
+  opts: { state?: string; total?: number; shown?: number } = {},
 ): string {
   const state = opts.state ?? 'ACTIVE';
   const total = opts.total ?? rows.length;
+  // `shown` = the last item index on THIS page (footer "1 - shown of total").
+  // Defaults to total so existing fixtures are unchanged; set shown < total to
+  // simulate a paginated grid (more items exist on later pages).
+  const end = opts.shown ?? total;
   const lo = total === 0 ? 0 : 1;
   return (
     `<!DOCTYPE html><html><head><title>Tasks</title></head>` +
@@ -104,7 +108,7 @@ export function xtmActivePage(
     `<th>Role</th><th>Segments</th><th>Words</th><th>Progress</th><th></th></tr></thead>` +
     `<tbody class="table__tableBody--1Pixi">${rows.join('')}</tbody>` +
     `</table>` +
-    `<div data-testid="listing-section-footer"><span class="itemsCount__itemCount--1BMuy">${lo} - ${total} of ${total}</span></div>` +
+    `<div data-testid="listing-section-footer"><span class="itemsCount__itemCount--1BMuy">${lo} - ${end} of ${total}</span></div>` +
     `<div class="en_GB" id="context-menus-container"></div>` +
     `</div></body></html>`
   );

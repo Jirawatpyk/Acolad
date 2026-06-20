@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { readActiveSnapshot } from '../../src/portal/xtmInbox.js';
-import { LayoutChangedError, PortalTimeoutError } from '../../src/portal/errors.js';
+import {
+  LayoutChangedError,
+  PortalTimeoutError,
+  PaginationDetectedError,
+} from '../../src/portal/errors.js';
 import {
   xtmActivePage,
   xtmEmptyActivePage,
@@ -67,6 +71,14 @@ describe('readActiveSnapshot (XTM Active grid)', () => {
     const snap = await snapshotOf(xtmActivePage([malayRow(), broken], { total: 2 }));
     expect(snap.jobs).toHaveLength(1);
     expect(snap.malformed).toHaveLength(1);
+  });
+
+  it('fails loud when the Active grid is paginated (FR-009 — page 2+ would be missed)', async () => {
+    // Footer "1 - 2 of 5": two rows on this page but five total → later pages exist.
+    await page.setContent(xtmActivePage([malayRow(), thaiRow()], { total: 5, shown: 2 }));
+    await expect(
+      readActiveSnapshot(page, 'cycle-1', '2026-06-19T10:00:00+07:00', noEvidence, FAST),
+    ).rejects.toBeInstanceOf(PaginationDetectedError);
   });
 
   it('confirms a genuinely empty Active tab (footer 0 of 0)', async () => {
