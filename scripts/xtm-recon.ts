@@ -27,6 +27,31 @@ type Scope = Page | Frame;
 
 loadDotenv();
 
+const SECRETS = [
+  process.env.XTM_ACOLAD_Password,
+  process.env.XTM_ACOLAD_Username,
+  process.env.XTM_ACOLAD_Company,
+].filter((s): s is string => Boolean(s));
+
+/**
+ * Mask credential/session values before writing recon HTML (FR-012): password/
+ * email fields and session/CSRF token inputs (#uust, #xcbid) plus any configured
+ * secret string. Mirrors src/portal/htmlSanitize.ts (kept local so this script
+ * compiles standalone).
+ */
+function sanitize(html: string): string {
+  let out = html.replace(/<input\b[^>]*>/gi, (tag) =>
+    /type=["'](?:password|email)["']/i.test(tag) ||
+    /(?:id|name|ng-model)=["'][^"']*(?:uust|xcbid|password|token|csrf|session|cookie)[^"']*["']/i.test(
+      tag,
+    )
+      ? tag.replace(/(\bvalue=["'])[^"']*(["'])/i, '$1[REDACTED]$2')
+      : tag,
+  );
+  for (const s of SECRETS) out = out.split(s).join('[REDACTED]');
+  return out;
+}
+
 interface NetEntry {
   phase: 'request' | 'response';
   method: string;
@@ -89,7 +114,7 @@ async function dumpFrameHtml(frame: Frame | null, dir: string, name: string): Pr
   }
   try {
     await frame.waitForLoadState('networkidle').catch(() => undefined);
-    writeFileSync(join(dir, `${name}.html`), await frame.content(), 'utf8');
+    writeFileSync(join(dir, `${name}.html`), sanitize(await frame.content()), 'utf8');
     console.log(`[recon] captured ${name} (iframe content)`);
   } catch (err) {
     console.warn(`[recon] dump ${name} failed: ${err instanceof Error ? err.message : err}`);
@@ -129,7 +154,7 @@ async function captureAcceptMenu(page: Page, dir: string): Promise<void> {
     await page.waitForTimeout(700);
     // The menu may render in the iframe document or a top-document portal — dump both.
     await dumpFrameHtml(frame, dir, '07-accept-menu-iframe');
-    writeFileSync(join(dir, '07-accept-menu-page.html'), await page.content(), 'utf8');
+    writeFileSync(join(dir, '07-accept-menu-page.html'), sanitize(await page.content()), 'utf8');
     await snapshot(page, dir, '07-accept-menu-fullpage');
 
     // Expand the "Accept task" submenu by HOVER only (exact text → never an action item).
@@ -149,7 +174,11 @@ async function captureAcceptMenu(page: Page, dir: string): Promise<void> {
     if (hovered) {
       await page.waitForTimeout(800);
       await dumpFrameHtml(frame, dir, '07b-accept-submenu-iframe');
-      writeFileSync(join(dir, '07b-accept-submenu-page.html'), await page.content(), 'utf8');
+      writeFileSync(
+        join(dir, '07b-accept-submenu-page.html'),
+        sanitize(await page.content()),
+        'utf8',
+      );
       await snapshot(page, dir, '07b-accept-submenu-fullpage');
       console.log('[recon] captured Accept submenu (hover only — NO accept performed)');
     } else {
@@ -166,7 +195,7 @@ async function captureAcceptMenu(page: Page, dir: string): Promise<void> {
 
 async function snapshot(page: Page, dir: string, name: string): Promise<void> {
   try {
-    writeFileSync(join(dir, `${name}.html`), await page.content(), 'utf8');
+    writeFileSync(join(dir, `${name}.html`), sanitize(await page.content()), 'utf8');
     await page.screenshot({ path: join(dir, `${name}.png`), fullPage: true });
     console.log(`[recon] captured ${name}`);
   } catch (err) {

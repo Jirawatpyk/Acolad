@@ -2,6 +2,9 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Page } from 'playwright';
 import { XTM } from './selectors.js';
+import { sanitizeHtml } from './htmlSanitize.js';
+
+export { sanitizeHtml };
 
 /**
  * Capture HTML + screenshot of the current page for diagnostics (Constitution V).
@@ -47,18 +50,4 @@ export async function captureEvidence(
     // Evidence capture must never crash the bot.
     return undefined;
   }
-}
-
-export function sanitizeHtml(html: string, secrets: string[]): string {
-  let out = html;
-  // Mask any value="..." on password/email inputs.
-  out = out.replace(
-    /(<input[^>]*type=["'](?:password|email)["'][^>]*value=["'])[^"']*(["'])/gi,
-    '$1[REDACTED]$2',
-  );
-  // Scrub concrete secret strings.
-  for (const s of secrets) {
-    if (s && out.includes(s)) out = out.split(s).join('[REDACTED]');
-  }
-  return out;
 }
