@@ -46,7 +46,7 @@ export function createXtmBot(): XtmBot {
 
   const browser = new BrowserSession(cfg.STATE_DIR, cfg.BROWSER_RECYCLE_HOURS, systemClock.nowMs);
   const rate = new RateLimiter(cfg.REQUESTS_PER_HOUR_CAP);
-  const client = new PlaywrightXtmClient(browser, cfg, rate, systemClock);
+  const client = new PlaywrightXtmClient(browser, cfg, rate, systemClock, undefined, logger);
   const sheetSink = new SheetSink(
     new GoogleSheetsApi(
       cfg.GOOGLE_SHEETS_ID,

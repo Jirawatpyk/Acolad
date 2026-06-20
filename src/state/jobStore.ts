@@ -1,7 +1,8 @@
 import type { DB } from './db.js';
-import type { JobState } from '../detection/types.js';
+import type { JobState, XtmAcceptStatus, XtmLifecycleStatus } from '../detection/types.js';
 
-export type AcceptStatus = 'none' | 'accepting' | 'accepted' | 'failed';
+/** Canonical accept-status union lives in detection/types.ts — re-exported here. */
+export type AcceptStatus = XtmAcceptStatus;
 /** Confirmed accept outcome (after the FR-024 re-read), mirrors AcceptResult. */
 export type AcceptOutcome = 'accepted' | 'missing' | 'failed';
 
@@ -76,7 +77,7 @@ export class JobStore {
    * was never actually accepted.
    */
   recordAcceptOutcome(jobKey: string, outcome: AcceptOutcome, at: string | null): void {
-    const map: Record<AcceptOutcome, { accept: AcceptStatus; lifecycle: string }> = {
+    const map: Record<AcceptOutcome, { accept: AcceptStatus; lifecycle: XtmLifecycleStatus }> = {
       accepted: { accept: 'accepted', lifecycle: 'accepted' },
       missing: { accept: 'none', lifecycle: 'missing' },
       failed: { accept: 'failed', lifecycle: 'accept_failed' },

@@ -85,6 +85,10 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     action: 'เก็บสำเนา .corrupt-* ไว้วิเคราะห์ และตรวจสุขภาพดิสก์',
     hasRecovered: false,
   },
+  // Raised with a per-job dedup key (`accept_failed:<jobKey>`) and never auto-resolved
+  // (hasRecovered:false) — so a given job alerts ONCE and a repeat failure of the SAME
+  // job is intentionally deduped (avoids per-cycle spam while accept stays unconfirmed).
+  // Distinct jobs still each alert. Revisit if per-incident re-alerting is ever needed.
   accept_failed: {
     severity: 'critical',
     title: 'กดรับงานไม่สำเร็จ (ยืนยันไม่ได้)',

@@ -2,6 +2,7 @@ import type { Page, Frame } from 'playwright';
 import type { AppConfig } from '../config/index.js';
 import { secretValues } from '../config/index.js';
 import type { Clock } from '../clock.js';
+import type { Logger } from '../monitoring/logger.js';
 import type { RateLimiter } from '../runtime/rateLimiter.js';
 import type { XtmJobSnapshot } from '../detection/types.js';
 import { BrowserSession } from './browser.js';
@@ -61,6 +62,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     private readonly rate: RateLimiter,
     private readonly clock: Clock,
     ops?: XtmOps,
+    private readonly logger?: Logger,
   ) {
     this.ops = ops ?? {
       isLoggedOut: (page) => isXtmLoggedOut(page),
@@ -136,6 +138,16 @@ export class PlaywrightXtmClient implements XtmPortalClient {
       },
       captureEvidence: evidence,
       nowIso: () => this.clock.nowIso(),
+      logError: (err) =>
+        this.logger?.warn(
+          {
+            module: 'xtmAccept',
+            action: 'accept',
+            outcome: 'error',
+            errKind: (err as { kind?: string }).kind ?? 'unknown',
+          },
+          err instanceof Error ? err.message : 'accept menu failed',
+        ),
     });
   }
 

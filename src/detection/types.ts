@@ -81,7 +81,15 @@ export type XtmLifecycleStatus =
 
 export type XtmAcceptStatus = 'none' | 'accepting' | 'accepted' | 'failed';
 
-/** Persisted state of an XTM job between poll cycles (appearance + business fields). */
+/**
+ * Persisted state of an XTM job between poll cycles (appearance + business fields).
+ * Deliberately FLAT (one field per DB column) rather than a discriminated union on
+ * accept status: the accept invariants (none→accepting→accepted/failed, acceptedAt
+ * only when accepted) are enforced at the write boundary by the JobStore state machine
+ * (claimForAccept / recordAcceptOutcome), not the type. A union refactor is a possible
+ * future tightening but is not pursued here — it would fan out across the DB-row mapping,
+ * diff, and Sheets layers for no present bug.
+ */
 export interface XtmJobState extends BaseJobState {
   xtmTaskId: string | null;
   projectName: string;

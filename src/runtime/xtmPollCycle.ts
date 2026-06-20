@@ -132,6 +132,7 @@ export class XtmPollCycle {
     const detectedMs = Date.parse(snapshot.capturedAt);
     const candidates: XtmJobState[] = [];
     const disappearedAccepted: XtmJobState[] = [];
+    const skipNotes = new Map<string, string>(); // jobKey → why it was skipped (Sheet note)
     let acceptedThisCycle = 0;
 
     for (const ev of result.events) {
@@ -139,11 +140,13 @@ export class XtmPollCycle {
       if (!s) continue;
 
       if (ev.eventType === 'missing') {
-        // A job the bot never accepted leaving Active → Missing (FR-014). An
-        // accepted job that left Active is resolved Closed vs Removed below.
+        // A job the bot never touched leaving Active → Missing (FR-014). An accepted
+        // job that left Active is resolved Closed vs Removed below. A job already in
+        // accept_failed/accepting (e.g. stranded-mid-accept recovered this cycle) keeps
+        // that lifecycle — disappearing must not relabel it the softer 'missing'.
         if (s.acceptStatus === 'accepted') {
           disappearedAccepted.push(s);
-        } else {
+        } else if (s.acceptStatus === 'none') {
           s.lifecycleStatus = 'missing';
           summary.missing++;
         }
@@ -162,6 +165,7 @@ export class XtmPollCycle {
       });
       if (decision.action === 'skip') {
         s.lifecycleStatus = 'skipped';
+        skipNotes.set(ev.jobKey, decision.reason); // surface WHY (non-Malay / cap) on the Sheet
         summary.skipped++;
       } else if (decision.action === 'disabled') {
         s.lifecycleStatus = 'new'; // eligible, but auto-accept is off (FR-012)
@@ -174,7 +178,8 @@ export class XtmPollCycle {
 
     // FR-014: an accepted job that left Active is Closed (found in the Closed tab)
     // or Removed (cancelled/reassigned). Checked ONLY on disappearance to respect
-    // the rate budget (FR-027). Without a closedReader the job is left as-is.
+    // the rate budget (FR-027). bootstrap always wires a closedReader in production;
+    // the guarded path keeps the job 'accepted' as-is only when one is absent (tests).
     if (disappearedAccepted.length > 0 && this.closedReader) {
       const closedKeys = await this.closedReader.readClosedKeys();
       for (const s of disappearedAccepted) {
@@ -276,7 +281,7 @@ export class XtmPollCycle {
           ? outcome.reason
           : outcome?.outcome === 'missing'
             ? 'snatched'
-            : null;
+            : (skipNotes.get(ev.jobKey) ?? null); // skipped → record the skip reason
       this.outbox.enqueue(
         `sheet:${base}`,
         JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, note) }),

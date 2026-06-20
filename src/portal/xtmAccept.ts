@@ -48,6 +48,8 @@ export interface AcceptDeps {
   reReadActive: () => Promise<XtmRawJob[]>;
   captureEvidence: (reason: string) => Promise<string | undefined>;
   nowIso: () => string;
+  /** Log the real (redaction-safe) cause of an accept-menu failure, if available. */
+  logError?: (err: unknown) => void;
 }
 
 /**
@@ -89,7 +91,8 @@ export async function acceptEligibleTasks(
     try {
       await openBulkAcceptForLanguage(scope, lang);
       clickedAt = deps.nowIso();
-    } catch {
+    } catch (err) {
+      deps.logError?.(err); // surface the real cause (which step/selector) — redacted by the logger
       const evidencePath = await deps.captureEvidence('accept_unconfirmed');
       // Bounded reason only — the raw Playwright message must NOT reach Sheets/Chat
       // (contracts/sheets.md "Note = evidence ref only"); the screenshot/HTML holds detail.

@@ -150,6 +150,44 @@ describe('XtmPollCycle (US1 — detect, accept, record)', () => {
     expect(only().lifecycleStatus).toBe('skipped');
   });
 
+  it('honors the per-cycle accept cap through the orchestrator (FR-025)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    const summary = await new XtmPollCycle(db, cfg({ ACCEPT_MAX_PER_CYCLE: 2 }), acc).run(
+      snap([
+        xraw({ fileName: 'a.docx' }),
+        xraw({ fileName: 'b.docx' }),
+        xraw({ fileName: 'c.docx' }),
+      ]),
+    );
+    expect(summary.accepted).toBe(2);
+    expect(summary.skipped).toBe(1); // third eligible job over the cap
+    expect(acc.calls[0]).toHaveLength(2); // only two claimed/attempted this cycle
+  });
+
+  it('writes the skip reason to the Sheet note for a skipped job (S4)', async () => {
+    fresh();
+    await new XtmPollCycle(db, cfg(), new StubAcceptor()).run(snap([xraw({ targetLang: 'Thai' })]));
+    const rows = db.prepare("SELECT payload_json FROM outbox WHERE channel='sheets'").all() as {
+      payload_json: string;
+    }[];
+    const note = (JSON.parse(rows[0]!.payload_json) as { row: { note: string | null } }).row.note;
+    expect(note).toContain('not eligible'); // the reason is no longer silently dropped
+  });
+
+  it('keeps accept_failed (not missing) when a stranded-accepting job also disappears', async () => {
+    fresh();
+    const cycle = new XtmPollCycle(db, cfg(), new StubAcceptor());
+    await cycle.run(snap([xraw()], 'c1')); // accepted
+    // Simulate a crash mid-accept: accept_status stuck 'accepting' (lifecycle stays
+    // a valid value — 'accepting' is an accept_status, not a lifecycle_status).
+    db.prepare("UPDATE jobs SET accept_status='accepting' WHERE file_name='a.docx'").run();
+    await cycle.run(snap([], 'c2')); // job gone from Active this cycle
+    const s = only();
+    expect(s.acceptStatus).toBe('failed');
+    expect(s.lifecycleStatus).toBe('accept_failed'); // recovered, NOT relabeled the softer 'missing'
+  });
+
   it('records a snatched outcome as missing (FR-010)', async () => {
     fresh();
     const acc = new StubAcceptor();

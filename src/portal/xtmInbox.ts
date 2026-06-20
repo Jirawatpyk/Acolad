@@ -274,7 +274,10 @@ export async function readClosedKeys(scope: GridScope): Promise<Set<string>> {
   );
   const keys = new Set<string>();
   for (const r of scraped) {
-    keys.add(computeXtmJobKey({ fileName: r.file ?? '', step: r.step, role: r.role }));
+    // A Closed row with no file cell is malformed — never key on an empty file
+    // (a degenerate '' key could falsely match another empty-file row).
+    if (!r.file || r.file.trim() === '') continue;
+    keys.add(computeXtmJobKey({ fileName: r.file, step: r.step, role: r.role }));
   }
   return keys;
 }
