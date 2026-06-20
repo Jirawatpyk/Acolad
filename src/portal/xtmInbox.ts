@@ -248,16 +248,11 @@ export async function readClosedKeys(scope: GridScope): Promise<Set<string>> {
     .catch(() => undefined);
   const scraped = await scope.locator(`${XTM.closed.gridContainer} tbody tr`).evaluateAll(
     (rows, sel) => {
-      const cell = (
-        el: { querySelector(q: string): { textContent: string | null } | null },
-        q: string,
-      ): string | null => {
+      const cell = (el: Queryable, q: string): string | null => {
         const n = el.querySelector(q);
         return n && n.textContent ? n.textContent.trim() : null;
       };
-      return (
-        rows as unknown as { querySelector(q: string): { textContent: string | null } | null }[]
-      )
+      return (rows as unknown as Queryable[])
         .filter((r) => r.querySelector(sel.kebab) !== null)
         .map((el) => ({
           file: cell(el, sel.file),

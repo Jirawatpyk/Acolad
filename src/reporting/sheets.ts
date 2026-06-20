@@ -149,8 +149,8 @@ export interface SheetSender {
 
 /** googleapis error → dispatcher retry semantics: 401/403 permanent, else transient. */
 function classifyError(err: unknown): SendOutcome {
-  const code =
-    (err as { code?: number; status?: number }).code ?? (err as { status?: number }).status;
+  const e = err as { code?: number; status?: number };
+  const code = e.code ?? e.status;
   return code === 401 || code === 403 ? 'permanent' : 'transient';
 }
 

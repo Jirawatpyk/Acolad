@@ -276,12 +276,14 @@ export class XtmPollCycle {
       if (!s) continue;
       const base = `${ev.jobKey}|${s.lifecycleStatus}|${snapshot.pollCycleId}`;
       const outcome = acceptResults.get(ev.jobKey);
-      const note =
-        outcome?.outcome === 'failed'
-          ? outcome.reason
-          : outcome?.outcome === 'missing'
-            ? 'snatched'
-            : (skipNotes.get(ev.jobKey) ?? null); // skipped → record the skip reason
+      let note: string | null;
+      if (outcome?.outcome === 'failed') {
+        note = outcome.reason;
+      } else if (outcome?.outcome === 'missing') {
+        note = 'snatched';
+      } else {
+        note = skipNotes.get(ev.jobKey) ?? null; // skipped → record the skip reason
+      }
       this.outbox.enqueue(
         `sheet:${base}`,
         JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, note) }),
@@ -362,11 +364,14 @@ export class XtmPollCycle {
     if (eventType === 'missing') return undefined;
     // A job that disappeared and returned is announced as relisted, not new (FR-019).
     if (eventType === 'relisted') return renderXtmRelisted(s, firstSeenAt, at);
-    const note = s.eligible
-      ? this.cfg.ACCEPT_ENABLED
-        ? 'เข้าเกณฑ์มาเลย์ (MS) — กำลังกดรับ'
-        : 'เข้าเกณฑ์มาเลย์ (MS) — auto-accept ปิดอยู่'
-      : 'ไม่ใช่มาเลย์ — บันทึกไว้เฉย ๆ';
+    let note: string;
+    if (!s.eligible) {
+      note = 'ไม่ใช่มาเลย์ — บันทึกไว้เฉย ๆ';
+    } else if (this.cfg.ACCEPT_ENABLED) {
+      note = 'เข้าเกณฑ์มาเลย์ (MS) — กำลังกดรับ';
+    } else {
+      note = 'เข้าเกณฑ์มาเลย์ (MS) — auto-accept ปิดอยู่';
+    }
     return renderXtmNewJob(s, at, note);
   }
 }
