@@ -119,6 +119,28 @@ describe('XtmPollCycle (US1 — detect, accept, record)', () => {
     expect(summary.acceptLatencies).toHaveLength(0); // but no NaN sample emitted
   });
 
+  it('collects reconEligible for an eligible job when ACCEPT_RECON is on + accept off', async () => {
+    fresh();
+    const summary = await new XtmPollCycle(
+      db,
+      cfg({ ACCEPT_ENABLED: false, ACCEPT_RECON: true }),
+      new StubAcceptor(),
+    ).run(snap([xraw()]));
+    expect(summary.reconEligible).toHaveLength(1);
+    expect(summary.reconEligible[0]?.targetLang).toBe('Malay (Malaysia)');
+    expect(summary.eligibleDisabled).toBe(1); // detected only — never accepted
+  });
+
+  it('collects no reconEligible when ACCEPT_RECON is off', async () => {
+    fresh();
+    const summary = await new XtmPollCycle(
+      db,
+      cfg({ ACCEPT_ENABLED: false }),
+      new StubAcceptor(),
+    ).run(snap([xraw()]));
+    expect(summary.reconEligible).toHaveLength(0);
+  });
+
   it('skips a non-Malay job and never calls accept for it (FR-007)', async () => {
     fresh();
     const acc = new StubAcceptor();

@@ -27,6 +27,13 @@ const schema = z.object({
     .string()
     .optional()
     .transform((v) => v === '1'),
+  // Evidence-only: when 1 (and ACCEPT_ENABLED=0), capture the real per-row accept
+  // menu DOM (hover only, NEVER clicks accept) so the live "Accept task" vs "Finish
+  // task" signal can be confirmed and computed into acceptAvailable. Safe to leave on.
+  ACCEPT_RECON: z
+    .string()
+    .optional()
+    .transform((v) => v === '1'),
   ACCEPT_LANGUAGES: z
     .string()
     .default('Malay (Malaysia)')

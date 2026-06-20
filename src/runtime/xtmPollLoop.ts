@@ -137,6 +137,35 @@ export class XtmPollLoop {
         );
       }
 
+      // ACCEPT_RECON (accept off): capture the live accept-menu DOM for the first
+      // eligible job — hover only, NEVER accepts — while it is still in Active this
+      // cycle (beats the < 1 min snatch window). Best-effort; a one-time Chat ping
+      // (deduped event_id) tells the team the menu is ready to verify.
+      if (summary.reconEligible.length > 0 && this.client.captureAcceptMenu) {
+        try {
+          const path = await this.client.captureAcceptMenu(summary.reconEligible);
+          if (path) {
+            this.logger.info(
+              { module: 'acceptRecon', action: 'capture', outcome: 'ok', evidence: path },
+              'captured accept menu DOM',
+            );
+            this.outbox.enqueue(
+              'accept_recon_captured',
+              JSON.stringify({
+                text: `🔍 เก็บ DOM เมนู accept จริงแล้ว (${path}) — พร้อม verify selector + คำนวณ acceptAvailable ก่อนเปิด accept`,
+              }),
+              this.clock.nowIso(),
+              'chat',
+            );
+          }
+        } catch (e) {
+          this.logger.warn(
+            { module: 'acceptRecon', action: 'capture', outcome: 'error' },
+            e instanceof Error ? e.message : 'accept-menu recon capture failed',
+          );
+        }
+      }
+
       const disp = await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
 
       if (snapshot.malformed.length > 0) {

@@ -64,6 +64,11 @@ describe('loadConfig', () => {
     expect(loadConfig({ ...base, ACCEPT_ENABLED: '1' }).ACCEPT_ENABLED).toBe(true);
   });
 
+  it('defaults ACCEPT_RECON to false and parses =1 as true (hover-only menu capture)', () => {
+    expect(loadConfig({ ...base }).ACCEPT_RECON).toBe(false);
+    expect(loadConfig({ ...base, ACCEPT_RECON: '1' }).ACCEPT_RECON).toBe(true);
+  });
+
   it('parses ACCEPT_LANGUAGES as a trimmed csv list', () => {
     const cfg = loadConfig({ ...base, ACCEPT_LANGUAGES: 'Malay (Malaysia), Thai , ' });
     expect(cfg.ACCEPT_LANGUAGES).toEqual(['Malay (Malaysia)', 'Thai']);

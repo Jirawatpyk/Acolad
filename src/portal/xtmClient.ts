@@ -9,6 +9,7 @@ import { BrowserSession } from './browser.js';
 import { performXtmLogin, isXtmLoggedOut, type XtmCredentials } from './xtmLogin.js';
 import { readActiveSnapshot, readClosedKeys as readClosedKeysFromGrid } from './xtmInbox.js';
 import { acceptEligibleTasks } from './xtmAccept.js';
+import { captureAcceptMenuDom } from './xtmAcceptRecon.js';
 import { captureEvidence } from './evidence.js';
 import { XTM } from './selectors.js';
 import {
@@ -31,6 +32,8 @@ export interface XtmPortalClient {
   fetchJobSnapshot(pollCycleId: string): Promise<XtmJobSnapshot>;
   /** Bulk-accept eligible (Malay) tasks; outcome per job from the FR-024 re-read. */
   acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]>;
+  /** Evidence-only (ACCEPT_RECON): capture the real accept-menu DOM, hover only, no accept. */
+  captureAcceptMenu?(targets: AcceptTarget[]): Promise<string | undefined>;
   /** Job keys in the Closed tab (FR-014 Closed-vs-Removed; only on disappearance). */
   readClosedKeys(): Promise<Set<string>>;
   /** Recycle the browser if its scheduled lifetime elapsed (Constitution VIII). */
@@ -149,6 +152,23 @@ export class PlaywrightXtmClient implements XtmPortalClient {
           err instanceof Error ? err.message : 'accept menu failed',
         ),
     });
+  }
+
+  async captureAcceptMenu(targets: AcceptTarget[]): Promise<string | undefined> {
+    if (targets.length === 0) return undefined;
+    const page = await this.browser.page();
+    const frame = await this.activeFrame(page);
+    const secrets = secretValues(this.cfg);
+    const evidence = (reason: string): Promise<string | undefined> =>
+      captureEvidence(page, this.cfg.STATE_DIR, reason, this.clock.nowIso(), secrets);
+    try {
+      return await captureAcceptMenuDom(frame, targets[0]?.targetLang ?? '', {
+        captureEvidence: evidence,
+      });
+    } finally {
+      // Close the menu — pressing Escape performs no action on the task.
+      await page.keyboard.press('Escape').catch(() => undefined);
+    }
   }
 
   async readClosedKeys(): Promise<Set<string>> {

@@ -60,6 +60,7 @@ class StubClient implements XtmPortalClient {
   async acceptEligibleTasks(): Promise<[]> {
     return [];
   }
+  captureAcceptMenu = vi.fn(async () => 'state/evidence/accept_menu_recon-x');
   async readClosedKeys(): Promise<Set<string>> {
     return new Set();
   }
@@ -119,6 +120,27 @@ describe('XtmPollLoop (runtime driver)', () => {
     expect(heartbeat.ok).toHaveBeenCalledTimes(1);
     expect(heartbeat.fail).not.toHaveBeenCalled();
     expect(sheet.rows.length).toBeGreaterThanOrEqual(1); // job logged to Sheets
+  });
+
+  it('captures the accept-menu DOM and pings Chat once when ACCEPT_RECON is on', async () => {
+    fresh();
+    const client = new StubClient();
+    client.snapshot = snap([xraw()]); // one eligible Malay job, accept off
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ ACCEPT_ENABLED: false, ACCEPT_RECON: true }),
+      noopLogger,
+      clock,
+      { chatSender: okChat, sheetSender: new CapturingSheet(), heartbeat },
+    );
+    await loop.runOnce();
+    expect(client.captureAcceptMenu).toHaveBeenCalledTimes(1); // hover-only menu capture
+    const ping = db
+      .prepare("SELECT 1 FROM outbox WHERE event_id='accept_recon_captured' AND channel='chat'")
+      .all();
+    expect(ping.length).toBe(1); // one-time, deduped notification
   });
 
   it('ensures the Sheet header even when Active is empty (no jobs → still headed)', async () => {

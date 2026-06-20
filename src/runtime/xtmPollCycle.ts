@@ -53,6 +53,8 @@ export interface XtmCycleSummary {
   removed: number;
   /** One entry per confirmed accept this cycle (empty while ACCEPT_ENABLED=0). */
   acceptLatencies: AcceptLatencySample[];
+  /** Eligible jobs to recon the accept-menu DOM for (ACCEPT_RECON on + accept off). */
+  reconEligible: AcceptTarget[];
 }
 
 /**
@@ -128,6 +130,7 @@ export class XtmPollCycle {
       closed: 0,
       removed: 0,
       acceptLatencies: [],
+      reconEligible: [],
     };
     const detectedMs = Date.parse(snapshot.capturedAt);
     const candidates: XtmJobState[] = [];
@@ -170,6 +173,11 @@ export class XtmPollCycle {
       } else if (decision.action === 'disabled') {
         s.lifecycleStatus = 'new'; // eligible, but auto-accept is off (FR-012)
         summary.eligibleDisabled++;
+        // Capture the live accept-menu DOM for this eligible job (hover only, in the
+        // loop) so acceptAvailable can be computed before auto-accept is ever enabled.
+        if (this.cfg.ACCEPT_RECON) {
+          summary.reconEligible.push({ jobKey: s.jobKey, targetLang: s.targetLang ?? '' });
+        }
       } else {
         candidates.push(s);
         acceptedThisCycle++; // counts toward the per-cycle cap for the next decision
