@@ -71,8 +71,10 @@ export function normalizeXtmDue(raw: string | null): string | null {
 /** Footer range ("1 - 50 of 120" -> {end:50, total:120}); null when unparseable. */
 export function parseItemsRange(footer: string | null): { end: number; total: number } | null {
   if (!footer) return null;
-  // Digits only so the locale word ("of"/"von"/...) never matters.
-  const m = footer.match(/(\d+)\s*-\s*(\d+)\D+(\d+)/);
+  // Drop thousands separators (comma / NBSP / narrow-NBSP) so a grouped total like
+  // "1 - 50 of 1,200" is not truncated to 1. Digits-only match otherwise, so the
+  // locale word ("of"/"von"/...) never matters.
+  const m = footer.replace(/[,\s]/g, '').match(/(\d+)-(\d+)\D+(\d+)/);
   return m ? { end: Number(m[2]), total: Number(m[3]) } : null;
 }
 
@@ -184,18 +186,23 @@ export async function readActiveSnapshot(
   // FR-009: the bot reads exactly ONE page. If the footer's last-shown index is
   // below the total, later pages exist and their jobs would be silently dropped —
   // fail loud (the spec assumes a single page; revisit before scaling read scope).
-  const footerForRange = await scope
-    .locator(XTM.active.itemsCount)
-    .first()
-    .textContent()
-    .catch(() => null);
-  const range = parseItemsRange(footerForRange);
-  if (range && range.end < range.total) {
-    const evidencePath = await captureEvidence('pagination');
-    throw new PaginationDetectedError(
-      `Active grid paginated: showing ${range.end} of ${range.total} — page 2+ would be missed`,
-      evidencePath,
-    );
+  // ONLY when rows were actually observed: a still-loading grid can show a footer
+  // total before its rows render (e.g. "0 - 0 of N"), and that transient must fall
+  // through to finalizeSnapshot's empty-vs-loading classifier, not a hard pagination error.
+  if (scraped.length > 0) {
+    const footerForRange = await scope
+      .locator(XTM.active.itemsCount)
+      .first()
+      .textContent()
+      .catch(() => null);
+    const range = parseItemsRange(footerForRange);
+    if (range && range.end < range.total) {
+      const evidencePath = await captureEvidence('pagination');
+      throw new PaginationDetectedError(
+        `Active grid paginated: showing ${range.end} of ${range.total} — page 2+ would be missed`,
+        evidencePath,
+      );
+    }
   }
 
   return finalizeSnapshot(scope, jobs, malformed, capturedAt, pollCycleId, captureEvidence);

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
-import { readActiveSnapshot } from '../../src/portal/xtmInbox.js';
+import { readActiveSnapshot, readClosedKeys } from '../../src/portal/xtmInbox.js';
 import {
   LayoutChangedError,
   PortalTimeoutError,
@@ -81,6 +81,15 @@ describe('readActiveSnapshot (XTM Active grid)', () => {
     ).rejects.toBeInstanceOf(PaginationDetectedError);
   });
 
+  it('treats a footer-shows-more-but-no-rows grid as loading, not pagination (regression)', async () => {
+    // Shell rendered, rows not yet → footer "1 - 2 of 5" but tbody empty. Must be a
+    // transient (PortalTimeoutError), NOT a hard PaginationDetectedError.
+    await page.setContent(xtmActivePage([], { total: 5, shown: 2 }));
+    await expect(
+      readActiveSnapshot(page, 'cycle-1', '2026-06-19T10:00:00+07:00', noEvidence, FAST),
+    ).rejects.toBeInstanceOf(PortalTimeoutError);
+  });
+
   it('confirms a genuinely empty Active tab (footer 0 of 0)', async () => {
     const snap = await snapshotOf(xtmEmptyActivePage());
     expect(snap.jobs).toHaveLength(0);
@@ -101,5 +110,15 @@ describe('readActiveSnapshot (XTM Active grid)', () => {
     const snap = await snapshotOf(xtmActivePage([thaiRow({ target: 'Vietnamese' })]));
     expect(snap.jobs).toHaveLength(1);
     expect(snap.jobs[0]?.targetLang).toBe('Vietnamese');
+  });
+});
+
+describe('readClosedKeys (Closed-vs-Removed disambiguation)', () => {
+  it('keys valid rows and drops a Closed row with an empty file cell', async () => {
+    // The Closed grid shares the Active table structure; one valid row + one with
+    // no file. The empty-file row must NOT contribute a degenerate '' key.
+    await page.setContent(xtmActivePage([malayRow(), xtmRow({ file: '' })]));
+    const keys = await readClosedKeys(page);
+    expect(keys.size).toBe(1);
   });
 });

@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { PlaywrightXtmClient, type XtmOps } from '../../src/portal/xtmClient.js';
-import { SessionExpiredError, LayoutChangedError } from '../../src/portal/errors.js';
+import {
+  SessionExpiredError,
+  LayoutChangedError,
+  PaginationDetectedError,
+  CaptchaDetectedError,
+} from '../../src/portal/errors.js';
 import type { BrowserSession } from '../../src/portal/browser.js';
 import type { RateLimiter } from '../../src/runtime/rateLimiter.js';
 import type { AppConfig } from '../../src/config/index.js';
@@ -95,27 +100,35 @@ describe('PlaywrightXtmClient.fetchJobSnapshot — session recovery (FR-021 / T0
     expect(ops.readActiveOnce).toHaveBeenCalledTimes(1); // no silent retry
   });
 
-  it('does not let a logged-out probe demote a classified layout error (I3)', async () => {
-    const { browser, rate } = fakes();
-    let probes = 0;
-    const ops: XtmOps = {
-      // First call = the initial pre-read check (logged in, no pre-login). A SECOND
-      // call would only come from the catch probe and would say "logged out". The
-      // fix must NOT make that second call for a classified error — so the layout
-      // error survives instead of being demoted to a silent re-login.
-      isLoggedOut: vi.fn(async () => {
-        probes++;
-        return probes > 1;
-      }),
-      login: vi.fn(async () => {}),
-      readActiveOnce: vi.fn(async () => {
-        throw new LayoutChangedError('grid marker gone');
-      }),
-    };
-    const client = new PlaywrightXtmClient(browser, cfg, rate, clock, ops);
+  it.each([
+    ['LayoutChangedError', () => new LayoutChangedError('grid marker gone')],
+    ['PaginationDetectedError', () => new PaginationDetectedError('paginated')],
+    ['CaptchaDetectedError', () => new CaptchaDetectedError('captcha')],
+  ] as const)(
+    'does not let a logged-out probe demote a classified %s (I3)',
+    async (_name, makeErr) => {
+      const { browser, rate } = fakes();
+      let probes = 0;
+      const err = makeErr();
+      const ops: XtmOps = {
+        // First call = the initial pre-read check (logged in, no pre-login). A SECOND
+        // call would only come from the catch probe and would say "logged out". The
+        // fix must NOT make that second call for a classified error — so the error
+        // survives instead of being demoted to a silent re-login.
+        isLoggedOut: vi.fn(async () => {
+          probes++;
+          return probes > 1;
+        }),
+        login: vi.fn(async () => {}),
+        readActiveOnce: vi.fn(async () => {
+          throw err;
+        }),
+      };
+      const client = new PlaywrightXtmClient(browser, cfg, rate, clock, ops);
 
-    await expect(client.fetchJobSnapshot('c4')).rejects.toBeInstanceOf(LayoutChangedError);
-    expect(probes).toBe(1); // only the initial check — the catch did NOT probe
-    expect(ops.login).not.toHaveBeenCalled(); // not demoted to a silent re-login
-  });
+      await expect(client.fetchJobSnapshot('c4')).rejects.toBe(err); // original classification preserved
+      expect(probes).toBe(1); // only the initial check — the catch did NOT probe
+      expect(ops.login).not.toHaveBeenCalled(); // not demoted to a silent re-login
+    },
+  );
 });

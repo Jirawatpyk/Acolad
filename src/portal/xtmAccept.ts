@@ -84,13 +84,15 @@ export async function acceptEligibleTasks(
   }
 
   const failed: AcceptResult[] = [];
-  // Stamp the confirm-click moment BEFORE the re-read so click latency (V16)
-  // excludes the re-read cost that outcome latency (V16b) includes.
-  let clickedAt: string | undefined;
+  // Stamp each group's confirm-click moment BEFORE the re-read so click latency
+  // (V16) excludes the re-read cost that outcome latency (V16b) includes — keyed
+  // per job so a later group's click never overwrites an earlier group's latency.
+  const clickedAtByJob = new Map<string, string>();
   for (const [lang, group] of byLang) {
     try {
       await openBulkAcceptForLanguage(scope, lang);
-      clickedAt = deps.nowIso();
+      const groupClickedAt = deps.nowIso();
+      for (const t of group) clickedAtByJob.set(t.jobKey, groupClickedAt);
     } catch (err) {
       deps.logError?.(err); // surface the real cause (which step/selector) — redacted by the logger
       const evidencePath = await deps.captureEvidence('accept_unconfirmed');
@@ -107,7 +109,10 @@ export async function acceptEligibleTasks(
   if (attempted.length === 0) return failed;
   // One authoritative re-read of Active attributes every claimed target (FR-024).
   const reRead = await deps.reReadActive();
-  const outcomes = determineAcceptOutcomes(attempted, reRead, deps.nowIso(), clickedAt);
+  const outcomes = determineAcceptOutcomes(attempted, reRead, deps.nowIso()).map((o) => {
+    const clickedAt = clickedAtByJob.get(o.jobKey);
+    return o.outcome === 'accepted' && clickedAt !== undefined ? { ...o, clickedAt } : o;
+  });
   return [...outcomes, ...failed];
 }
 

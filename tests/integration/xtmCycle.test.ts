@@ -175,6 +175,29 @@ describe('XtmPollCycle (US1 — detect, accept, record)', () => {
     expect(note).toContain('not eligible'); // the reason is no longer silently dropped
   });
 
+  const lastSheetNote = (): string | null => {
+    const rows = db.prepare("SELECT payload_json FROM outbox WHERE channel='sheets'").all() as {
+      payload_json: string;
+    }[];
+    return (JSON.parse(rows.at(-1)!.payload_json) as { row: { note: string | null } }).row.note;
+  };
+
+  it('records the failure reason on the Sheet note for a failed accept', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    acc.outcome = 'failed';
+    await new XtmPollCycle(db, cfg(), acc).run(snap([xraw()]));
+    expect(lastSheetNote()).toBe('unconfirmed'); // StubAcceptor's failed reason, not silently dropped
+  });
+
+  it('records snatched on the Sheet note for a missing accept outcome', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    acc.outcome = 'missing';
+    await new XtmPollCycle(db, cfg(), acc).run(snap([xraw()]));
+    expect(lastSheetNote()).toBe('snatched');
+  });
+
   it('keeps accept_failed (not missing) when a stranded-accepting job also disappears', async () => {
     fresh();
     const cycle = new XtmPollCycle(db, cfg(), new StubAcceptor());
