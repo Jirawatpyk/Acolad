@@ -124,24 +124,23 @@ export async function readActiveSnapshot(
 
   // Scrape data rows only — rows that carry the per-row kebab (header/placeholder
   // rows do not), keyed by fixed column position (locale- and hash-independent).
-  const scraped = await scope.locator(`${XTM.active.gridContainer} tbody tr`).evaluateAll(
+  const allRows = await scope.locator(`${XTM.active.gridContainer} tbody tr`).evaluateAll(
     (rows, sel) => {
       const text = (el: Queryable, q: string): string | null => {
         const n = el.querySelector(q);
         return n && n.textContent ? n.textContent.trim() : null;
       };
-      return (rows as unknown as Queryable[])
-        .filter((r) => r.querySelector(sel.kebab) !== null)
-        .map((el) => ({
-          project: text(el, sel.project),
-          file: text(el, sel.file),
-          source: text(el, sel.source),
-          target: text(el, sel.target),
-          dueRaw: text(el, sel.due),
-          step: text(el, sel.step),
-          role: text(el, sel.role),
-          wordsRaw: text(el, sel.words),
-        }));
+      return (rows as unknown as Queryable[]).map((el) => ({
+        hasKebab: el.querySelector(sel.kebab) !== null,
+        project: text(el, sel.project),
+        file: text(el, sel.file),
+        source: text(el, sel.source),
+        target: text(el, sel.target),
+        dueRaw: text(el, sel.due),
+        step: text(el, sel.step),
+        role: text(el, sel.role),
+        wordsRaw: text(el, sel.words),
+      }));
     },
     {
       kebab: XTM.active.rowKebab,
@@ -155,6 +154,17 @@ export async function readActiveSnapshot(
       words: XTM.active.cell.words,
     },
   );
+  // A rendered DATA row (non-empty project/file) that carries no per-row kebab means
+  // the row markup changed — fail loud (FR-016), never silently drop real rows to
+  // no-data (which would mask a layout/pagination break as a self-healing transient).
+  if (allRows.some((r) => !r.hasKebab && (r.project || r.file))) {
+    const evidencePath = await captureEvidence('layout_changed');
+    throw new LayoutChangedError(
+      'Active grid rows are present but missing the per-row kebab anchor',
+      evidencePath,
+    );
+  }
+  const scraped = allRows.filter((r) => r.hasKebab);
 
   const jobs: XtmRawJob[] = [];
   const malformed: unknown[] = [];

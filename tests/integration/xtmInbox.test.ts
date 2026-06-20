@@ -81,6 +81,17 @@ describe('readActiveSnapshot (XTM Active grid)', () => {
     ).rejects.toBeInstanceOf(PaginationDetectedError);
   });
 
+  it('fails loud when a rendered data row is missing its kebab anchor (markup drift)', async () => {
+    // A real data row (project + file present) whose per-row kebab is gone — must NOT
+    // be silently dropped to a self-healing transient; the kebab is a structural anchor.
+    await page.setContent(
+      xtmActivePage([xtmRow({ project: 'Acme', file: 'f.docx', kebab: false })], { total: 1 }),
+    );
+    await expect(
+      readActiveSnapshot(page, 'cycle-1', '2026-06-19T10:00:00+07:00', noEvidence, FAST),
+    ).rejects.toBeInstanceOf(LayoutChangedError);
+  });
+
   it('treats a footer-shows-more-but-no-rows grid as loading, not pagination (regression)', async () => {
     // Shell rendered, rows not yet → footer "1 - 2 of 5" but tbody empty. Must be a
     // transient (PortalTimeoutError), NOT a hard PaginationDetectedError.

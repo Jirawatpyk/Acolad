@@ -108,7 +108,21 @@ export async function acceptEligibleTasks(
   // No menu opened (every language failed) → skip the re-read (rate budget, FR-027).
   if (attempted.length === 0) return failed;
   // One authoritative re-read of Active attributes every claimed target (FR-024).
-  const reRead = await deps.reReadActive();
+  // The re-read itself can throw (layout/pagination/timeout); never let that crash the
+  // whole cycle — the click already happened, so mark the attempted targets failed
+  // (never assume success) and let the next clean cycle / human resolve them.
+  let reRead;
+  try {
+    reRead = await deps.reReadActive();
+  } catch (err) {
+    deps.logError?.(err);
+    const evidencePath = await deps.captureEvidence('accept_unconfirmed');
+    const reason = `post-accept re-read failed; evidence: ${evidencePath ?? 'n/a'}`;
+    return [
+      ...attempted.map((t) => ({ jobKey: t.jobKey, outcome: 'failed' as const, reason })),
+      ...failed,
+    ];
+  }
   const outcomes = determineAcceptOutcomes(attempted, reRead, deps.nowIso()).map((o) => {
     const clickedAt = clickedAtByJob.get(o.jobKey);
     return o.outcome === 'accepted' && clickedAt !== undefined ? { ...o, clickedAt } : o;

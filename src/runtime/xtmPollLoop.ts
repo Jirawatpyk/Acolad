@@ -177,6 +177,16 @@ export class XtmPollLoop {
           `พบ ${snapshot.malformed.length} แถวที่ parse ไม่ผ่าน (quarantine)`,
         );
         await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
+      } else {
+        // Clean read → clear any standing layout alert (once). Resolving here, not in
+        // onCycleSuccess, avoids a recovered↔alert flap when a row stays malformed.
+        resolveAlert(
+          this.db,
+          this.outbox,
+          'layout_changed',
+          this.clock.nowIso(),
+          'อ่านหน้าได้ปกติ',
+        );
       }
 
       const stuck =
@@ -229,13 +239,9 @@ export class XtmPollLoop {
       this.firstPortalErrorMs = 0;
     }
     resolveAlert(this.db, this.outbox, 'login_failed', this.clock.nowIso(), 'login สำเร็จ');
-    resolveAlert(
-      this.db,
-      this.outbox,
-      'layout_changed',
-      this.clock.nowIso(),
-      'อ่านหน้าได้อีกครั้ง',
-    );
+    // layout_changed is resolved/raised in runOnce based on THIS cycle's malformed
+    // count — not here — so a persistently-malformed row does not flap recovered↔alert
+    // every cycle (onCycleSuccess runs before the malformed check).
   }
 
   private async handleError(err: unknown): Promise<void> {

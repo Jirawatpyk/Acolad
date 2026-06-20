@@ -26,7 +26,10 @@ export function computeCatchRate(rows: string[][], acceptLanguages: string[]): C
     if (!key || key === '') continue; // historical / non-bot row (FR-026)
     if (!langs.includes(norm(row[5]))) continue; // non-Malay
     const status = row[1];
-    if (status === 'Accepted') accepted++;
+    // 'Closed' = a job we accepted that later completed and moved to the Closed tab;
+    // it is still a successful catch, so count it with 'Accepted' (else the rate
+    // decays as accepted jobs finish — SC-001 would undercount over a day).
+    if (status === 'Accepted' || status === 'Closed') accepted++;
     else if (status === 'Missing') missing++;
     else if (status === 'Accept failed') failed++;
   }

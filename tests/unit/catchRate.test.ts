@@ -41,16 +41,17 @@ describe('computeCatchRate (SC-001)', () => {
     expect(cr.missing).toBe(0);
   });
 
-  it('ignores statuses outside the denominator (New/Skipped/Closed/Removed)', () => {
+  it('counts Closed as a successful accept, ignores New/Skipped/Removed', () => {
     const rows = [
       r('New', 'Malay (Malaysia)', 'a'),
       r('Skipped', 'Malay (Malaysia)', 'b'),
-      r('Closed', 'Malay (Malaysia)', 'c'),
-      r('Accepted', 'Malay (Malaysia)', 'd'),
+      r('Removed', 'Malay (Malaysia)', 'c'),
+      r('Closed', 'Malay (Malaysia)', 'd'), // accepted job that completed → still a catch
+      r('Accepted', 'Malay (Malaysia)', 'e'),
     ];
     const cr = computeCatchRate(rows, MALAY);
-    expect(cr.accepted).toBe(1);
-    expect(cr.missing + cr.failed).toBe(0);
+    expect(cr.accepted).toBe(2); // Accepted + Closed
+    expect(cr.missing + cr.failed).toBe(0); // New/Skipped/Removed not in the denominator
     expect(cr.ratePct).toBeCloseTo(100);
   });
 

@@ -149,6 +149,31 @@ describe('XTM failure modes (integrated, Constitution II/IV)', () => {
     expect(alerts.length).toBe(1);
   });
 
+  it('does not flap recovered↔alert while a row stays malformed across cycles (review #6)', async () => {
+    fresh();
+    const client = new StubClient();
+    client.snapshot = snap([xraw()], [{ junk: true }]); // persistently malformed
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const okSheet: SheetSender = {
+      async send() {
+        return 'ok';
+      },
+    };
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: okChat,
+      sheetSender: okSheet,
+      heartbeat,
+    });
+    await loop.runOnce(); // raise layout_changed
+    await loop.runOnce(); // still malformed — must NOT resolve+re-raise
+    const recovered = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_recovered' AND dedup_key LIKE 'layout_changed%'",
+      )
+      .get() as { n: number };
+    expect(recovered.n).toBe(0); // no spurious layout SYSTEM_RECOVERED while still broken
+  });
+
   it('persistent portal errors raise portal_down after the 10-minute window', async () => {
     fresh();
     const client = new StubClient();

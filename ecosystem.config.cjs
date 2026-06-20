@@ -19,6 +19,10 @@ module.exports = {
       time: true,
       env: {
         NODE_ENV: 'production',
+        // Pin the process timezone so normalizeXtmDue's Date.parse of an XTM Due cell
+        // (which carries no explicit zone) is interpreted as Bangkok regardless of the
+        // host OS setting — otherwise a non-Bangkok host shifts every due_date (review #7/#13).
+        TZ: 'Asia/Bangkok',
       },
     },
   ],
