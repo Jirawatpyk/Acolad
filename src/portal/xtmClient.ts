@@ -133,6 +133,10 @@ export class PlaywrightXtmClient implements XtmPortalClient {
       // FR-027: the post-accept re-read counts against the same rate budget.
       reReadActive: async () => {
         this.rate.record(this.clock.nowMs());
+        // The accept click mutates the grid via its own XHR (accepted rows leave
+        // Active) — settle it before the FR-024 re-read, or this authoritative
+        // read races stale rows and misclassifies a successful accept as failed.
+        await this.settleGrid(page, 'post-accept-reread');
         const snap = await readActiveSnapshot(
           frame,
           `reread-${this.clock.nowIso()}`,
@@ -205,7 +209,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
       .first()
       .waitFor({ state: 'attached', timeout: 10_000 })
       .catch(() => undefined);
-    await this.settleGrid(page); // Closed rows arrive via a later XHR than its shell, too
+    await this.settleGrid(page, 'closed'); // Closed rows arrive via a later XHR than its shell, too
     const keys = await readClosedKeysFromGrid(frame);
     // Return to Active so the next fetch reads the right tab — also a grid reload (FR-027).
     this.rate.record(this.clock.nowMs());
@@ -239,12 +243,33 @@ export class PlaywrightXtmClient implements XtmPortalClient {
    * so a read fired right after navigation/tab-switch sees 0 rows EVERY time even
    * when jobs are present. `networkidle` (no network for 500ms) is the only reliable
    * "data loaded" signal — it gives the true row count for both populated and
-   * genuinely-empty grids. Best-effort: a rare timeout (e.g. background polling)
-   * falls through to the existing empty-vs-loading classifier, no worse than before.
-   * Costs zero portal requests (FR-011) — it only observes the in-flight XHR.
+   * genuinely-empty grids. Costs zero portal requests (FR-011) — it only observes
+   * the in-flight XHR.
+   *
+   * On TIMEOUT we proceed (a hard throw would starve reads if XTM ever keeps the
+   * network busy), but we log LOUD (Constitution VI): a settle-timeout means the
+   * read that follows may race the data XHR and silently report a false "empty" —
+   * exactly the 0-jobs regression this guard exists to prevent. The warn makes that
+   * condition diagnosable instead of invisible (networkidle settles reliably for
+   * XTM today, so a timeout signals its network behavior changed).
    */
-  private async settleGrid(page: Page): Promise<void> {
-    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => undefined);
+  private async settleGrid(page: Page, context: string): Promise<void> {
+    const settled = await page
+      .waitForLoadState('networkidle', { timeout: 15_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!settled) {
+      this.logger?.warn(
+        {
+          module: 'xtmClient',
+          action: 'settleGrid',
+          outcome: 'timeout',
+          context,
+          timeoutMs: 15_000,
+        },
+        'grid networkidle did not settle — the following read may race the data XHR (false-empty / 0-jobs risk)',
+      );
+    }
   }
 
   private async login(page: Page): Promise<void> {
@@ -289,7 +314,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     }
     // The grid's row data arrives via a later XHR than the table shell — wait for it
     // to settle before any read, or the read sees 0 rows even when jobs are present.
-    await this.settleGrid(page);
+    await this.settleGrid(page, 'active');
     return frame;
   }
 

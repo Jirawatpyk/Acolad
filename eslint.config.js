@@ -40,10 +40,11 @@ export default tseslint.config(
     rules: { 'no-console': 'off' },
   },
   {
-    // Standalone Node CLI tools (recon, etc.) — outside tsconfig; print to stdout
-    // by design and use node globals (process/console). TS checks undefined names,
-    // so no-undef is off here as it is for src/ under typescript-eslint.
-    files: ['scripts/**/*.ts'],
+    // Standalone Node CLI tools (recon, diagnostics, etc.) — outside tsconfig; print
+    // to stdout by design and use node globals (process/console). TS checks undefined
+    // names, so no-undef is off here as it is for src/ under typescript-eslint. Covers
+    // both .ts sources and .mjs runners (e.g. verify-fix.mjs imports the built dist/).
+    files: ['scripts/**/*.ts', 'scripts/**/*.mjs'],
     rules: {
       'no-console': 'off',
       'no-undef': 'off',

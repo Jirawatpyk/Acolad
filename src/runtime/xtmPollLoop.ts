@@ -133,20 +133,24 @@ export class XtmPollLoop {
           this.lastDiagMs = this.clock.nowMs();
           try {
             const path = await this.client.captureDiag();
+            // captureDiag swallows internal failures and returns undefined — branch on
+            // the path so a silently-failed capture is not logged as a clean success
+            // (the diagnostic exists to chase a silent read, it must not fail silently).
             this.logger.info(
               {
                 module: 'diag',
                 action: 'capture',
-                outcome: 'ok',
+                outcome: path ? 'ok' : 'no_evidence',
+                pollCycleId,
                 jobsRead: snapshot.jobs.length,
                 malformed: snapshot.malformed.length,
                 evidence: path,
               },
-              'diag inbox capture',
+              path ? 'diag inbox capture' : 'diag capture produced no evidence',
             );
           } catch (e) {
             this.logger.warn(
-              { module: 'diag', action: 'capture', outcome: 'error' },
+              { module: 'diag', action: 'capture', outcome: 'error', pollCycleId },
               e instanceof Error ? e.message : 'diag capture failed',
             );
           }
