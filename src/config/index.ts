@@ -62,6 +62,13 @@ const schema = z.object({
     .string()
     .optional()
     .transform((v) => v === '1'),
+  // Diagnostic: when 1, capture the bot's OWN rendered inbox (HTML + iframe + screenshot,
+  // sanitized) every cycle so a missed job can be seen from the bot's exact view. Noisy
+  // (one capture per ~20s) — turn off after diagnosis.
+  DIAG: z
+    .string()
+    .optional()
+    .transform((v) => v === '1'),
 });
 
 export type AppConfig = z.infer<typeof schema>;

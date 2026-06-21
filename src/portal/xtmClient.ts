@@ -34,6 +34,8 @@ export interface XtmPortalClient {
   acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]>;
   /** Evidence-only (ACCEPT_RECON): capture the real accept-menu DOM, hover only, no accept. */
   captureAcceptMenu?(targets: AcceptTarget[]): Promise<string | undefined>;
+  /** Diagnostic (DIAG): capture the bot's own rendered inbox (HTML + iframe + screenshot). */
+  captureDiag?(): Promise<string | undefined>;
   /** Job keys in the Closed tab (FR-014 Closed-vs-Removed; only on disappearance). */
   readClosedKeys(): Promise<Set<string>>;
   /** Recycle the browser if its scheduled lifetime elapsed (Constitution VIII). */
@@ -154,6 +156,24 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     });
   }
 
+  /**
+   * DIAG: snapshot the bot's OWN rendered inbox right now (HTML + iframe grid +
+   * screenshot, sanitized). Zero extra portal requests — it serializes the page
+   * already loaded by fetchJobSnapshot — so it is rate-safe (FR-011) to run every
+   * cycle. Lets us see EXACTLY what the bot's session renders for Active when a job
+   * is reportedly present but read as jobs=0.
+   */
+  async captureDiag(): Promise<string | undefined> {
+    const page = await this.browser.page();
+    return captureEvidence(
+      page,
+      this.cfg.STATE_DIR,
+      'diag-active',
+      this.clock.nowIso(),
+      secretValues(this.cfg),
+    );
+  }
+
   async captureAcceptMenu(targets: AcceptTarget[]): Promise<string | undefined> {
     if (targets.length === 0) return undefined;
     const page = await this.browser.page();
@@ -185,6 +205,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
       .first()
       .waitFor({ state: 'attached', timeout: 10_000 })
       .catch(() => undefined);
+    await this.settleGrid(page); // Closed rows arrive via a later XHR than its shell, too
     const keys = await readClosedKeysFromGrid(frame);
     // Return to Active so the next fetch reads the right tab — also a grid reload (FR-027).
     this.rate.record(this.clock.nowMs());
@@ -207,6 +228,23 @@ export class PlaywrightXtmClient implements XtmPortalClient {
   private async navigateToInbox(page: Page): Promise<void> {
     this.rate.record(this.clock.nowMs());
     await page.goto(this.cfg.XTM_ACOLAD_OFFERS_URL, { waitUntil: 'domcontentloaded' });
+  }
+
+  /**
+   * Wait for the inbox grid's data XHR to settle before reading. ROOT-CAUSE fix
+   * (confirmed live, scripts/diag-race.ts): the XTM grid renders its table shell —
+   * thead AND a "0 - 0 of 0" footer AND a placeholder tbody row — IMMEDIATELY, then
+   * fills the real rows via a later XHR. Every DOM-level ready signal (thead, first
+   * tbody row, footer total) is therefore satisfied while the grid is still empty,
+   * so a read fired right after navigation/tab-switch sees 0 rows EVERY time even
+   * when jobs are present. `networkidle` (no network for 500ms) is the only reliable
+   * "data loaded" signal — it gives the true row count for both populated and
+   * genuinely-empty grids. Best-effort: a rare timeout (e.g. background polling)
+   * falls through to the existing empty-vs-loading classifier, no worse than before.
+   * Costs zero portal requests (FR-011) — it only observes the in-flight XHR.
+   */
+  private async settleGrid(page: Page): Promise<void> {
+    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => undefined);
   }
 
   private async login(page: Page): Promise<void> {
@@ -249,6 +287,9 @@ export class PlaywrightXtmClient implements XtmPortalClient {
         .waitFor({ state: 'attached', timeout: 10_000 })
         .catch(() => undefined);
     }
+    // The grid's row data arrives via a later XHR than the table shell — wait for it
+    // to settle before any read, or the read sees 0 rows even when jobs are present.
+    await this.settleGrid(page);
     return frame;
   }
 

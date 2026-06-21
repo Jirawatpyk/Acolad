@@ -43,6 +43,7 @@ export class XtmPollLoop {
   private loginFailures = 0;
   private lockoutUntilMs = 0;
   private firstPortalErrorMs = 0;
+  private lastDiagMs = 0;
 
   constructor(
     private readonly db: DB,
@@ -120,6 +121,37 @@ export class XtmPollLoop {
       const snapshot = await this.client.fetchJobSnapshot(pollCycleId);
       const summary = await this.cycle.run(snapshot);
       this.onCycleSuccess();
+
+      // DIAG (config.DIAG): snapshot the bot's OWN rendered Active grid right after
+      // the read, so a "job present but read as 0" can be inspected from the bot's
+      // exact view. Zero portal requests (serializes the already-loaded page), but
+      // throttled to ~60s to bound disk. Logs the jobs count seen so evidence and
+      // read agree/disagree visibly. Turn off after diagnosis.
+      if (this.cfg.DIAG && this.client.captureDiag) {
+        const sinceMs = this.clock.nowMs() - this.lastDiagMs;
+        if (this.lastDiagMs === 0 || sinceMs >= 60_000) {
+          this.lastDiagMs = this.clock.nowMs();
+          try {
+            const path = await this.client.captureDiag();
+            this.logger.info(
+              {
+                module: 'diag',
+                action: 'capture',
+                outcome: 'ok',
+                jobsRead: snapshot.jobs.length,
+                malformed: snapshot.malformed.length,
+                evidence: path,
+              },
+              'diag inbox capture',
+            );
+          } catch (e) {
+            this.logger.warn(
+              { module: 'diag', action: 'capture', outcome: 'error' },
+              e instanceof Error ? e.message : 'diag capture failed',
+            );
+          }
+        }
+      }
 
       // Per-accept latency lines for `npm run report:latency` (T050 / V16+V16b).
       // Empty while ACCEPT_ENABLED=0, so this is silent until accept is live.
