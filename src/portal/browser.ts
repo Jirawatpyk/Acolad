@@ -1,9 +1,11 @@
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { withTimeout } from '../withTimeout.js';
 
 const NAV_TIMEOUT_MS = 30_000;
 const ACTION_TIMEOUT_MS = 10_000;
+const CLOSE_TIMEOUT_MS = 8_000;
 
 /**
  * Owns the Chromium browser/context lifecycle. Persists session cookies via
@@ -86,13 +88,14 @@ export class BrowserSession {
   async recycle(): Promise<void> {
     const old = { browser: this.browser, context: this.context };
     await this.open();
-    await old.context?.close().catch(() => undefined);
-    await old.browser?.close().catch(() => undefined);
+    if (old.context) await withTimeout(old.context.close(), CLOSE_TIMEOUT_MS);
+    if (old.browser) await withTimeout(old.browser.close(), CLOSE_TIMEOUT_MS);
   }
 
   async dispose(): Promise<void> {
-    await this.context?.close().catch(() => undefined);
-    await this.browser?.close().catch(() => undefined);
+    // Bounded: a hung Chromium close() must never block shutdown (orphan root cause).
+    if (this.context) await withTimeout(this.context.close(), CLOSE_TIMEOUT_MS);
+    if (this.browser) await withTimeout(this.browser.close(), CLOSE_TIMEOUT_MS);
     this.context = undefined;
     this.browser = undefined;
   }
