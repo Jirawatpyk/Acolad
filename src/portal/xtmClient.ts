@@ -135,12 +135,16 @@ export class PlaywrightXtmClient implements XtmPortalClient {
       // FR-027: the post-accept re-read counts against the same rate budget.
       reReadActive: async () => {
         this.rate.record(this.clock.nowMs());
-        // The accept click mutates the grid via its own XHR (the row's menu flips
-        // Accept→Finish) — settle it before the FR-024 re-read, or this authoritative
-        // read races stale rows and misclassifies a successful accept as failed.
-        await this.settleGrid(page, 'post-accept-reread');
+        // RELOAD the inbox so the re-read sees the POST-accept grid. The accepted row's
+        // menu flips Accept→Finish only after the grid refreshes; reading the pre-accept
+        // frame IN PLACE re-opens a stale menu still showing "Accept task" and misreads a
+        // successful accept as "still acceptable" → false accept_failed (observed live
+        // 2026-06-22: the job WAS accepted but reported failed). Re-resolve the frame
+        // after navigation (the iframe reloaded), then read + probe acceptability fresh.
+        await this.navigateToInbox(page);
+        const freshFrame = await this.activeFrame(page);
         const snap = await readActiveSnapshot(
-          frame,
+          freshFrame,
           `reread-${this.clock.nowIso()}`,
           this.clock.nowIso(),
           evidence,
@@ -148,7 +152,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
         // D6: the grid does not expose acceptability — read it from each target row's
         // menu (Accept-task item present = still claimable; absent = we own it now) and
         // override the placeholder, so determineAcceptOutcomes tells accepted from failed.
-        const availability = await readAcceptAvailability(frame, page, targetKeys);
+        const availability = await readAcceptAvailability(freshFrame, page, targetKeys);
         return snap.jobs.map((j) => {
           const a = availability.get(computeXtmJobKey(j));
           return a === undefined ? j : { ...j, acceptAvailable: a };

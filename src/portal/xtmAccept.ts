@@ -93,6 +93,11 @@ export async function acceptEligibleTasks(
       await openBulkAcceptForLanguage(scope, lang);
       const groupClickedAt = deps.nowIso();
       for (const t of group) clickedAtByJob.set(t.jobKey, groupClickedAt);
+      // Capture the post-click DOM (e.g. a confirmation dialog) — XTM may require a
+      // confirm step before the accept commits; the FR-024 re-read reads "still
+      // acceptable" until it is handled. Evidence-first so the confirm selector can be
+      // wired. Best-effort; never blocks the re-read.
+      await deps.captureEvidence('post_accept_click');
     } catch (err) {
       deps.logError?.(err); // surface the real cause (which step/selector) — redacted by the logger
       const evidencePath = await deps.captureEvidence('accept_unconfirmed');
