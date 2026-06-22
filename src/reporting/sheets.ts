@@ -73,7 +73,11 @@ export function formatSheetDate(value: string | null): string {
   if (Number.isNaN(t)) return value;
   const d = new Date(t + 7 * 3_600_000); // shift to Asia/Bangkok (+07:00), then read UTC parts
   const p = (n: number): string => String(n).padStart(2, '0');
-  return `${p(d.getUTCDate())}/${p(d.getUTCMonth() + 1)}/${d.getUTCFullYear()} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+  const date = `${p(d.getUTCDate())}/${p(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+  // A date-only input (no time component) must not gain a spurious "07:00" from the
+  // +07 shift of UTC-midnight — show just the date.
+  const hasTime = value.includes('T') || /\d:\d/.test(value);
+  return hasTime ? `${date} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}` : date;
 }
 
 function rowToValues(r: SheetRow): string[] {

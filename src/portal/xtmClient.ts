@@ -153,6 +153,18 @@ export class PlaywrightXtmClient implements XtmPortalClient {
         // menu (Accept-task item present = still claimable; absent = we own it now) and
         // override the placeholder, so determineAcceptOutcomes tells accepted from failed.
         const availability = await readAcceptAvailability(freshFrame, page, targetKeys);
+        // A target PRESENT in the re-read but unresolved by the probe keeps the optimistic
+        // grid placeholder (true) and would be reported as a FALSE accept_failed — surface
+        // it LOUD (a probe/selector mismatch must be diagnosable, not a silent false alert).
+        const presentKeys = new Set(snap.jobs.map((j) => computeXtmJobKey(j)));
+        for (const k of targetKeys) {
+          if (presentKeys.has(k) && !availability.has(k)) {
+            this.logger?.warn(
+              { module: 'xtmClient', action: 'reread', outcome: 'probe_miss', jobKey: k },
+              'post-accept acceptability probe did not resolve a present target — will report failed (verify selectors)',
+            );
+          }
+        }
         return snap.jobs.map((j) => {
           const a = availability.get(computeXtmJobKey(j));
           return a === undefined ? j : { ...j, acceptAvailable: a };

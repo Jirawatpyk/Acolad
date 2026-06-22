@@ -38,11 +38,13 @@ export function decideAccept(i: AcceptDecisionInput): AcceptDecision {
   if (i.maxWords > 0 && i.words !== null && i.words > i.maxWords) {
     return { action: 'skip', reason: `exceeds max words (${i.words} > ${i.maxWords})` };
   }
-  // NOTE (latent, default 0 = unlimited): this caps the number of jobs the bot
-  // *labels* to accept, but the portal's bulk action ("Accept all tasks for this
-  // language in this group") claims the whole group at once — so an enabled cap can
-  // be exceeded on the portal and the over-cap rows are mislabeled Skipped for one
-  // cycle (the next re-read self-corrects). Redefine as max-groups before relying on it.
+  // WARNING (keep default 0 = unlimited): this caps how many jobs the bot *labels* to
+  // accept, but the portal's bulk action ("Accept all tasks for this language in this
+  // group") claims the WHOLE group in one click. With a cap > 0, sibling Malay jobs in
+  // the group are grabbed on the portal but left accept_status='none' — and the
+  // robustness pass (xtmPollCycle) then RE-ATTEMPTS them next cycle, hitting "Finish
+  // task" → false accept_failed alerts (it does NOT self-correct). Use cap 0, or redefine
+  // this as max-GROUPS, before ever setting it > 0. See [[xtm-accept-d6-finish-task]].
   if (i.maxPerCycle > 0 && i.acceptedThisCycle >= i.maxPerCycle) {
     return { action: 'skip', reason: `per-cycle accept cap reached (${i.maxPerCycle})` };
   }

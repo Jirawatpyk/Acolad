@@ -156,4 +156,40 @@ describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 
     expect(await acceptEligibleTasks(timingOutFrame(), [], deps)).toEqual([]);
     expect(deps.captureEvidence).not.toHaveBeenCalled();
   });
+
+  // A frame stub where openBulkAcceptForLanguage SUCCEEDS (one Malay row; "Accept task"
+  // + bulk items present) so the test can drive the post-accept re-read path.
+  const acceptingFrame = (): Frame => {
+    const loc = {
+      first: () => loc,
+      nth: () => loc,
+      locator: () => loc,
+      count: async () => 1,
+      textContent: async () => 'Malay (Malaysia)',
+      click: async () => {},
+      hover: async () => {},
+      waitFor: async () => {},
+    };
+    return { locator: () => loc } as unknown as Frame;
+  };
+
+  it('classifies a wholesale-empty post-accept re-read as failed, not missing (grid-race guard)', async () => {
+    const reReadActive = vi.fn(async (): Promise<XtmRawJob[]> => []); // 0 rows after accept
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async () => 'state/evidence/race',
+      nowIso: () => AT,
+    };
+    const out = await acceptEligibleTasks(
+      acceptingFrame(),
+      [{ jobKey: 'k1', targetLang: 'Malay (Malaysia)' }],
+      deps,
+    );
+    expect(reReadActive).toHaveBeenCalledTimes(1);
+    expect(out).toHaveLength(1);
+    // Accepted jobs STAY in Active, so an empty re-read is a grid race — conservative
+    // 'failed' (re-checkable + alerts), never the lossy 'missing' that resets to none.
+    expect(out[0]?.outcome).toBe('failed');
+    if (out[0]?.outcome === 'failed') expect(out[0].reason).toContain('grid race');
+  });
 });

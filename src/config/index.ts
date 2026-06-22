@@ -63,8 +63,8 @@ const schema = z.object({
     .optional()
     .transform((v) => v === '1'),
   // Diagnostic: when 1, capture the bot's OWN rendered inbox (HTML + iframe + screenshot,
-  // sanitized) every cycle so a missed job can be seen from the bot's exact view. Noisy
-  // (one capture per ~20s) — turn off after diagnosis.
+  // sanitized) so a missed job can be seen from the bot's exact view. Throttled to ~60s
+  // in xtmPollLoop (≈ every 3rd cycle at the 20s poll) — turn off after diagnosis.
   DIAG: z
     .string()
     .optional()

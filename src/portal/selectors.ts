@@ -161,17 +161,17 @@ export const XTM = {
     // Acceptable-job signal — locale-independent id prefix (label "Accept task").
     // Presence on a row's open menu ⇒ the job is claimable; absence ⇒ not (D6).
     acceptTaskItem: '[id^="TASK_LISTING_ACCEPT_GROUP_TASK_"]',
-    acceptTaskItemText: 'Accept task', // en_GB label fallback — FAIL LOUD if absent
-    finishTaskItemText: 'Finish task', // the not-acceptable case (D6) — accept item is simply absent
+    acceptTaskItemText: 'Accept task', // en_GB label (reference only; code matches acceptTaskItem id)
+    // Owned-by-us signal — the menu item that REPLACES "Accept task" after WE accept
+    // (CONFIRMED recon 2026-06-22). Presence ⇒ this row is already ours, NOT a failed
+    // accept — used to avoid re-attempting/false-failing a job a prior bulk grabbed.
+    finishTaskItem: '[id^="TASK_LISTING_FINISH_TASK"]',
+    finishTaskItemText: 'Finish task', // en_GB label (reference only)
     // FR-006 bulk option — CONFIRMED from the expanded submenu. Hovering acceptTaskItem
     // reveals 6 variants; this is the "all tasks for this language in this group" one.
     bulkForLanguageInGroupItem:
       '[id^="TASK_LISTING_ACCEPT_ALL_TASKS_OF_THIS_LANGUAGE_IN_THIS_GROUP_"]',
     bulkForLanguageInGroupText: 'Accept all tasks for this language in this group', // CONFIRMED en_GB label
-    // UNCONFIRMED — success signal: the FR-024 re-read (acceptAvailable from the row
-    // menu) is authoritative; no toast/endpoint is relied on.
-    successRefetchEndpoint: '/project-manager-gui/myinbox/getInProgressElements.serv',
-    successToast: 'div.xtm-toast, div.Toastify', // HYPOTHESIS — never observed firing
   },
 } as const;
 

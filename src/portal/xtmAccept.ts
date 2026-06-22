@@ -55,11 +55,11 @@ export interface AcceptDeps {
 /**
  * Bulk-accept all eligible (Malay) tasks via the row menu, then resolve each
  * target's outcome by re-reading Active (FR-024). The accept path is the kebab →
- * "Accept task" → "Accept all tasks for this language in this group" (R4, confirmed
- * from recon screenshots). The exact submenu DOM + success signal are confirmed
- * evidence-first on the first real job; until then any deviation FAILS LOUD
- * (AcceptUnconfirmedError + evidence) and the targets are recorded `failed` — the
- * adapter NEVER assumes an accept succeeded (FR-011).
+ * "Accept task" (stable-id submenu parent) → "Accept all tasks for this language in
+ * this group" — CONFIRMED from the 2026-06-22 recon (see selectors.ts). Any deviation
+ * on a live job FAILS LOUD (AcceptUnconfirmedError + evidence) and the targets are
+ * recorded `failed`; the adapter NEVER assumes an accept succeeded (FR-011). The
+ * authoritative per-job outcome comes from the re-read's menu probe, not the click.
  *
  * Guarded by ACCEPT_ENABLED upstream; with accept off this is never invoked.
  */
@@ -123,6 +123,19 @@ export async function acceptEligibleTasks(
     deps.logError?.(err);
     const evidencePath = await deps.captureEvidence('accept_unconfirmed');
     const reason = `post-accept re-read failed; evidence: ${evidencePath ?? 'n/a'}`;
+    return [
+      ...attempted.map((t) => ({ jobKey: t.jobKey, outcome: 'failed' as const, reason })),
+      ...failed,
+    ];
+  }
+  // A wholesale-empty re-read right after accepting is far more likely a grid race (the
+  // grid shell renders "0 - 0 of 0" before its data XHR) than every target being snatched
+  // at once — and accepted jobs STAY in Active (menu flips to "Finish task"), so a real
+  // accept never empties the list. Classify conservatively as FAILED (re-checkable +
+  // alerts), never the lossy 'missing' that resets accept_status to 'none' and re-attempts.
+  if (reRead.length === 0) {
+    const evidencePath = await deps.captureEvidence('accept_unconfirmed');
+    const reason = `post-accept re-read returned no rows (likely grid race); evidence: ${evidencePath ?? 'n/a'}`;
     return [
       ...attempted.map((t) => ({ jobKey: t.jobKey, outcome: 'failed' as const, reason })),
       ...failed,
@@ -201,12 +214,16 @@ async function openBulkAcceptForLanguage(scope: Scope, targetLang: string): Prom
 
   // The open dropdown renders inline as [data-dropdown-menu="true"] (the
   // #context-menus-container portal stays empty). The acceptable-job signal is the
-  // stable-id "Accept task" submenu parent (id prefix, locale-independent); its
-  // absence (e.g. the job shows "Finish task") means NOT acceptable — fail loud
-  // rather than click a wrong item.
+  // stable-id "Accept task" submenu parent (id prefix, locale-independent).
   const acceptTask = scope.locator(XTM.accept.acceptTaskItem).first();
   if ((await acceptTask.count()) === 0) {
-    throw new AcceptUnconfirmedError('"Accept task" (acceptable) menu item not found');
+    // No "Accept task" on this row. If it shows "Finish task" the row is already OURS
+    // (e.g. a prior bulk for this language group already grabbed it — see the bulk-
+    // grabs-the-whole-group note in acceptDecision.ts). Do NOT fail: return so the
+    // FR-024 re-read reconciles these to 'accepted'. Fail loud ONLY when neither item
+    // is present (a genuinely unreadable/changed menu), never assuming success.
+    if ((await scope.locator(XTM.accept.finishTaskItem).count()) > 0) return;
+    throw new AcceptUnconfirmedError('neither "Accept task" nor "Finish task" found on the row');
   }
   await acceptTask.hover({ timeout: ACCEPT_TIMEOUT_MS }); // expand the 6-option submenu
 

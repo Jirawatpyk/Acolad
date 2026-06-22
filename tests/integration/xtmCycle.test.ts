@@ -400,6 +400,22 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     expect(outboxPayloads('chat').some((c) => c.text?.includes('✅'))).toBe(true);
   });
 
+  it('a no-event robustness accept that FAILS raises an alert + ⚠️ chat (never silent)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), acc).run(snap([xraw()], 'c1')); // seat as 'none'
+    acc.outcome = 'failed';
+    await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: true }), acc).run(snap([xraw()], 'c2')); // robustness attempt → failed
+    const key = computeXtmJobKey(xraw());
+    const alerts = db
+      .prepare("SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key = ?")
+      .all(`accept_failed:${key}`);
+    expect(alerts.length).toBeGreaterThanOrEqual(1); // failed accept with no appearance event is NOT silent
+    expect(outboxPayloads('sheets').at(-1)?.row?.status).toBe('Accept failed');
+    expect(outboxPayloads('chat').some((c) => c.text?.includes('⚠️'))).toBe(true);
+  });
+
   it('enqueues a New sheets row when auto-accept is disabled', async () => {
     fresh();
     new MetaStore(db).markBaselineDone();

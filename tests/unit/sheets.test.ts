@@ -153,6 +153,14 @@ describe('formatSheetDate (readable Bangkok-local dates)', () => {
     expect(formatSheetDate('')).toBe('');
     expect(formatSheetDate('not-a-date')).toBe('not-a-date');
   });
+
+  it('shows a date-only value as a bare date (no spurious 07:00 from the +07 shift)', () => {
+    expect(formatSheetDate('2026-06-20')).toBe('20/06/2026');
+  });
+
+  it('carries the date across the +07 shift on a late-UTC timestamp (day rollover)', () => {
+    expect(formatSheetDate('2026-06-21T19:30:00.000Z')).toBe('22/06/2026 02:30');
+  });
 });
 
 describe('GoogleSheetSender.ensureReady (proactive header so an empty sheet is still headed)', () => {

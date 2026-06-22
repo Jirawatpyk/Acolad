@@ -186,7 +186,8 @@ export async function readActiveSnapshot(
       // kebab, so this stays an optimistic placeholder HERE; the AUTHORITATIVE value is
       // computed for the target rows in the post-accept re-read (xtmClient), which
       // determineAcceptOutcomes consumes. detect/log/notify does not use this field.
-      // ACCEPT_ENABLED stays 0 until that re-read menu-check is wired + bulk DOM captured.
+      // (The re-read menu-check IS now wired — xtmClient.reReadActive → readAcceptAvailability —
+      // and the bulk DOM is confirmed; this placeholder is only ever the grid-scrape value.)
       acceptAvailable: true,
     };
     const parsed = rawXtmJobSchema.safeParse(candidate);
