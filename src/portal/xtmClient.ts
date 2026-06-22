@@ -153,10 +153,11 @@ export class PlaywrightXtmClient implements XtmPortalClient {
         // menu (Accept-task item present = still claimable; absent = we own it now) and
         // override the placeholder, so determineAcceptOutcomes tells accepted from failed.
         const availability = await readAcceptAvailability(freshFrame, page, targetKeys);
+        const keyed = snap.jobs.map((j) => ({ job: j, key: computeXtmJobKey(j) }));
         // A target PRESENT in the re-read but unresolved by the probe keeps the optimistic
         // grid placeholder (true) and would be reported as a FALSE accept_failed — surface
         // it LOUD (a probe/selector mismatch must be diagnosable, not a silent false alert).
-        const presentKeys = new Set(snap.jobs.map((j) => computeXtmJobKey(j)));
+        const presentKeys = new Set(keyed.map((e) => e.key));
         for (const k of targetKeys) {
           if (presentKeys.has(k) && !availability.has(k)) {
             this.logger?.warn(
@@ -165,9 +166,9 @@ export class PlaywrightXtmClient implements XtmPortalClient {
             );
           }
         }
-        return snap.jobs.map((j) => {
-          const a = availability.get(computeXtmJobKey(j));
-          return a === undefined ? j : { ...j, acceptAvailable: a };
+        return keyed.map(({ job, key }) => {
+          const a = availability.get(key);
+          return a === undefined ? job : { ...job, acceptAvailable: a };
         });
       },
       captureEvidence: evidence,

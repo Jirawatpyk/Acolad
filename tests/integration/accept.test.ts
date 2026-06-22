@@ -8,6 +8,7 @@ import {
 import type { AcceptTarget } from '../../src/portal/errors.js';
 import type { XtmRawJob } from '../../src/detection/types.js';
 import { computeXtmJobKey } from '../../src/detection/jobKey.js';
+import { XTM } from '../../src/portal/selectors.js';
 
 const AT = '2026-06-19T10:00:05+07:00';
 
@@ -172,6 +173,76 @@ describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 
     };
     return { locator: () => loc } as unknown as Frame;
   };
+
+  // Per-selector stub: a single Malay row whose menu shows "Finish task" (already ours),
+  // NO "Accept task" — openBulkAcceptForLanguage must return 'already-owned', not throw.
+  const ownedFrame = (): Frame => {
+    const loc = (sel?: string): unknown => ({
+      first: () => loc(sel),
+      nth: () => loc(sel),
+      locator: (s: string) => loc(s),
+      count: async () => (sel === XTM.accept.acceptTaskItem ? 0 : 1),
+      textContent: async () => 'Malay (Malaysia)',
+      click: async () => {},
+      hover: async () => {},
+      waitFor: async () => {},
+    });
+    return { locator: (s: string) => loc(s) } as unknown as Frame;
+  };
+
+  // Per-selector stub: a matching row showing NEITHER "Accept task" nor "Finish task".
+  const noMenuFrame = (): Frame => {
+    const loc = (sel?: string): unknown => ({
+      first: () => loc(sel),
+      nth: () => loc(sel),
+      locator: (s: string) => loc(s),
+      count: async () =>
+        sel === XTM.accept.acceptTaskItem || sel === XTM.accept.finishTaskItem ? 0 : 1,
+      textContent: async () => 'Malay (Malaysia)',
+      click: async () => {},
+      hover: async () => {},
+      waitFor: async () => {},
+    });
+    return { locator: (s: string) => loc(s) } as unknown as Frame;
+  };
+
+  it('reconciles an already-owned row ("Finish task") to accepted, not a false accept_failed', async () => {
+    const key = computeXtmJobKey(xraw());
+    const captured: string[] = [];
+    const deps: AcceptDeps = {
+      reReadActive: vi.fn(async (): Promise<XtmRawJob[]> => [xraw({ acceptAvailable: false })]),
+      captureEvidence: async (r) => {
+        captured.push(r);
+        return 'x';
+      },
+      nowIso: () => AT,
+    };
+    const out = await acceptEligibleTasks(
+      ownedFrame(),
+      [{ jobKey: key, targetLang: 'Malay (Malaysia)' }],
+      deps,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.outcome).toBe('accepted'); // we own it (prior bulk) → reconciled, not failed
+    expect(captured).not.toContain('post_accept_click'); // no click happened → no post-click evidence
+  });
+
+  it('fails loud when a matching row shows neither "Accept task" nor "Finish task"', async () => {
+    const reReadActive = vi.fn(async (): Promise<XtmRawJob[]> => []);
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async () => 'state/evidence/x',
+      nowIso: () => AT,
+    };
+    const out = await acceptEligibleTasks(
+      noMenuFrame(),
+      [{ jobKey: 'k1', targetLang: 'Malay (Malaysia)' }],
+      deps,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.outcome).toBe('failed'); // fail-loud preserved — never assume success
+    expect(reReadActive).not.toHaveBeenCalled(); // group failed → no re-read
+  });
 
   it('classifies a wholesale-empty post-accept re-read as failed, not missing (grid-race guard)', async () => {
     const reReadActive = vi.fn(async (): Promise<XtmRawJob[]> => []); // 0 rows after accept

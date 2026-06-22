@@ -163,8 +163,10 @@ export const XTM = {
     acceptTaskItem: '[id^="TASK_LISTING_ACCEPT_GROUP_TASK_"]',
     acceptTaskItemText: 'Accept task', // en_GB label (reference only; code matches acceptTaskItem id)
     // Owned-by-us signal — the menu item that REPLACES "Accept task" after WE accept
-    // (CONFIRMED recon 2026-06-22). Presence ⇒ this row is already ours, NOT a failed
-    // accept — used to avoid re-attempting/false-failing a job a prior bulk grabbed.
+    // (CONFIRMED 2026-06-22 via scripts/verify-reread.mjs on an accepted row; the live id
+    // is plural TASK_LISTING_FINISH_TASKS_<n>, so the prefix matches). Presence ⇒ this row
+    // is already ours, NOT a failed accept — used to avoid re-attempting/false-failing a
+    // job a prior bulk grabbed.
     finishTaskItem: '[id^="TASK_LISTING_FINISH_TASK"]',
     finishTaskItemText: 'Finish task', // en_GB label (reference only)
     // FR-006 bulk option — CONFIRMED from the expanded submenu. Hovering acceptTaskItem

@@ -90,14 +90,18 @@ export async function acceptEligibleTasks(
   const clickedAtByJob = new Map<string, string>();
   for (const [lang, group] of byLang) {
     try {
-      await openBulkAcceptForLanguage(scope, lang);
-      const groupClickedAt = deps.nowIso();
-      for (const t of group) clickedAtByJob.set(t.jobKey, groupClickedAt);
-      // Capture the post-click DOM (e.g. a confirmation dialog) — XTM may require a
-      // confirm step before the accept commits; the FR-024 re-read reads "still
-      // acceptable" until it is handled. Evidence-first so the confirm selector can be
-      // wired. Best-effort; never blocks the re-read.
-      await deps.captureEvidence('post_accept_click');
+      const opened = await openBulkAcceptForLanguage(scope, lang);
+      if (opened === 'clicked') {
+        // Stamp the confirm-click moment ONLY when a click actually happened, so the V16
+        // click-latency split is never fabricated for an already-owned (no-click) group.
+        const groupClickedAt = deps.nowIso();
+        for (const t of group) clickedAtByJob.set(t.jobKey, groupClickedAt);
+        // Post-click DOM (e.g. a confirmation dialog) — evidence-first so a confirm step
+        // can be wired. Best-effort; never blocks the re-read.
+        await deps.captureEvidence('post_accept_click');
+      }
+      // 'already-owned' → a prior bulk grabbed this group; no click, no latency stamp —
+      // the FR-024 re-read reconciles those rows to 'accepted'.
     } catch (err) {
       deps.logError?.(err); // surface the real cause (which step/selector) — redacted by the logger
       const evidencePath = await deps.captureEvidence('accept_unconfirmed');
@@ -112,21 +116,26 @@ export async function acceptEligibleTasks(
   const attempted = targets.filter((t) => !failed.some((f) => f.jobKey === t.jobKey));
   // No menu opened (every language failed) → skip the re-read (rate budget, FR-027).
   if (attempted.length === 0) return failed;
-  // One authoritative re-read of Active attributes every claimed target (FR-024).
-  // The re-read itself can throw (layout/pagination/timeout); never let that crash the
-  // whole cycle — the click already happened, so mark the attempted targets failed
-  // (never assume success) and let the next clean cycle / human resolve them.
+
+  // Never assume success — mark every attempted target failed with a bounded reason +
+  // evidence (the raw cause stays in the screenshot/HTML, not Sheets/Chat).
+  const failAllAttempted = async (label: string): Promise<AcceptResult[]> => {
+    const evidencePath = await deps.captureEvidence('accept_unconfirmed');
+    const reason = `${label}; evidence: ${evidencePath ?? 'n/a'}`;
+    return [
+      ...attempted.map((t) => ({ jobKey: t.jobKey, outcome: 'failed' as const, reason })),
+      ...failed,
+    ];
+  };
+
+  // One authoritative re-read of Active attributes every claimed target (FR-024). The
+  // re-read itself can throw (layout/pagination/timeout); never let that crash the cycle.
   let reRead;
   try {
     reRead = await deps.reReadActive();
   } catch (err) {
     deps.logError?.(err);
-    const evidencePath = await deps.captureEvidence('accept_unconfirmed');
-    const reason = `post-accept re-read failed; evidence: ${evidencePath ?? 'n/a'}`;
-    return [
-      ...attempted.map((t) => ({ jobKey: t.jobKey, outcome: 'failed' as const, reason })),
-      ...failed,
-    ];
+    return failAllAttempted('post-accept re-read failed');
   }
   // A wholesale-empty re-read right after accepting is far more likely a grid race (the
   // grid shell renders "0 - 0 of 0" before its data XHR) than every target being snatched
@@ -134,12 +143,7 @@ export async function acceptEligibleTasks(
   // accept never empties the list. Classify conservatively as FAILED (re-checkable +
   // alerts), never the lossy 'missing' that resets accept_status to 'none' and re-attempts.
   if (reRead.length === 0) {
-    const evidencePath = await deps.captureEvidence('accept_unconfirmed');
-    const reason = `post-accept re-read returned no rows (likely grid race); evidence: ${evidencePath ?? 'n/a'}`;
-    return [
-      ...attempted.map((t) => ({ jobKey: t.jobKey, outcome: 'failed' as const, reason })),
-      ...failed,
-    ];
+    return failAllAttempted('post-accept re-read returned no rows (likely grid race)');
   }
   const outcomes = determineAcceptOutcomes(attempted, reRead, deps.nowIso()).map((o) => {
     const clickedAt = clickedAtByJob.get(o.jobKey);
@@ -190,50 +194,61 @@ export async function readAcceptAvailability(
   return result;
 }
 
-/** Drive the row menu to the bulk "for this language in this group" option. */
-async function openBulkAcceptForLanguage(scope: Scope, targetLang: string): Promise<void> {
-  // Open the kebab of a data row whose target language matches (so the bulk
-  // "for this language" claims the right group).
+/**
+ * Drive the row menu to the bulk "for this language in this group" option. The bulk is
+ * group-level (one click claims the whole language group) but ownership is per-row, so
+ * SCAN matching-language rows for one still showing "Accept task" and drive the bulk
+ * from it — do NOT decide on the first row alone (the first might already be ours while
+ * a sibling is still claimable; deciding on it would strand the sibling). Returns:
+ *   - 'clicked'        → a claimable row was found and the bulk was clicked
+ *   - 'already-owned'  → every matching row is already ours ("Finish task"); no click
+ *                        needed, the FR-024 re-read reconciles those rows to 'accepted'
+ * Throws AcceptUnconfirmedError (fail loud) only when no matching row exposes either item.
+ */
+async function openBulkAcceptForLanguage(
+  scope: Scope,
+  targetLang: string,
+): Promise<'clicked' | 'already-owned'> {
   const rows = scope.locator(`${XTM.active.gridContainer} tbody tr`);
   const count = await rows.count();
-  let opened = false;
+  let matchedLang = false;
+  let ownedSeen = false;
   for (let i = 0; i < count; i++) {
     const row = rows.nth(i);
     const kebab = row.locator(XTM.accept.rowKebab).first();
     if ((await kebab.count()) === 0) continue; // header/placeholder row
     const cell = (await row.locator(XTM.active.cell.target).first().textContent())?.trim() ?? '';
-    if (cell.toLowerCase() === targetLang.trim().toLowerCase()) {
-      await kebab.click({ timeout: ACCEPT_TIMEOUT_MS });
-      opened = true;
-      break;
+    if (cell.toLowerCase() !== targetLang.trim().toLowerCase()) continue;
+    matchedLang = true;
+    await kebab.click({ timeout: ACCEPT_TIMEOUT_MS }); // open this row's menu
+    await scope
+      .locator(XTM.accept.menuContainer)
+      .first()
+      .waitFor({ state: 'visible', timeout: ACCEPT_TIMEOUT_MS })
+      .catch(() => undefined);
+    // Claimable row (stable-id "Accept task" submenu parent present)? → drive the bulk.
+    if ((await scope.locator(XTM.accept.acceptTaskItem).count()) > 0) {
+      await scope.locator(XTM.accept.acceptTaskItem).first().hover({ timeout: ACCEPT_TIMEOUT_MS });
+      // FR-006 bulk option (CONFIRMED recon 2026-06-22) — click by stable id.
+      const bulk = scope.locator(XTM.accept.bulkForLanguageInGroupItem).first();
+      if ((await bulk.count()) === 0) {
+        throw new AcceptUnconfirmedError('bulk "for this language in this group" option not found');
+      }
+      await bulk.click({ timeout: ACCEPT_TIMEOUT_MS });
+      // A confirmation dialog may follow; its selector is captured evidence-first on the
+      // first real accept. The FR-024 re-read is the source of truth regardless.
+      return 'clicked';
     }
+    // Not claimable on this row — already ours ("Finish task")? Keep scanning for a
+    // still-claimable sibling rather than giving up on the group.
+    if ((await scope.locator(XTM.accept.finishTaskItem).count()) > 0) ownedSeen = true;
+    await kebab.click({ timeout: ACCEPT_TIMEOUT_MS }).catch(() => undefined); // toggle-close before the next row
   }
-  if (!opened) {
+  if (!matchedLang) {
     throw new AcceptUnconfirmedError(`no Active row matching target language "${targetLang}"`);
   }
-
-  // The open dropdown renders inline as [data-dropdown-menu="true"] (the
-  // #context-menus-container portal stays empty). The acceptable-job signal is the
-  // stable-id "Accept task" submenu parent (id prefix, locale-independent).
-  const acceptTask = scope.locator(XTM.accept.acceptTaskItem).first();
-  if ((await acceptTask.count()) === 0) {
-    // No "Accept task" on this row. If it shows "Finish task" the row is already OURS
-    // (e.g. a prior bulk for this language group already grabbed it — see the bulk-
-    // grabs-the-whole-group note in acceptDecision.ts). Do NOT fail: return so the
-    // FR-024 re-read reconciles these to 'accepted'. Fail loud ONLY when neither item
-    // is present (a genuinely unreadable/changed menu), never assuming success.
-    if ((await scope.locator(XTM.accept.finishTaskItem).count()) > 0) return;
-    throw new AcceptUnconfirmedError('neither "Accept task" nor "Finish task" found on the row');
-  }
-  await acceptTask.hover({ timeout: ACCEPT_TIMEOUT_MS }); // expand the 6-option submenu
-
-  // FR-006 bulk option (CONFIRMED recon 2026-06-22): click "Accept all tasks for this
-  // language in this group" by its stable id (locale-independent). Fail loud if absent.
-  const bulk = scope.locator(XTM.accept.bulkForLanguageInGroupItem).first();
-  if ((await bulk.count()) === 0) {
-    throw new AcceptUnconfirmedError('bulk "for this language in this group" option not found');
-  }
-  await bulk.click({ timeout: ACCEPT_TIMEOUT_MS });
-  // A confirmation dialog may follow; its exact selector is captured evidence-first
-  // on the first real accept. The FR-024 re-read is the source of truth regardless.
+  if (ownedSeen) return 'already-owned'; // every matching row is already ours
+  throw new AcceptUnconfirmedError(
+    'matching rows present but neither "Accept task" nor "Finish task" found',
+  );
 }
