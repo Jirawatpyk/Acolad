@@ -49,6 +49,9 @@ const schema = z.object({
   GOOGLE_CHAT_WEBHOOK_DAILY_REPORT: z.string().url().optional().or(z.literal('')),
   HEALTHCHECKS_PING_URL: z.string().url(),
   POLL_INTERVAL_MS: z.coerce.number().int().min(20_000).max(25_000).default(20_000),
+  // Port-bind single-instance lock token (src/runtime/singleInstance.ts). The bot binds
+  // 127.0.0.1:<this> at startup; a second instance refuses. Change only if it ever clashes.
+  SINGLE_INSTANCE_PORT: z.coerce.number().int().min(1).max(65_535).default(47811),
   LOGIN_MAX_RETRY: z.coerce.number().int().positive().default(3),
   LOGIN_LOCKOUT_MINUTES: z.coerce.number().int().positive().default(15),
   BROWSER_RECYCLE_HOURS: z.coerce.number().int().positive().default(6),
