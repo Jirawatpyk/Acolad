@@ -180,12 +180,13 @@ export async function readActiveSnapshot(
       words: parseXtmWords(row.wordsRaw),
       step: row.step,
       role: row.role,
-      // UNRESOLVED (D6) — the grid does not expose acceptability, set true optimistically.
-      // CONSEQUENCE: determineAcceptOutcomes (xtmAccept.ts) reads acceptAvailable to tell
-      // accepted (false = owned) from failed (true = still claimable). With this placeholder
-      // EVERY accepted job re-reads as failed, so ACCEPT_ENABLED MUST stay 0 until the
-      // per-row menu signal ("Accept task" vs "Finish task") is captured live and computed
-      // here (research.md D4/D6). The detect/log/notify path does not use this field.
+      // D6 (operator-confirmed): acceptability is NOT in the grid cells — it is the
+      // presence of the "Accept task" menu item (replaced by "Finish task" once we own
+      // the job, which stays in Active). The bulk grid scrape cannot open every row's
+      // kebab, so this stays an optimistic placeholder HERE; the AUTHORITATIVE value is
+      // computed for the target rows in the post-accept re-read (xtmClient), which
+      // determineAcceptOutcomes consumes. detect/log/notify does not use this field.
+      // ACCEPT_ENABLED stays 0 until that re-read menu-check is wired + bulk DOM captured.
       acceptAvailable: true,
     };
     const parsed = rawXtmJobSchema.safeParse(candidate);

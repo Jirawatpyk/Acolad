@@ -130,6 +130,48 @@ export async function acceptEligibleTasks(
   return [...outcomes, ...failed];
 }
 
+/**
+ * D6 (operator-confirmed): read TRUE per-row acceptability for the given target jobs
+ * by OPENING each matching row's kebab and checking for the "Accept task" item
+ * (acceptTaskItem — the locale-independent id prefix). Present ⇒ still claimable
+ * (acceptAvailable=true); absent (the job stays in Active but its menu now shows
+ * "Finish task" because we own it) ⇒ acceptAvailable=false. The grid cells do NOT
+ * expose this, so the FR-024 post-accept re-read uses this to tell an accepted job
+ * (we own it) from a failed one (still claimable). Opening/closing a menu issues no
+ * portal request (local DOM) so it is rate-free (FR-011); Escape closes each menu
+ * WITHOUT acting on the task. Bounded to the target rows (≤ ACCEPT_MAX_PER_CYCLE).
+ */
+export async function readAcceptAvailability(
+  scope: Scope,
+  page: Page,
+  jobKeys: Set<string>,
+): Promise<Map<string, boolean>> {
+  const result = new Map<string, boolean>();
+  if (jobKeys.size === 0) return result;
+  const rows = scope.locator(`${XTM.active.gridContainer} tbody tr`);
+  const count = await rows.count();
+  for (let i = 0; i < count && result.size < jobKeys.size; i++) {
+    const row = rows.nth(i);
+    const kebab = row.locator(XTM.accept.rowKebab).first();
+    if ((await kebab.count()) === 0) continue; // header/placeholder row
+    const fileName = (await row.locator(XTM.active.cell.file).first().textContent())?.trim() ?? '';
+    if (!fileName) continue;
+    const step = (await row.locator(XTM.active.cell.step).first().textContent())?.trim() || null;
+    const role = (await row.locator(XTM.active.cell.role).first().textContent())?.trim() || null;
+    const key = computeXtmJobKey({ fileName, step, role });
+    if (!jobKeys.has(key) || result.has(key)) continue;
+    await kebab.click({ timeout: ACCEPT_TIMEOUT_MS });
+    await scope
+      .locator(XTM.accept.menuContainer)
+      .first()
+      .waitFor({ state: 'visible', timeout: ACCEPT_TIMEOUT_MS })
+      .catch(() => undefined);
+    result.set(key, (await scope.locator(XTM.accept.acceptTaskItem).count()) > 0);
+    await page.keyboard.press('Escape').catch(() => undefined); // close menu — NO action on the task
+  }
+  return result;
+}
+
 /** Drive the row menu to the bulk "for this language in this group" option. */
 async function openBulkAcceptForLanguage(scope: Scope, targetLang: string): Promise<void> {
   // Open the kebab of a data row whose target language matches (so the bulk

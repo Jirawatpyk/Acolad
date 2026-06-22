@@ -137,13 +137,21 @@ export const XTM = {
   //    chevron ⇒ it is a SUBMENU parent). Keying off this id prefix is
   //    locale-independent — preferred over the en_GB label text.
   //
-  // STILL UNCONFIRMED (submenu was not captured — recon hovered the wrong
-  // container): the expanded submenu's 6 children, incl. the bulk option (FR-006)
-  // whose en_GB text is assumed "Accept all tasks for this language in this
-  // group"; and the "Finish task" / not-acceptable case (D6). Until those land
-  // from the next recon, the accept path FAILS LOUD rather than clicking a wrong
-  // item, and T026 confirms outcome by RE-READING Active (FR-024), never the
-  // click. ACCEPT_ENABLED stays 0 until the submenu + success signal are captured.
+  // D6 RESOLVED (operator-confirmed 2026-06-22): after WE accept, the job STAYS in
+  // Active but its menu's "Accept task" item is replaced by "Finish task". So
+  // acceptAvailable = PRESENCE of acceptTaskItem (TASK_LISTING_ACCEPT_GROUP_TASK_)
+  // in that row's menu — claimable when present, owned-by-us when absent. This needs
+  // NO separate "Finish task" selector (the accept item's ABSENCE is the signal) and
+  // makes determineAcceptOutcomes correct: present+acceptable=failed,
+  // present+not-acceptable=accepted, gone=snatched. The grid cells do not expose it,
+  // so it must be read by opening the row kebab — computed for the TARGET rows in the
+  // post-accept re-read, not the bulk grid scrape (see [[xtm-accept-d6-finish-task]]).
+  //
+  // STILL UNCONFIRMED: the expanded submenu's children, incl. the bulk option (FR-006)
+  // whose en_GB text is assumed "Accept all tasks for this language in this group" —
+  // the next eligible Malay job captures it (recon now expands the submenu). Until then
+  // the accept path FAILS LOUD rather than clicking a wrong item. ACCEPT_ENABLED stays 0
+  // until the bulk option DOM is captured AND acceptAvailable-from-menu is wired in.
   accept: {
     rowKebab: 'button[data-testid="context-menu-button"]', // open row menu (row-scoped)
     // The open dropdown renders inline (fixed position) — NOT the empty portal.
