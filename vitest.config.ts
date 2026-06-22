@@ -3,8 +3,11 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
-    testTimeout: 30_000,
-    hookTimeout: 30_000,
+    // Headroom for the real-Chromium integration tests, whose per-test time grows
+    // under v8 coverage instrumentation (npm run test:coverage) — 30s was too tight
+    // once the XTM integration suite was added.
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
     coverage: {
       provider: 'v8',
       include: ['src/detection/**', 'src/state/**', 'src/reporting/**'],

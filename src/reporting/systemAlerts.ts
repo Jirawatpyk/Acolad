@@ -11,7 +11,8 @@ export type TriggerKind =
   | 'portal_down'
   | 'outbox_dead'
   | 'cold_start_repeat'
-  | 'db_corrupt';
+  | 'db_corrupt'
+  | 'accept_failed';
 
 interface TriggerSpec {
   severity: 'warn' | 'critical';
@@ -29,7 +30,7 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     title: 'เข้าสู่ระบบไม่สำเร็จ',
     impact: 'หยุดเฝ้างานชั่วคราว (lockout)',
     action:
-      'ลอง login ด้วยมือ; ถ้ารหัสผ่านเปลี่ยน แก้ ACOLAD_PASSWORD ใน .env แล้ว pm2 restart acolad-bot',
+      'ลอง login ด้วยมือ; ถ้ารหัสผ่านเปลี่ยน แก้ XTM_ACOLAD_Password ใน .env แล้ว pm2 restart acolad-bot',
     hasRecovered: true,
   },
   captcha: {
@@ -84,6 +85,18 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     action: 'เก็บสำเนา .corrupt-* ไว้วิเคราะห์ และตรวจสุขภาพดิสก์',
     hasRecovered: false,
   },
+  // Raised with a per-job dedup key (`accept_failed:<jobKey>`) and never auto-resolved
+  // (hasRecovered:false) — so a given job alerts ONCE and a repeat failure of the SAME
+  // job is intentionally deduped (avoids per-cycle spam while accept stays unconfirmed).
+  // Distinct jobs still each alert. Revisit if per-incident re-alerting is ever needed.
+  accept_failed: {
+    severity: 'critical',
+    title: 'กดรับงานไม่สำเร็จ (ยืนยันไม่ได้)',
+    impact: 'งานมาเลย์ที่ควรได้อาจไม่ถูกรับ — ต้องตรวจด้วยคน',
+    action:
+      'เปิด state/evidence ล่าสุด + เข้า XTM ดูว่างานถูกรับไหม; ถ้าเมนู accept เปลี่ยนรูปแบบ อัปเดต src/portal/selectors.ts',
+    hasRecovered: false,
+  },
 };
 
 /**
@@ -98,6 +111,9 @@ export function raiseAlert(
   occurredAt: string,
   detail: string,
   extra: Partial<SystemAlertFields> = {},
+  /** Override the dedup key (default = kind). Use a per-job key for incidents
+   *  that recur per job (e.g. accept_failed) so distinct failures each alert. */
+  dedupKey?: string,
 ): boolean {
   const spec = TRIGGERS[kind];
   const system = new SystemEventStore(db);
@@ -114,7 +130,7 @@ export function raiseAlert(
     const eventId = system.create({
       eventType: 'system_alert',
       severity: spec.severity,
-      dedupKey: kind,
+      dedupKey: dedupKey ?? kind,
       payloadJson: payload,
       occurredAt,
     });

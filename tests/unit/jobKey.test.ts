@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { computeJobKey, computeSnapshotHash } from '../../src/detection/jobKey.js';
-import type { RawJob } from '../../src/detection/types.js';
+import {
+  computeJobKey,
+  computeSnapshotHash,
+  computeXtmJobKey,
+  computeXtmSnapshotHash,
+} from '../../src/detection/jobKey.js';
+import type { RawJob, XtmRawJob } from '../../src/detection/types.js';
 
 const job = (over: Partial<RawJob> = {}): RawJob => ({
   portalJobId: null,
@@ -49,6 +54,71 @@ describe('computeSnapshotHash', () => {
   it('changes when fee changes (detail-change detection)', () => {
     expect(computeSnapshotHash(job({ fee: '€120' }))).not.toBe(
       computeSnapshotHash(job({ fee: '€150' })),
+    );
+  });
+});
+
+const xjob = (over: Partial<XtmRawJob> = {}): XtmRawJob => ({
+  xtmTaskId: 'ID-1001',
+  projectName: 'Acme Q3',
+  fileName: 'chapter-01.docx',
+  sourceLang: 'English (United States)',
+  targetLang: 'Malay (Malaysia)',
+  dueDate: '2026-06-20T17:00+07:00',
+  dueRaw: null,
+  words: 1200,
+  step: 'Post-Editing (PE) 1',
+  role: 'Corrector',
+  acceptAvailable: true,
+  ...over,
+});
+
+describe('computeXtmJobKey (R3 — fileId|step|role composite)', () => {
+  it('is deterministic for the same file/step/role', () => {
+    expect(computeXtmJobKey(xjob())).toBe(computeXtmJobKey(xjob()));
+  });
+
+  it('differs when step differs (same file, different workflow step)', () => {
+    expect(computeXtmJobKey(xjob({ step: 'Post-Editing (PE) 1' }))).not.toBe(
+      computeXtmJobKey(xjob({ step: 'Review 2' })),
+    );
+  });
+
+  it('differs when role differs (same file/step, different role)', () => {
+    expect(computeXtmJobKey(xjob({ role: 'Corrector' }))).not.toBe(
+      computeXtmJobKey(xjob({ role: 'Translator' })),
+    );
+  });
+
+  it('is case- and whitespace-insensitive (normalized)', () => {
+    expect(computeXtmJobKey(xjob({ fileName: 'Chapter-01.DOCX', role: '  Corrector ' }))).toBe(
+      computeXtmJobKey(xjob({ fileName: 'chapter-01.docx', role: 'corrector' })),
+    );
+  });
+
+  it('does not depend on the volatile xtm_task_id (identity is the composite)', () => {
+    expect(computeXtmJobKey(xjob({ xtmTaskId: 'ID-1001' }))).toBe(
+      computeXtmJobKey(xjob({ xtmTaskId: 'ID-9999' })),
+    );
+  });
+
+  it('treats a null step/role as a stable empty component', () => {
+    expect(computeXtmJobKey(xjob({ step: null, role: null }))).toBe(
+      computeXtmJobKey(xjob({ step: null, role: null })),
+    );
+  });
+});
+
+describe('computeXtmSnapshotHash', () => {
+  it('changes when a displayed field changes (words)', () => {
+    expect(computeXtmSnapshotHash(xjob({ words: 1200 }))).not.toBe(
+      computeXtmSnapshotHash(xjob({ words: 1500 })),
+    );
+  });
+
+  it('changes when acceptAvailable flips (taken vs free)', () => {
+    expect(computeXtmSnapshotHash(xjob({ acceptAvailable: true }))).not.toBe(
+      computeXtmSnapshotHash(xjob({ acceptAvailable: false })),
     );
   });
 });

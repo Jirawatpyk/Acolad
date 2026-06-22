@@ -34,3 +34,38 @@ export class PaginationDetectedError extends PortalError {
     super(message);
   }
 }
+
+/**
+ * Raised when an Accept action completed without a readable success signal
+ * (FR-011). The adapter NEVER reports `accepted` on a guess — an unconfirmed
+ * accept is surfaced as this error internally and reflected as
+ * `AcceptResult.failed`, recorded as `accept_failed` + system alert.
+ */
+export class AcceptUnconfirmedError extends PortalError {
+  readonly kind = 'accept_unconfirmed';
+  constructor(
+    message: string,
+    /** Path to captured evidence (screenshot/HTML) for the unconfirmed accept. */
+    readonly evidencePath?: string,
+  ) {
+    super(message);
+  }
+}
+
+/** One eligible job to bulk-accept (contracts/xtm-portal-adapter.md). */
+export interface AcceptTarget {
+  jobKey: string;
+  targetLang: string;
+}
+
+/**
+ * Per-jobKey outcome of a bulk accept, re-derived from re-reading Active
+ * (FR-024). A bulk action fans out to one result per attempted jobKey so the
+ * orchestration can record lifecycle per row.
+ */
+export type AcceptResult =
+  // `at` = FR-024-confirmed timestamp (after the re-read); `clickedAt` = when the
+  // confirm-click fired (before the re-read). Both feed the V16/V16b latency split.
+  | { jobKey: string; outcome: 'accepted'; at: string; clickedAt?: string }
+  | { jobKey: string; outcome: 'missing' } // snatched / no longer acceptable
+  | { jobKey: string; outcome: 'failed'; reason: string }; // success not confirmable

@@ -4,27 +4,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-บอทเฝ้า Acolad Partner Portal ตลอด 24/7: ตรวจจับงานแปลใหม่ → แจ้งเตือน
-Google Chat ภายใน 60 วินาที (ฟีเจอร์ 001) — ฟีเจอร์ถัดไปคือกดรับงานอัตโนมัติ
-+ บันทึกรายละเอียด task ลง Google Sheets (รับเฉพาะคู่ภาษามาเลย์ MS — ยังไม่
-กรองในฟีเจอร์นี้ ดู [[acolad-malay-only-rule]])
+บอทเฝ้าพอร์ทัล Acolad ตลอด 24/7: ตรวจจับงานแปลใหม่ → แจ้งเตือน Google Chat
+ภายใน 60 วินาที. ฟีเจอร์ 001 จับงานที่ partner.acolad.com (ถอดออกแล้ว);
+**ฟีเจอร์ 002 (ปัจจุบัน) ย้ายไป XTM Cloud (Tasks→Active)** + กดรับงานมาเลย์
+อัตโนมัติ (bulk) + บันทึก task ทุกงานลง Google Sheets — กดรับเฉพาะคู่ภาษา
+มาเลย์ MS (ดู [[acolad-malay-only-rule]])
 
-**สถานะปัจจุบัน**: ฟีเจอร์ 001 **implement + ผ่าน review + ทดสอบกับ portal
-จริงแล้ว** (login ได้, ตรวจพบ "ไม่มีงาน", ส่ง Google Chat) — 82 tests ผ่าน,
-coverage ~98% บน core. selector ของ "การ์ดงานจริง" ยังไม่ยืนยัน (portal ว่าง);
-เมื่อมีงานแรกเข้า ระบบ fail-loud + เก็บ evidence ให้ปรับ `src/portal/selectors.ts`
+**สถานะปัจจุบัน**: ฟีเจอร์ 002 **โค้ดครบ + auto-accept เปิดใช้งานจริง (live)** ตั้งแต่
+2026-06-22 — detect + log(Sheets) + notify(Chat) + **auto-accept งานมาเลย์** ครบวงจร.
+253 tests ผ่าน, coverage detection/state/reporting เกิน gate 80%, lint + typecheck สะอาด.
+
+> **accept เปิดอยู่**: `ACCEPT_ENABLED=1`, **`ACCEPT_MAX_PER_CYCLE=0`** (ต้องเป็น 0 —
+> cap>0 อันตราย เพราะ bulk กดทั้งกลุ่ม ดู `acceptDecision.ts`), `ACCEPT_RECON=0`.
+> D4/D6 ยืนยันแล้วจากงานจริง: เมนู accept render inline `[data-dropdown-menu]`,
+> item id `TASK_LISTING_ACCEPT_GROUP_TASK_…`, หลังรับ menu เปลี่ยนเป็น "Finish task"
+> (`acceptAvailable` = มี Accept-task item ในเมนู — อ่านใน post-accept re-read).
+> ดู [[xtm-accept-d6-finish-task]]. งานมาเลย์ตัวใหม่จะถูกกดรับ + log Accepted อัตโนมัติ.
 
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
 
-**Current feature**: 001-login-job-detection
-**Current plan**: specs/001-login-job-detection/plan.md
-**Spec**: specs/001-login-job-detection/spec.md
-**Tasks**: specs/001-login-job-detection/tasks.md (51 tasks — ลำดับการ implement)
-**Design artifacts**: specs/001-login-job-detection/ (research.md, data-model.md, quickstart.md, contracts/)
+**Current feature**: 002-xtm-detect-accept
+**Current plan**: specs/002-xtm-detect-accept/plan.md
+**Spec**: specs/002-xtm-detect-accept/spec.md
+**Tasks**: specs/002-xtm-detect-accept/tasks.md (สร้างด้วย /speckit-tasks)
+**Design artifacts**: specs/002-xtm-detect-accept/ (research.md, data-model.md, quickstart.md, contracts/)
 **Constitution**: .specify/memory/constitution.md (v1.0.1 — 8 principles, gate ทุก plan/PR)
-**Stack**: Node.js 22 + TypeScript strict, Playwright (Chromium), SQLite (better-sqlite3), pino, zod, PM2 บน Windows 11
+**Stack**: Node.js 22 + TypeScript strict, Playwright (Chromium), SQLite (better-sqlite3), googleapis (Sheets), pino, zod, PM2 บน Windows 11
+
+> 002 ย้ายเป้าหมายจาก partner.acolad.com → **XTM Cloud (Tasks→Active)** + กดรับงาน
+> มาเลย์อัตโนมัติ (bulk) + log ทุกงานลง Google Sheets. แกน 001 (diff/state/outbox/
+> dispatcher/heartbeat) reuse — เปลี่ยนแค่ src/portal/ (XTM) + เพิ่ม reporting/sheets.ts.
+> งานแรก = recon XTM จริงเก็บ evidence. ดู [[acolad-jobs-live-in-xtm-not-partner]]
 <!-- SPECKIT END -->
 
 ## Workflow
@@ -46,21 +58,33 @@ shell commands, and other important information, read the current plan:
 
 ## Commands
 
-npm scripts ถูกกำหนดใน tasks.md T001 (มีผลเมื่อ Phase 1 ถูก implement):
+ติดตั้งครั้งแรก (Windows / PowerShell):
 
 ```powershell
-npm run lint           # ESLint + Prettier — ต้อง 0 error
-npm run typecheck      # tsc --noEmit (strict)
-npm test               # Vitest unit + integration (fixtures เท่านั้น)
-npx vitest run tests/unit/diff.test.ts   # รัน test ไฟล์เดียว
-npm run test:coverage  # gate ≥ 80% บน detection/state/reporting
-npm run poll:once      # รันรอบเดียวจบ (smoke) — เพิ่ม $env:LIVE_PORTAL='1' สำหรับ portal จริง
-npm run build; pm2 start ecosystem.config.cjs   # รัน 24/7
-npm run outbox:requeue # ops: คืนรายการแจ้งเตือน dead → pending
-npm run report:latency # สรุป p95 จาก log สำหรับตรวจรับ SC-001/SC-002
+npm install
+npx playwright install chromium      # บอทใช้ Chromium ของ Playwright เท่านั้น
+Copy-Item .env.example .env          # แล้วเติมค่าจริง (ดูหัวข้อ Environment)
+# วาง google-credentials.json (service account) ที่ราก repo — gitignored
 ```
 
-เกณฑ์ตรวจรับ = ตาราง V1–V14 ใน `specs/001-login-job-detection/quickstart.md`
+งานประจำ:
+
+```powershell
+npm run lint            # ESLint + Prettier — ต้อง 0 error
+npm run typecheck       # tsc --noEmit (strict)
+npm test                # Vitest unit + integration (fixtures เท่านั้น)
+npx vitest run tests/unit/xtmDiff.test.ts  # รัน test ไฟล์เดียว
+npm run test:coverage   # gate ≥ 80% บน detection/state/reporting
+npm run poll:once       # รันรอบเดียวจบ (smoke) — เพิ่ม $env:LIVE_PORTAL='1' สำหรับ portal จริง
+npm run deploy          # รัน 24/7: build + restart แบบ single-instance-safe + verify (ใช้อันนี้เสมอ)
+# ห้าม `pm2 restart acolad-bot` ด้วยมือ — มัน skip stop-and-wait แล้วทิ้ง orphan/ชน lock
+npm run outbox:requeue  # ops: คืนรายการแจ้งเตือน dead → pending
+npm run report:latency  # สรุป p95 จาก log สำหรับตรวจรับ SC-001/SC-002
+npm run report:catch-rate  # สรุปอัตราจับงานทันใน <1 นาที (snatch window)
+npm run xtm:recon       # รัน live recon เก็บ evidence โครงสร้าง XTM (ต้องตั้ง .env)
+```
+
+เกณฑ์ตรวจรับ = ตาราง V1–V16 ใน `specs/002-xtm-detect-accept/quickstart.md`
 (SC เป็น authoritative เหนือ FR ในการวัดผล)
 
 ## Architecture
@@ -68,24 +92,47 @@ npm run report:latency # สรุป p95 จาก log สำหรับตร
 วงจรหลัก (อ่าน plan.md + data-model.md + contracts/ ประกอบ):
 
 ```
-main/once → PollLoop.runOnce() [orchestration, unit-tested via stubs]
-  → PortalClient.fetchSnapshot(cycleId)  [src/portal/portalClient.ts]
-       (navigate offers → login เฉพาะเมื่อ logged-out → readJobSnapshot)
-  → diff(snapshot, prevState)            [src/detection/ — pure, transition owner]
-  → persist state + enqueue outbox ใน SQLite txn เดียว   [src/state/]
-  → dispatcher flush ทุก 5s → Google Chat webhook        [src/reporting/]
-  → heartbeat ok / fail (เมื่อ outbox dead) Healthchecks  [src/monitoring/]
+main/once → bootstrap.createXtmBot() ประกอบทุกชิ้น (DB, browser, client, loop)
+  → XtmPollLoop.runOnce()              [src/runtime/xtmPollLoop.ts — orchestration shell]
+       (maybeRecycle → ensure Sheet header → fetchJobSnapshot → cycle → flush → heartbeat)
+  → PlaywrightXtmClient.fetchJobSnapshot(cycleId)  [src/portal/xtmClient.ts]
+       (navigate Active → silent re-login เมื่อ session หมด → อ่าน grid ใน iframe)
+  → XtmPollCycle.run(snapshot)         [src/runtime/xtmPollCycle.ts — detect→decide→accept→record]
+       (diffXtm = transition owner · eligibility/decideAccept = pure · claimForAccept atomic)
+  → persist state + enqueue outbox (chat + sheets) ใน SQLite txn   [src/state/]
+  → Dispatcher.flush → Google Chat webhook + Google Sheets sink    [src/reporting/]
+  → heartbeat ok / fail (เมื่อ outbox dead) Healthchecks           [src/monitoring/]
 ```
 
-**PortalClient** (interface ใน `src/portal/portalClient.ts`) แยก Playwright I/O
-ออกจาก orchestration — PollLoop พึ่ง interface นี้ จึง unit-test ได้ด้วย stub
-(`tests/unit/pollLoop.test.ts`). Clock/RateLimiter inject ได้เพื่อทดสอบเวลา/เพดาน
+**Entry points** (`src/runtime/`): `main.ts` = ลูป 24/7 (PM2), `once.ts` =
+รอบเดียวจบ (`poll:once`), `bootstrap.ts` = `createXtmBot()` ประกอบทุกชิ้น,
+`requeue.ts`/`latencyReport.ts`/`catchRateReport.ts` = ops scripts.
+
+**Module map** (`src/`):
+
+| โฟลเดอร์ | หน้าที่ | ไฟล์สำคัญ |
+|---|---|---|
+| `detection/` | logic บริสุทธิ์ (TDD + coverage gate) | `diff.ts` (engine `diffGeneric`), `xtmDiff.ts`, `eligibility.ts`, `acceptDecision.ts`, `jobKey.ts`, `types.ts` |
+| `state/` | SQLite (TDD + coverage gate) | `db.ts`, `xtmJobStore.ts` (job state), `jobStore.ts` (accept state machine), `outbox.ts`, `meta.ts` (baseline/cursor) |
+| `portal/` | Playwright I/O เฉพาะ XTM | `xtmClient.ts` (impl ของ interface), `xtmInbox.ts` (อ่าน grid ใน iframe), `xtmLogin.ts`, `xtmAccept.ts`, `xtmAcceptRecon.ts`, `selectors.ts` (รวมศูนย์), `evidence.ts`, `htmlSanitize.ts`, `errors.ts` |
+| `reporting/` | ส่งออก (TDD + coverage gate) | `dispatcher.ts`, `googleChat.ts`, `sheets.ts` (Sink + Sender), `xtmNotifier.ts` (template ข้อความ), `systemAlerts.ts` |
+| `runtime/` | orchestration + entry points | (ดู Entry points ด้านบน) + `rateLimiter.ts`, `scheduler.ts` |
+| `monitoring/` | สุขภาพระบบ | `heartbeat.ts` (Healthchecks), `logger.ts` (pino + redaction) |
+
+**XtmPortalClient** (interface ใน `src/portal/xtmClient.ts`) แยก Playwright I/O
+ออกจาก orchestration — `XtmPollCycle` พึ่ง interface `XtmAcceptor`/`ClosedReader`
+จึงทดสอบได้ด้วย stub (`tests/integration/xtmCycle.test.ts`,
+`tests/integration/xtmPollLoop.test.ts`). Clock/RateLimiter inject ได้เพื่อทดสอบ
+เวลา/เพดาน. งานจริงอยู่ใน **iframe** ของแท็บ Active (ดู `src/portal/xtmInbox.ts`)
 
 หลักออกแบบที่ต้องรักษา (มาจาก clarifications/analyze/review — ไม่ใช่สไตล์):
 
 - **`detection/diff.ts` เป็นเจ้าของ state transition แต่เพียงผู้เดียว**
-  (first_seen / missing เมื่อไม่พบ ≥ 2 รอบติด / relisted) — jobStore แค่
-  persist ผลลัพธ์ ห้ามตัดสินซ้ำ; ตัวนับ `consecutive_misses` อยู่ในตาราง jobs
+  (first_seen / missing เมื่อไม่พบ ≥ 2 รอบติด / relisted) — store แค่ persist
+  ผลลัพธ์ ห้ามตัดสินซ้ำ. ปัจจุบัน `diff.ts` export `diffGeneric` + `DiffAdapter`
+  (engine กลาง reuse ได้) และ XTM เข้าผ่าน `detection/xtmDiff.ts` (`diffXtm`).
+  สถานะ accept แยกเป็น state machine ใน `state/jobStore.ts`
+  (`claimForAccept` atomic กัน double-accept → `recordAcceptOutcome`)
 - **Appearance-event model**: งานหนึ่งงานมีได้หลาย "การปรากฏ" — dedup ทำ
   ที่ระดับการปรากฏ ไม่ใช่ตลอดชีพงาน; งานที่หายแล้วกลับมา → แจ้งซ้ำพร้อม
   ป้าย "งานกลับมาอีกครั้ง"
@@ -98,9 +145,38 @@ main/once → PollLoop.runOnce() [orchestration, unit-tested via stubs]
 - **Fail loud**: selector/marker หาย, locale เปลี่ยน, เจอ pagination,
   CAPTCHA → เก็บ evidence (sanitized) + system alert — ห้ามเดา parse
   ห้ามทำงานต่อเงียบๆ; selector รวมศูนย์ที่ `src/portal/selectors.ts` ไฟล์เดียว
-- **Portal ยังไม่มีงานจริงให้ดู** — parser พัฒนาจาก fixtures ใน
-  `tests/fixtures/` และมี evidence-first mode เก็บ HTML/screenshot งานจริง
-  ตัวแรกไว้ยืนยัน selector
+- **Evidence-first parser** — parser พัฒนาจาก fixtures ใน `tests/fixtures/`
+  (`xtmPages.ts` สังเคราะห์จากโครงสร้าง XTM จริงที่เก็บมา) + มี evidence mode
+  (`npm run xtm:recon`, `ACCEPT_RECON=1`) เก็บ HTML/screenshot งานจริง
+  ตัวแรกไว้ยืนยัน selector ก่อนพึ่ง parse
+
+## Environment
+
+config โหลด+ตรวจด้วย zod ใน `src/config/index.ts` — **fail-fast ตอน start**
+พร้อมชื่อ var ที่ผิด. คำอธิบายครบทุกตัวอยู่ใน `.env.example` (อย่า duplicate
+ที่นี่). ตัวที่ **required** (ไม่มี = บอทไม่ start):
+
+- XTM: `XTM_ACOLAD_PORTAL_URL`, `XTM_ACOLAD_OFFERS_URL`, `XTM_ACOLAD_Company`,
+  `XTM_ACOLAD_Username`, `XTM_ACOLAD_Password`
+- Sheets: `GOOGLE_SHEETS_ID`, `SHEETS_TAB_NAME` + ไฟล์ `google-credentials.json`
+- แจ้งเตือน/heartbeat: `GOOGLE_CHAT_WEBHOOK_SYSTEM`, `HEALTHCHECKS_PING_URL`
+
+ตัวคุม accept (`ACCEPT_*`) + tuning (`POLL_INTERVAL_MS` ฯลฯ) มี default
+ปลอดภัย — `ACCEPT_ENABLED`/`ACCEPT_RECON` ปริยาย = ปิด.
+
+## auto-accept (เปิดใช้งานแล้ว — runbook อ้างอิง)
+
+accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACCEPT_ENABLED=1`,
+**`ACCEPT_MAX_PER_CYCLE=0`**, `ACCEPT_RECON=0`. D4/D6 ยืนยันจากงานจริงแล้ว
+(ดู [[xtm-accept-d6-finish-task]]). พฤติกรรม + ข้อควรระวัง:
+
+- กดรับงานมาเลย์ที่ present + ยังไม่เคยรับ (ไม่ใช่แค่ตอนปรากฏใหม่) → log "Accepted" + Chat ✅
+- **`ACCEPT_MAX_PER_CYCLE` ต้องเป็น 0**: portal bulk กดทั้งกลุ่มในคลิกเดียว — cap>0 ทำให้
+  งานพี่น้องในกลุ่มถูกกดบน portal แต่บันทึก 'none' แล้ว robustness pass กดซ้ำ → false alert
+  (ดู `acceptDecision.ts`)
+- post-accept re-read **reload หน้าก่อนเช็ค** (เมนู Accept→Finish สะท้อนหลัง reload);
+  re-read ว่าง = grid race → ตัดเป็น failed (ไม่ใช่ missing); probe ไม่เจอ target → log loud
+- เฝ้า latency V16/V16b: `npm run report:latency` + heartbeat เขียว
 
 ## ข้อควรระวังเฉพาะโปรเจกต์
 
@@ -108,9 +184,16 @@ main/once → PollLoop.runOnce() [orchestration, unit-tested via stubs]
   Google Chat webhook URLs, Healthchecks ping URL — ทั้งหมดอยู่ใน pino
   redaction list ห้ามโผล่ใน log/alert/evidence; `state/storageState.json`
   (session cookies) เป็นความลับระดับเดียวกับรหัสผ่าน
-- เครื่องรันเป็น Windows 11: `pm2-windows-startup` ทำงานหลัง user logon
-  เท่านั้น — การรองรับรีบูตอัตโนมัติ (Windows Update) ต้องใช้ auto-logon
-  หรือ NSSM ตามหัวข้อ "รัน 24/7" ใน quickstart.md
+- **ห้ามให้ repo อยู่ใต้ Google Drive / OneDrive backup** — .gitignore ไม่กัน cloud
+  sync; `.env` + `google-credentials.json` + `state/storageState.json` จะรั่วขึ้น cloud
+  (ตรวจในแอป Google Drive → Settings → Folders)
+- **single-instance**: บอท bind `127.0.0.1:47811` ตอน start (`SINGLE_INSTANCE_PORT`) —
+  ตัวที่ 2 จะ refuse + ping Healthchecks `/fail`. deploy/restart ใช้ `npm run deploy`
+  เท่านั้น (ห้าม `pm2 restart` มือ). ดู [[acolad-run-via-pm2-single-instance]]
+- **reboot survival**: `pm2-windows-startup` ปลุก PM2 หลัง logon — ต้องเปิด auto-logon
+  (`scripts/setup-autologon.ps1` ผ่าน Sysinternals Autologon/LSA) + `pm2 save`. ถ้า reboot
+  แล้ว heartbeat ไม่กลับใน 5 นาที → เช็ค auto-logon (password rotation/Windows Update boot) ก่อน
+- **Healthchecks**: ตั้ง period 60s / grace 300s — บอทหยุดหรือ lock refuse จะ page ใน ~5 นาที
 - PowerShell 5.1 เป็น shell หลักของเครื่องนี้ (ไม่มี `&&` — ใช้ `;`)
 - จังหวะเรียก portal มีเพดานเข้มงวด (กันบัญชีถูกระงับ): ห้ามลด interval
   ต่ำกว่า 20s หรือเพิ่มความถี่คำขอโดยไม่แก้ FR-011 ใน spec ก่อน

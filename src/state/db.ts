@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS jobs (
@@ -49,7 +49,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_system_active_alert
 CREATE TABLE IF NOT EXISTS outbox (
   outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL,
-  channel TEXT NOT NULL CHECK (channel IN ('chat')),
+  channel TEXT NOT NULL CHECK (channel IN ('chat','sheets')),
   payload_json TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dead')),
   attempts INTEGER NOT NULL DEFAULT 0,
@@ -105,10 +105,89 @@ export function openDatabase(stateDir: string, nowIso: string): OpenResult {
   }
 }
 
+/**
+ * Columns added to `jobs` in schema v2 (XTM fields + lifecycle/accept state,
+ * data-model.md). Applied idempotently via ADD COLUMN so a fresh db (built from
+ * the v1 DDL above) and an existing 001 production db converge on the same
+ * shape — no drift between the two create paths. NOT NULL columns carry a
+ * constant default so legacy rows migrate cleanly.
+ */
+const JOB_V2_COLUMNS: { name: string; ddl: string }[] = [
+  { name: 'xtm_task_id', ddl: 'xtm_task_id TEXT' },
+  { name: 'project_name', ddl: "project_name TEXT NOT NULL DEFAULT ''" },
+  { name: 'file_name', ddl: "file_name TEXT NOT NULL DEFAULT ''" },
+  { name: 'source_lang', ddl: 'source_lang TEXT' },
+  { name: 'target_lang', ddl: 'target_lang TEXT' },
+  { name: 'due_date', ddl: 'due_date TEXT' },
+  { name: 'due_raw', ddl: 'due_raw TEXT' },
+  { name: 'words', ddl: 'words INTEGER' },
+  { name: 'step', ddl: 'step TEXT' },
+  { name: 'role', ddl: 'role TEXT' },
+  { name: 'eligible', ddl: 'eligible INTEGER NOT NULL DEFAULT 0' },
+  {
+    name: 'lifecycle_status',
+    ddl: "lifecycle_status TEXT CHECK (lifecycle_status IN ('new','accepted','skipped','missing','accept_failed','closed','removed'))",
+  },
+  {
+    name: 'accept_status',
+    ddl: "accept_status TEXT NOT NULL DEFAULT 'none' CHECK (accept_status IN ('none','accepting','accepted','failed'))",
+  },
+  { name: 'accepted_at', ddl: 'accepted_at TEXT' },
+  { name: 'sheet_synced_status', ddl: 'sheet_synced_status TEXT' },
+];
+
 function migrate(db: DB): void {
   db.exec(DDL);
-  db.prepare('INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)').run(
-    'schema_version',
-    String(SCHEMA_VERSION),
+  const tx = db.transaction(() => {
+    ensureJobColumns(db);
+    ensureOutboxChannel(db);
+    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
+      'schema_version',
+      String(SCHEMA_VERSION),
+    );
+  });
+  tx();
+}
+
+/** Add any missing v2 columns to `jobs` (idempotent — guarded by table_info). */
+function ensureJobColumns(db: DB): void {
+  const existing = new Set(
+    (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map((r) => r.name),
   );
+  for (const col of JOB_V2_COLUMNS) {
+    if (!existing.has(col.name)) db.exec(`ALTER TABLE jobs ADD COLUMN ${col.ddl}`);
+  }
+}
+
+/**
+ * Widen the outbox channel CHECK to include 'sheets'. SQLite cannot ALTER a
+ * CHECK in place, so an existing v1 outbox (chat-only) is rebuilt preserving
+ * its rows. A fresh db already has the v2 CHECK (from DDL) and is skipped. The
+ * unique index is recreated AFTER dropping the old table so its name never
+ * clashes with the renamed copy.
+ */
+function ensureOutboxChannel(db: DB): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='outbox'")
+    .get() as { sql: string } | undefined;
+  if (!row || row.sql.includes("'sheets'")) return;
+  db.exec('ALTER TABLE outbox RENAME TO outbox_old');
+  db.exec(`
+CREATE TABLE outbox (
+  outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL,
+  channel TEXT NOT NULL CHECK (channel IN ('chat','sheets')),
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dead')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  sent_at TEXT
+);`);
+  db.exec(
+    `INSERT INTO outbox (outbox_id, event_id, channel, payload_json, status, attempts, next_attempt_at, created_at, sent_at)
+     SELECT outbox_id, event_id, channel, payload_json, status, attempts, next_attempt_at, created_at, sent_at FROM outbox_old`,
+  );
+  db.exec('DROP TABLE outbox_old');
+  db.exec('CREATE UNIQUE INDEX idx_outbox_dedup ON outbox (event_id, channel)');
 }

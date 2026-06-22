@@ -1,5 +1,6 @@
-import type { Outbox } from '../state/outbox.js';
+import type { Outbox, OutboxRow } from '../state/outbox.js';
 import type { ChatSender, ChatPayload, SendOutcome } from './googleChat.js';
+import type { SheetSender, SheetRow } from './sheets.js';
 import type { Logger } from '../monitoring/logger.js';
 
 export interface DispatchSummary {
@@ -27,6 +28,8 @@ export class Dispatcher {
     private readonly sender: ChatSender,
     private readonly logger: Logger,
     private readonly hooks: DispatcherHooks = {},
+    /** Target for the 'sheets' channel; rows of that channel are dropped if absent. */
+    private readonly sheetSender?: SheetSender,
   ) {}
 
   async flush(nowIso: string, nowMs: number): Promise<DispatchSummary> {
@@ -38,33 +41,27 @@ export class Dispatcher {
     };
     const due = this.outbox.due(nowIso);
     for (const row of due) {
+      const sent = await this.sendRow(row);
       // Guard the implicit contract (Constitution VI): a single malformed row
-      // (invalid JSON or missing text) must not wedge the whole queue or send an
-      // empty message — drop it with an error log + dead alert.
-      let text: string | undefined;
-      try {
-        text = (JSON.parse(row.payload_json) as ChatPayload).text;
-      } catch {
-        text = undefined;
-      }
-      if (typeof text !== 'string' || text === '') {
+      // (invalid JSON or missing payload) must not wedge the whole queue or send
+      // an empty message — drop it with an error log + dead alert.
+      if (sent === 'malformed') {
         summary.dead++;
         this.outbox.markSent(row.outbox_id, nowIso); // drop so the queue can't wedge
         this.logger.error(
-          { module: 'dispatcher', action: 'send', outcome: 'malformed', eventId: row.event_id },
+          {
+            module: 'dispatcher',
+            action: 'send',
+            outcome: 'malformed',
+            eventId: row.event_id,
+            channel: row.channel,
+          },
           'dropped malformed outbox payload',
         );
         this.hooks.onDead?.(row.event_id);
         continue;
       }
-      const start = Date.now();
-      let outcome: SendOutcome;
-      try {
-        outcome = await this.sender.send(text);
-      } catch {
-        outcome = 'transient';
-      }
-      const latencyMs = Date.now() - start;
+      const { outcome, latencyMs } = sent;
 
       if (outcome === 'ok') {
         this.outbox.markSent(row.outbox_id, nowIso);
@@ -120,5 +117,46 @@ export class Dispatcher {
       }
     }
     return summary;
+  }
+
+  /** Route one row to its channel sender; returns 'malformed' or the send result. */
+  private async sendRow(
+    row: OutboxRow,
+  ): Promise<'malformed' | { outcome: SendOutcome; latencyMs: number }> {
+    const start = Date.now();
+    if (row.channel === 'sheets') {
+      if (!this.sheetSender) return 'malformed';
+      let sheetRow: SheetRow | undefined;
+      try {
+        sheetRow = (JSON.parse(row.payload_json) as { row: SheetRow }).row;
+      } catch {
+        sheetRow = undefined;
+      }
+      if (!sheetRow || typeof sheetRow.jobKey !== 'string' || sheetRow.jobKey === '') {
+        return 'malformed';
+      }
+      let outcome: SendOutcome;
+      try {
+        outcome = await this.sheetSender.send(sheetRow);
+      } catch {
+        outcome = 'transient';
+      }
+      return { outcome, latencyMs: Date.now() - start };
+    }
+    // 'chat'
+    let text: string | undefined;
+    try {
+      text = (JSON.parse(row.payload_json) as ChatPayload).text;
+    } catch {
+      text = undefined;
+    }
+    if (typeof text !== 'string' || text === '') return 'malformed';
+    let outcome: SendOutcome;
+    try {
+      outcome = await this.sender.send(text);
+    } catch {
+      outcome = 'transient';
+    }
+    return { outcome, latencyMs: Date.now() - start };
   }
 }
