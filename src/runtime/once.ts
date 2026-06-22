@@ -1,9 +1,25 @@
 import { ColdStartHistory } from './coldStartHistory.js';
 import { createXtmBot } from './bootstrap.js';
 import { systemClock } from '../clock.js';
+import { loadConfig } from '../config/index.js';
+import { acquireSingleInstanceLock } from './singleInstance.js';
 
 /** Run a single poll cycle then exit (smoke test — npm run poll:once). */
 async function main(): Promise<void> {
+  const cfg0 = loadConfig();
+  // Single-instance: refuse if the 24/7 bot (or another poll:once) is running — a concurrent
+  // poll on the shared account could double-accept. Stop the bot before poll:once.
+  let release: () => Promise<void>;
+  try {
+    release = await acquireSingleInstanceLock({ port: cfg0.SINGLE_INSTANCE_PORT, retryMs: 0 });
+  } catch {
+    console.error(
+      `acolad-bot: another instance owns port ${cfg0.SINGLE_INSTANCE_PORT} — stop the bot before poll:once.`,
+    );
+    process.exit(1);
+    return;
+  }
+
   const { cfg, db, client, loop } = createXtmBot();
   try {
     const ok = await loop.runOnce();
@@ -12,6 +28,7 @@ async function main(): Promise<void> {
   } finally {
     await client.dispose();
     db.close();
+    await release().catch(() => undefined);
   }
 }
 

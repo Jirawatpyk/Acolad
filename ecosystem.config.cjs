@@ -13,6 +13,9 @@ module.exports = {
       windowsHide: true,
       max_memory_restart: '900M',
       restart_delay: 5000,
+      // Give the bot's bounded graceful shutdown (force-dispose watchdog 25s + dispose
+      // cap 8s = ~33s) time to close Chromium before SIGKILL, so no orphaned browser.
+      kill_timeout: 35000,
       out_file: 'logs/pm2-out.log',
       error_file: 'logs/pm2-err.log',
       merge_logs: true,
