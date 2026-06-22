@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { maskString, redactSecrets } from '../../src/monitoring/logger.js';
+import { describe, it, expect, vi } from 'vitest';
+import { flushWithCap, maskString, redactSecrets } from '../../src/monitoring/logger.js';
 
 /**
  * Regression guard for the credential leak (FR-012, Constitution V): a Playwright
@@ -32,6 +32,43 @@ describe('maskString (concrete-value redaction)', () => {
   it('leaves a string with no secrets unchanged and is a no-op for empty secret lists', () => {
     expect(maskString('nothing secret here', secrets)).toBe('nothing secret here');
     expect(maskString(`contains ${PW}`, [])).toBe(`contains ${PW}`);
+  });
+});
+
+describe('flushWithCap (bounded transport drain on shutdown)', () => {
+  it('resolves as soon as the transport flush callback fires', async () => {
+    const target = { flush: (cb: (err?: Error) => void) => cb() };
+    await expect(flushWithCap(target, 500)).resolves.toBeUndefined();
+  });
+
+  it('resolves (does not reject) when flush throws', async () => {
+    const target = {
+      flush: () => {
+        throw new Error('transport gone');
+      },
+    };
+    await expect(flushWithCap(target, 500)).resolves.toBeUndefined();
+  });
+
+  it('resolves via the cap when the flush callback never fires (never blocks shutdown)', async () => {
+    vi.useFakeTimers();
+    try {
+      const target = { flush: () => {} }; // never calls back
+      const p = flushWithCap(target, 500);
+      vi.advanceTimersByTime(500);
+      await expect(p).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores a late second callback (settles once)', async () => {
+    let cb: ((err?: Error) => void) | undefined;
+    const target = { flush: (fn: (err?: Error) => void) => (cb = fn) };
+    const p = flushWithCap(target, 500);
+    cb?.();
+    cb?.(); // late/dup — must not throw or re-resolve
+    await expect(p).resolves.toBeUndefined();
   });
 });
 
