@@ -93,8 +93,13 @@ The reliability review showed the prior "verify only" assumption was false. Requ
   in-flight Playwright calls, which are already caught). The normal loop-exit path clears the
   watchdog and runs the same bounded dispose. Whichever fires first wins.
 - **`browser.ts` `dispose()`:** wrap the close in `Promise.race([close(), timeout(DISPOSE_TIMEOUT_MS)])`
-  so a hung Chromium `context.close()` cannot block shutdown forever. After the race, best-effort
-  kill the browser process tree if still alive.
+  so a hung Chromium `context.close()` cannot block shutdown forever.
+  > **Implementation note (deviation):** the "best-effort kill the browser process tree if still
+  > alive" step is **deferred**. `chromium.launch()` does not expose the browser PID (that lives on
+  > `BrowserServer.process()` via `launchServer()`+`connect()`, a lifecycle refactor of the
+  > crash-recovery-critical `browser.ts` not worth the risk in a hardening pass). Current posture: a
+  > timed-out dispose is **logged loudly** (`main.ts` `outcome: 'dispose_timeout'`) and the leftover
+  > Chromium is reaped by the next `npm run deploy` orphan-sweep. Tracked as a follow-up.
 - **`ecosystem.config.cjs`:** add `kill_timeout: 35000` (backstop > 25 + 8). Result: the process
   always exits ≤ ~33s after SIGTERM, before SIGKILL → **no orphaned Chromium** regardless of cycle length.
 - **Stretch (out of scope for v1, noted):** thread an `AbortSignal` from SIGTERM into `runOnce()`'s
@@ -161,7 +166,8 @@ main() →
 
 - Lock refused → ping Healthchecks /fail (dead-man switch) + loud log + exit(1). Distinguishes
   own-instance vs foreign-port-holder (logs holder PID).
-- `browser.dispose()` hang → bounded by DISPOSE_TIMEOUT + process-tree kill (never blocks exit).
+- `browser.dispose()` hang → bounded by DISPOSE_TIMEOUT (never blocks exit) + loud `dispose_timeout`
+  log; leftover Chromium reaped by next deploy sweep (in-process tree-kill deferred — see §3.2 note).
 - Deploy verify FAIL → non-zero exit naming the failing check; never a silent "deployed".
 
 ## 6. Testing

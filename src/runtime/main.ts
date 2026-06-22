@@ -13,7 +13,9 @@ const stamp = (): string => new Date().toLocaleTimeString('en-GB');
 
 const LOCK_RETRY_MS = 45_000; // >= PM2 kill_timeout (35s) so a new instance waits out the old's shutdown
 const SHUTDOWN_BUDGET_MS = 25_000; // force shutdown if the loop hasn't exited by now
-const DISPOSE_TIMEOUT_MS = 8_000; // cap on the final browser dispose
+// Cap on the final browser dispose. Bounds BrowserSession.dispose()'s own 2× CLOSE_TIMEOUT_MS
+// (browser.ts) to a single 8s ceiling — keep in step with ecosystem kill_timeout (25s+8s≈33s<35s).
+const DISPOSE_TIMEOUT_MS = 8_000;
 
 /** Long-running 24/7 entrypoint under PM2 (npm start). */
 async function main(): Promise<void> {
@@ -55,19 +57,30 @@ async function main(): Promise<void> {
   }
 
   let running = true;
-  let forcing = false;
-  // Bounded shutdown: dispose the browser (capped) + release the lock + exit — never wait
-  // for an in-flight cycle (disposing mid-cycle just errors the caught Playwright calls).
-  const forceShutdown = async (): Promise<void> => {
-    if (forcing) return;
-    forcing = true;
-    await withTimeout(client.dispose(), DISPOSE_TIMEOUT_MS);
+  let cleanedUp = false;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  // Single idempotent teardown: dispose the browser (capped — a hung close is process-tree
+  // killed inside BrowserSession), close the DB, release the lock. Runs at most once whether
+  // the loop exits cooperatively OR the watchdog forces it, so the two paths never race a
+  // double db.close()/release(). Clears the watchdog so a normal exit cannot trigger a force.
+  const cleanup = async (outcome: 'ok' | 'forced'): Promise<void> => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    if (watchdog) clearTimeout(watchdog);
+    await withTimeout(client.dispose(), DISPOSE_TIMEOUT_MS, () =>
+      logger.error(
+        { module: 'main', action: 'shutdown', outcome: 'dispose_timeout' },
+        'browser dispose exceeded its cap — possible orphaned Chromium (reaped by next deploy sweep)',
+      ),
+    );
     db.close();
     await release().catch(() => undefined);
-    logger.info(
-      { module: 'main', action: 'shutdown', outcome: 'forced' },
-      'acolad-bot stopped (bounded)',
-    );
+    logger.info({ module: 'main', action: 'shutdown', outcome }, 'acolad-bot stopped (bounded)');
+  };
+  // Bounded shutdown: never wait for an in-flight cycle (disposing mid-cycle just errors the
+  // caught Playwright calls). Force = tear down now and exit.
+  const forceShutdown = async (): Promise<void> => {
+    await cleanup('forced');
     process.exit(0);
   };
   const shutdown = (signal: string): void => {
@@ -78,10 +91,18 @@ async function main(): Promise<void> {
       return;
     }
     running = false;
-    setTimeout(() => void forceShutdown(), SHUTDOWN_BUDGET_MS).unref();
+    watchdog = setTimeout(() => void forceShutdown(), SHUTDOWN_BUDGET_MS);
+    watchdog.unref();
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  // PM2 on Windows cannot deliver POSIX signals to a daemon-spawned process; started with
+  // `--shutdown-with-message` it sends an IPC 'shutdown' message instead. Handle it so
+  // `pm2 stop`/deploy triggers the bounded teardown rather than waiting out kill_timeout
+  // and SIGKILLing mid-cycle (which orphans Chromium). Harmless if the message never comes.
+  process.on('message', (msg) => {
+    if (msg === 'shutdown') shutdown('shutdown-message');
+  });
 
   logger.info({ module: 'main', action: 'startup', outcome: 'ok' }, 'acolad-xtm-bot started');
   console.log(
@@ -112,11 +133,9 @@ async function main(): Promise<void> {
     await sleep(delay);
   }
 
-  // Normal exit (loop ended cooperatively before the watchdog fired).
-  await withTimeout(client.dispose(), DISPOSE_TIMEOUT_MS);
-  db.close();
-  await release().catch(() => undefined);
-  logger.info({ module: 'main', action: 'shutdown', outcome: 'ok' }, 'acolad-bot stopped');
+  // Normal exit (loop ended cooperatively before the watchdog fired). Same guarded
+  // teardown — clears the pending watchdog so it cannot fire a redundant force.
+  await cleanup('ok');
   console.log(`[${stamp()}] acolad-bot หยุดแล้ว`);
 }
 

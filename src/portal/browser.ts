@@ -93,7 +93,11 @@ export class BrowserSession {
   }
 
   async dispose(): Promise<void> {
-    // Bounded: a hung Chromium close() must never block shutdown (orphan root cause).
+    // Bounded: a hung Chromium close() must never block shutdown (orphan root cause). The
+    // cap lets the process exit promptly; on the rare genuinely-hung close the caller logs
+    // a dispose_timeout and the next `npm run deploy` orphan-sweep reaps the leftover.
+    // (An in-process PID-targeted kill would need launchServer()+connect() — chromium.launch()
+    // does not expose the browser PID — deferred rather than faked.)
     if (this.context) await withTimeout(this.context.close(), CLOSE_TIMEOUT_MS);
     if (this.browser) await withTimeout(this.browser.close(), CLOSE_TIMEOUT_MS);
     this.context = undefined;

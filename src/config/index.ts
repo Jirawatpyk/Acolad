@@ -51,6 +51,8 @@ const schema = z.object({
   POLL_INTERVAL_MS: z.coerce.number().int().min(20_000).max(25_000).default(20_000),
   // Port-bind single-instance lock token (src/runtime/singleInstance.ts). The bot binds
   // 127.0.0.1:<this> at startup; a second instance refuses. Change only if it ever clashes.
+  // NOTE: scripts/deploy.ps1 hardcodes this same port and does NOT read .env — if you
+  // override it here, change deploy.ps1's $Port too or the orphan-sweep watches the wrong port.
   SINGLE_INSTANCE_PORT: z.coerce.number().int().min(1).max(65_535).default(47811),
   LOGIN_MAX_RETRY: z.coerce.number().int().positive().default(3),
   LOGIN_LOCKOUT_MINUTES: z.coerce.number().int().positive().default(15),

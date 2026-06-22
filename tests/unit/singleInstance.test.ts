@@ -29,4 +29,29 @@ describe('acquireSingleInstanceLock', () => {
     const release2 = await acquireSingleInstanceLock({ port, retryMs: 0 });
     await release2(); // succeeded → no throw
   });
+
+  it('retries on EADDRINUSE and acquires once the holder releases mid-retry', async () => {
+    const port = await freePort();
+    const release1 = await acquireSingleInstanceLock({ port, retryMs: 0 });
+    let released = false;
+    // Injected sleep stands in for the 500ms backoff; on the first retry it frees the port,
+    // so the next listen() succeeds — the exact "ride out the old instance's shutdown" path.
+    const sleep = vi.fn(async () => {
+      if (!released) {
+        released = true;
+        await release1();
+      }
+    });
+    const release2 = await acquireSingleInstanceLock({ port, retryMs: 5000, sleep });
+    expect(sleep).toHaveBeenCalled();
+    await release2();
+  });
+
+  it('does not call onRefused on a successful acquire', async () => {
+    const port = await freePort();
+    const onRefused = vi.fn(async () => {});
+    const release = await acquireSingleInstanceLock({ port, retryMs: 0, onRefused });
+    expect(onRefused).not.toHaveBeenCalled();
+    await release();
+  });
 });

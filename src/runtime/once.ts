@@ -3,6 +3,7 @@ import { createXtmBot } from './bootstrap.js';
 import { systemClock } from '../clock.js';
 import { loadConfig } from '../config/index.js';
 import { acquireSingleInstanceLock } from './singleInstance.js';
+import { withTimeout } from '../withTimeout.js';
 
 /** Run a single poll cycle then exit (smoke test — npm run poll:once). */
 async function main(): Promise<void> {
@@ -26,7 +27,9 @@ async function main(): Promise<void> {
     console.log(ok ? 'poll:once OK' : 'poll:once completed with errors (see logs/alerts)');
     if (ok) new ColdStartHistory(cfg.LOG_DIR).record(systemClock.nowIso());
   } finally {
-    await client.dispose();
+    // Bounded + non-throwing (withTimeout never rejects), so db.close()/release() always run
+    // even if Chromium hangs — mirrors main.ts so poll:once can't hang or strand the lock.
+    await withTimeout(client.dispose(), 8_000);
     db.close();
     await release().catch(() => undefined);
   }

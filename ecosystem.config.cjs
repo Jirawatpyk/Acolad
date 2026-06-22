@@ -7,9 +7,9 @@ module.exports = {
       // relative script/log paths and .env resolve correctly.
       cwd: __dirname,
       autorestart: true,
-      // Hide the spawned console window. Without this, the headless Chromium
-      // (chrome-headless-shell.exe, a console binary) pops a stray Windows
-      // Terminal window on Windows 11 — matching the other PM2 bots' config.
+      // Belt-and-suspenders: browser.ts already uses channel:'chromium' (full GUI binary)
+      // to avoid chrome-headless-shell.exe's stray console window; windowsHide hides any
+      // console PM2 itself spawns regardless — matching the other PM2 bots' config.
       windowsHide: true,
       max_memory_restart: '900M',
       restart_delay: 5000,

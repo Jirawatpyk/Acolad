@@ -21,7 +21,9 @@ Push-Location $root
 try {
   Write-Host '== 1/5 build =='
   npm run build
-  if (-not $?) { throw 'build failed' }
+  # PS 5.1: $? is unreliable for native exe exit codes — gate on $LASTEXITCODE so a tsc
+  # error aborts here instead of redeploying a stale/broken dist/.
+  if ($LASTEXITCODE -ne 0) { throw 'build failed' }
 
   Write-Host '== 2/5 stop + wait for port free =='
   pm2 stop $App | Out-Null
@@ -45,18 +47,30 @@ try {
   if (-not (pm2 prettylist 2>$null | Select-String "name: '$App'")) { throw 'pm2 dump missing acolad-bot' }
 
   Write-Host '== 5/5 verify (<=90s) =='
-  $log = Get-ChildItem "$root/logs/acolad.*.log" | Sort-Object LastWriteTime | Select-Object -Last 1
+  # Re-resolve the newest log each iteration: pino-roll's daily index is NOT monotonic with
+  # time across restarts, and it may rotate mid-window — selecting once up front can watch a
+  # stale file and false-FAIL a healthy deploy (which would invite a banned manual restart).
   $mark = (Get-Date)
   $ok = $false
   $deadline = (Get-Date).AddSeconds(90)
   while ((Get-Date) -lt $deadline) {
-    $fresh = Get-Content $log.FullName -Tail 40 | Select-String '"action":"cycle","outcome":"ok"'
-    if ($fresh -and ((Get-Item $log.FullName).LastWriteTime -gt $mark)) { $ok = $true; break }
+    $log = Get-ChildItem "$root/logs/acolad.*.log" -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime | Select-Object -Last 1
+    if ($log -and $log.LastWriteTime -gt $mark) {
+      if (Get-Content $log.FullName -Tail 40 | Select-String '"action":"cycle","outcome":"ok"') {
+        $ok = $true; break
+      }
+    }
     Start-Sleep -Seconds 3
   }
   $holder = Port-Holder $Port
-  if (-not $ok)     { throw 'FAIL: no fresh "poll cycle ok" within 90s' }
-  if (-not $holder) { throw 'FAIL: lock port not held after start' }
+  # Assert exactly ONE acolad poller — catches an orphaned main.js that survived the sweep
+  # (verify by port-held + cycle-ok alone would FALSE-PASS with a second instance running).
+  $instances = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'dist[\\/]runtime[\\/]main\.js' })
+  if (-not $ok)                  { throw 'FAIL: no fresh "poll cycle ok" within 90s' }
+  if (-not $holder)              { throw 'FAIL: lock port not held after start' }
+  if ($instances.Count -ne 1)   { throw "FAIL: expected exactly 1 acolad main.js process, found $($instances.Count)" }
   Write-Host "PASS: deployed, single instance (PID $holder holds port $Port), cycle ok" -ForegroundColor Green
 }
 finally {
