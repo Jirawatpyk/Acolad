@@ -275,8 +275,33 @@ describe('XtmPollCycle (US1 — detect, accept, record)', () => {
     const acc = new StubAcceptor();
     const cycle = new XtmPollCycle(db, cfg(), acc);
     await cycle.run(snap([xraw()], 'c1')); // first_seen → accept
-    await cycle.run(snap([xraw()], 'c2')); // still visible → no new event, no re-accept
+    await cycle.run(snap([xraw()], 'c2')); // still visible → already 'accepted', no re-accept
     expect(acc.calls).toHaveLength(1); // accept invoked only once
+  });
+
+  it('accepts a still-visible eligible job that was never accepted (enabled mid-life) — robustness', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    // c1: accept OFF → detected + eligible, but accept_status stays 'none' (not grabbed).
+    await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), acc).run(snap([xraw()], 'c1'));
+    expect(acc.calls.flat()).toHaveLength(0);
+    expect(only().acceptStatus).toBe('none');
+    // c2: accept ON, SAME job still visible (NO fresh first_seen event) → must be grabbed
+    // now, not left sitting (the snatch model must not depend on accept being on at the
+    // exact moment the job first appeared).
+    await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: true }), acc).run(snap([xraw()], 'c2'));
+    expect(acc.calls.flat()).toHaveLength(1); // attempted despite no new appearance event
+    expect(only().lifecycleStatus).toBe('accepted');
+  });
+
+  it('does NOT re-attempt a job already failed/accepted via the no-event pass', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    acc.outcome = 'failed';
+    await new XtmPollCycle(db, cfg(), acc).run(snap([xraw()], 'c1')); // first_seen → failed
+    expect(only().acceptStatus).toBe('failed');
+    await new XtmPollCycle(db, cfg(), acc).run(snap([xraw()], 'c2')); // still visible, but 'failed'
+    expect(acc.calls.flat()).toHaveLength(1); // not retried — only 'none' jobs are picked up
   });
 
   it('cold start accepts a still-acceptable pre-existing Malay job and marks baseline (FR-005)', async () => {
@@ -363,6 +388,16 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     expect(chat).toHaveLength(1);
     expect(chat[0]?.text).toContain('📋');
     expect(outboxPayloads('sheets')).toHaveLength(2);
+  });
+
+  it('reports a grabbed still-visible job that had no fresh event — Accepted sheet + ✅ chat', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone(); // past baseline → per-job chat fires
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), acc).run(snap([xraw()], 'c1'));
+    await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: true }), acc).run(snap([xraw()], 'c2'));
+    expect(outboxPayloads('sheets').at(-1)?.row?.status).toBe('Accepted'); // not silently accepted
+    expect(outboxPayloads('chat').some((c) => c.text?.includes('✅'))).toBe(true);
   });
 
   it('enqueues a New sheets row when auto-accept is disabled', async () => {

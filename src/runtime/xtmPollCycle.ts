@@ -1,6 +1,7 @@
 import { diffXtm } from '../detection/xtmDiff.js';
 import { isEligibleTarget } from '../detection/eligibility.js';
 import { decideAccept } from '../detection/acceptDecision.js';
+import { computeXtmJobKey } from '../detection/jobKey.js';
 import { XtmJobStore } from '../state/xtmJobStore.js';
 import { JobStore } from '../state/jobStore.js';
 import { MetaStore } from '../state/meta.js';
@@ -184,6 +185,33 @@ export class XtmPollCycle {
       }
     }
 
+    // Robustness: also attempt eligible jobs PRESENT in Active that produced NO fresh
+    // appearance event this cycle — e.g. accept was enabled (or the bot restarted, or a
+    // per-cycle cap deferred them) while the job was already showing. Without this a
+    // still-acceptable Malay job sits un-grabbed forever (its only first_seen event fired
+    // while accept was off). Bounded + idempotent: only accept_status 'none' (a grabbed /
+    // failed / accepting job is never re-attempted), gated by the same cap and the atomic
+    // claim below, and the job leaves Active once grabbed.
+    const eventKeys = new Set(result.events.map((e) => e.jobKey));
+    const presentKeys = new Set(snapshot.jobs.map((j) => computeXtmJobKey(j)));
+    for (const s of result.nextStates.values()) {
+      if (eventKeys.has(s.jobKey) || !presentKeys.has(s.jobKey)) continue;
+      if (!s.eligible || s.acceptStatus !== 'none') continue;
+      const decision = decideAccept({
+        targetLang: s.targetLang,
+        words: s.words,
+        acceptEnabled: this.cfg.ACCEPT_ENABLED,
+        acceptLanguages: this.cfg.ACCEPT_LANGUAGES,
+        maxWords: this.cfg.ACCEPT_MAX_WORDS,
+        acceptedThisCycle,
+        maxPerCycle: this.cfg.ACCEPT_MAX_PER_CYCLE,
+      });
+      if (decision.action === 'accept') {
+        candidates.push(s);
+        acceptedThisCycle++;
+      }
+    }
+
     // FR-014: an accepted job that left Active is Closed (found in the Closed tab)
     // or Removed (cancelled/reassigned). Checked ONLY on disappearance to respect
     // the rate budget (FR-027). bootstrap always wires a closedReader in production;
@@ -279,18 +307,24 @@ export class XtmPollCycle {
     // Enqueue the per-job Sheets row (every changed job, all statuses) + the Chat
     // message (T041/T048). One event_id per transition per cycle; the outbox dedups
     // by (event_id, channel) so a re-run never duplicates (Constitution VII).
-    for (const ev of result.events) {
-      const s = result.nextStates.get(ev.jobKey);
-      if (!s) continue;
-      const base = `${ev.jobKey}|${s.lifecycleStatus}|${snapshot.pollCycleId}`;
-      const outcome = acceptResults.get(ev.jobKey);
+    // Report every job that had an appearance event OR a fresh accept outcome this cycle.
+    // The robustness pass can accept a job that produced no event — its Sheet row + Chat
+    // must still fire (never a silent accept). Deduped by jobKey so an event-bearing
+    // accept is reported once.
+    const reported = new Set<string>();
+    const reportJob = (jobKey: string, ev: (typeof result.events)[number] | undefined): void => {
+      const s = result.nextStates.get(jobKey);
+      if (!s || reported.has(jobKey)) return;
+      reported.add(jobKey);
+      const base = `${jobKey}|${s.lifecycleStatus}|${snapshot.pollCycleId}`;
+      const outcome = acceptResults.get(jobKey);
       let note: string | null;
       if (outcome?.outcome === 'failed') {
         note = outcome.reason;
       } else if (outcome?.outcome === 'missing') {
         note = 'snatched';
       } else {
-        note = skipNotes.get(ev.jobKey) ?? null; // skipped → record the skip reason
+        note = skipNotes.get(jobKey) ?? null; // skipped → record the skip reason
       }
       this.outbox.enqueue(
         `sheet:${base}`,
@@ -301,8 +335,8 @@ export class XtmPollCycle {
       // During baseline a single cold-start summary replaces per-job Chat (FR-005).
       if (!baseline) {
         const text = this.chatForEvent(
-          ev.eventType,
-          ev.firstSeenAt,
+          ev?.eventType,
+          ev?.firstSeenAt,
           s,
           outcome,
           snapshot.capturedAt,
@@ -316,7 +350,9 @@ export class XtmPollCycle {
           );
         }
       }
-    }
+    };
+    for (const ev of result.events) reportJob(ev.jobKey, ev);
+    for (const jobKey of acceptResults.keys()) reportJob(jobKey, undefined);
     if (baseline) {
       const text = renderXtmColdStartSummary([...result.nextStates.values()], snapshot.capturedAt);
       this.outbox.enqueue(
@@ -352,7 +388,7 @@ export class XtmPollCycle {
 
   /** The Chat message for an appearance, or undefined for sheet-only events. */
   private chatForEvent(
-    eventType: AppearanceEventType,
+    eventType: AppearanceEventType | undefined,
     firstSeenAt: string | undefined,
     s: XtmJobState,
     outcome: AcceptResult | undefined,
@@ -368,6 +404,9 @@ export class XtmPollCycle {
         at,
       );
     }
+    // No accept outcome and no appearance event (robustness-pass job that wasn't
+    // accepted) → nothing to announce.
+    if (!eventType) return undefined;
     // A job the bot never accepted leaving Active is sheet-only (contracts §sheet-only).
     if (eventType === 'missing') return undefined;
     // A job that disappeared and returned is announced as relisted, not new (FR-019).
