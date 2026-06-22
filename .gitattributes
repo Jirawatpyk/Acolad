@@ -1,0 +1,22 @@
+# Normalize text files to LF in the repo AND on checkout — overrides core.autocrlf=true,
+# which otherwise writes CRLF working-tree files that fail `prettier --check` (endOfLine: lf)
+# and broke `npm run lint` on Windows. Binary types are marked so git never touches them.
+* text=auto eol=lf
+
+# Windows scripts that genuinely need CRLF (PowerShell 5.1 tolerates LF, so keep LF;
+# .bat/.cmd are the ones that truly need CRLF if any are added later).
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.pdf  binary
+*.db   binary
+*.sqlite  binary
+*.sqlite3 binary
+*.woff  binary
+*.woff2 binary
