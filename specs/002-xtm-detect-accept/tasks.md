@@ -241,10 +241,11 @@ log โดยไม่ต้องมี Sheets/Chat)
       (Editor) + map `SHEETS_TAB_NAME`/gid (D7) — **เสร็จ**: .env ตั้งครบ
       (Company/Username/Password/URL/Sheets), ชีต `PM_Tracking` แชร์แล้ว (service
       account เขียน v2 header สำเร็จ ยืนยันด้วยการอ่าน row 1)
-- [ ] T054 รัน `quickstart.md` V1–V16/V10b (LIVE-gated เท่าที่ต้อง) + coverage ≥ 80%
-      + `npm run lint && npm run typecheck` 0 error — **partial**: gate offline ผ่าน
+- [x] T054 รัน `quickstart.md` V1–V16/V10b (LIVE-gated เท่าที่ต้อง) + coverage ≥ 80%
+      + `npm run lint && npm run typecheck` 0 error — **เสร็จ**: gate offline ผ่าน
       (coverage 98.97/94.61/88.25, lint+typecheck 0 err); V1–V5 live ผ่าน (login/อ่าน
-      Active/empty/heartbeat); **V14/V16 (accept/latency) รองานมาเลย์จริง**
+      Active/empty/heartbeat); **V14/V16 (accept/latency) ยืนยัน live แล้ว — บอทกดรับงาน
+      มาเลย์จริง + log Accepted ลง Sheets/Chat (ตรวจรับจริงจากงานที่เข้ามา)**
 - [x] T055 [P] อัปเดต CLAUDE.md สถานะ 002 + docs; redeploy PM2 single instance
       ([[acolad-run-via-pm2-single-instance]]); ยืนยัน **heartbeat → Healthchecks
       (FR-028, reuse `src/monitoring/heartbeat.ts`)** — เงียบเกิน grace → alert —
