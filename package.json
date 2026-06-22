@@ -19,7 +19,8 @@
     "outbox:requeue": "npm run build && node dist/runtime/requeue.js",
     "report:latency": "npm run build && node dist/runtime/latencyReport.js",
     "report:catch-rate": "npm run build && node dist/runtime/catchRateReport.js",
-    "xtm:recon": "tsc scripts/xtm-recon.ts --outDir dist-recon --module nodenext --moduleResolution nodenext --target ES2022 --skipLibCheck && node dist-recon/xtm-recon.js"
+    "xtm:recon": "tsc scripts/xtm-recon.ts --outDir dist-recon --module nodenext --moduleResolution nodenext --target ES2022 --skipLibCheck && node dist-recon/xtm-recon.js",
+    "deploy": "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.0",
