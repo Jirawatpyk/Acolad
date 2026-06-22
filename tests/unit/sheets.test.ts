@@ -3,6 +3,7 @@ import {
   SheetSink,
   GoogleSheetSender,
   V2_HEADER,
+  formatSheetDate,
   type SheetsApi,
   type SheetRow,
 } from '../../src/reporting/sheets.js';
@@ -102,7 +103,7 @@ describe('SheetSink.upsertRow (upsert by job_key, Constitution VII / FR-017)', (
     await sink.upsertRow(row({ status: 'Accepted', acceptedAt: '2026-06-19T10:00:05+07:00' }));
     expect(api.rows).toHaveLength(2); // still one data row
     expect(api.rows[1]?.[1]).toBe('Accepted');
-    expect(api.rows[1]?.[10]).toBe('2026-06-19T10:00:05+07:00'); // Accepted at col K
+    expect(api.rows[1]?.[10]).toBe('19/06/2026 10:00'); // Accepted at col K — readable Bangkok local
   });
 
   it('never claims a historical row that has no job_key (FR-026)', async () => {
@@ -121,6 +122,36 @@ describe('SheetSink.upsertRow (upsert by job_key, Constitution VII / FR-017)', (
     expect(api.rows[1]?.[4]).toBe(''); // source
     expect(api.rows[1]?.[7]).toBe(''); // words
     expect(api.rows[1]?.[11]).toBe('snatched'); // note col L
+  });
+
+  it('writes human-readable Bangkok dates (not raw ISO) for received/due/accepted', async () => {
+    const api = new FakeSheets([V2_HEADER]);
+    await new SheetSink(api).upsertRow(
+      row({
+        receivedDate: '2026-06-22T10:11:25.007Z', // UTC → +07
+        dueDate: '2026-06-22T21:38+07:00',
+        acceptedAt: '2026-06-22T10:12:00.000Z',
+      }),
+    );
+    expect(api.rows[1]?.[0]).toBe('22/06/2026 17:11'); // Received date col A
+    expect(api.rows[1]?.[6]).toBe('22/06/2026 21:38'); // Due date col G
+    expect(api.rows[1]?.[10]).toBe('22/06/2026 17:12'); // Accepted at col K
+  });
+});
+
+describe('formatSheetDate (readable Bangkok-local dates)', () => {
+  it('formats a UTC ISO timestamp to Bangkok DD/MM/YYYY HH:mm', () => {
+    expect(formatSheetDate('2026-06-22T10:11:25.007Z')).toBe('22/06/2026 17:11');
+  });
+
+  it('formats a +07:00 ISO timestamp without shifting it twice', () => {
+    expect(formatSheetDate('2026-06-22T21:38+07:00')).toBe('22/06/2026 21:38');
+  });
+
+  it('returns empty for null/empty and passes an unparseable value through unchanged', () => {
+    expect(formatSheetDate(null)).toBe('');
+    expect(formatSheetDate('')).toBe('');
+    expect(formatSheetDate('not-a-date')).toBe('not-a-date');
   });
 });
 
