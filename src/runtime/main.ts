@@ -76,6 +76,9 @@ async function main(): Promise<void> {
     db.close();
     await release().catch(() => undefined);
     logger.info({ module: 'main', action: 'shutdown', outcome }, 'acolad-bot stopped (bounded)');
+    // Drain the worker-thread transport so this shutdown line actually reaches disk before
+    // process.exit kills the worker — otherwise graceful shutdown is invisible in the logs.
+    await logger.flush?.();
   };
   // Bounded shutdown: never wait for an in-flight cycle (disposing mid-cycle just errors the
   // caught Playwright calls). Force = tear down now and exit.

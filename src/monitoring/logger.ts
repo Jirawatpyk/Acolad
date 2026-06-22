@@ -8,6 +8,12 @@ export interface Logger {
   info(fields: LogFields, msg?: string): void;
   warn(fields: LogFields, msg?: string): void;
   error(fields: LogFields, msg?: string): void;
+  /**
+   * Drain the async (pino-roll worker-thread) transport so the final line — notably the
+   * shutdown line — reaches disk before `process.exit` kills the worker. Best-effort and
+   * capped (never blocks shutdown). Optional so lightweight test stubs need not implement it.
+   */
+  flush?(): Promise<void>;
 }
 
 export interface LogFields {
@@ -66,7 +72,34 @@ export function createLogger(cfg: AppConfig): Logger {
     info: (fields, msg) => logger.info(fields, mask(msg)),
     warn: (fields, msg) => logger.warn(fields, mask(msg)),
     error: (fields, msg) => logger.error(fields, mask(msg)),
+    flush: () => flushWithCap(logger, 500),
   };
+}
+
+/**
+ * Best-effort drain of a flushable (pino's worker-thread transport), hard-capped at `capMs`
+ * so a stuck transport can NEVER block shutdown. Resolves on the flush callback, on a throw,
+ * or on the cap — whichever is first. Pure (target + timer injected via the args) so the
+ * bounded behaviour is unit-testable without spinning a real transport.
+ */
+export function flushWithCap(
+  target: { flush(cb: (err?: Error) => void): void },
+  capMs: number,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    try {
+      target.flush(done);
+    } catch {
+      done();
+    }
+    setTimeout(done, capMs).unref();
+  });
 }
 
 /** Replace any occurrence of a concrete secret value inside string fields. */
