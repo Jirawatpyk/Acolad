@@ -125,26 +125,36 @@ export const XTM = {
   },
 
   // ── Accept control + success signal — D4/D6 ───────────────────────────────
-  // PATH CONFIRMED from recon screenshots + DOM capture: open the row kebab →
-  // a Radix dropdown renders into `#context-menus-container` (inside the iframe)
-  // → its submenu parent is STATE-DEPENDENT text: "Accept task" for an
-  // acceptable job, "Finish task" for an in-progress/finished one. The bot acts
-  // ONLY when "Accept task" is present (⇒ this job is acceptable). Expanding it
-  // reveals 6 options; the bulk one (FR-006) is "Accept all tasks for this
-  // language in this group".
+  // CONFIRMED from a real eligible Malay job's menu DOM (recon 2026-06-22,
+  // release 25.6.0, state/evidence/...-accept_menu_recon):
+  //  - The row kebab opens a dropdown rendered INLINE inside `#taskListing` as
+  //    `[data-dropdown-menu="true"]` (a fixed-positioned div), NOT in the
+  //    `#context-menus-container` portal — that portal stays EMPTY (the earlier
+  //    assumption was wrong; targeting it found nothing).
+  //  - Menu items are `li[data-dropdown-menu-item="true"]` with STABLE ids
+  //    `TASK_LISTING_<ACTION>_<taskId>`. The acceptable-job action is
+  //    `TASK_LISTING_ACCEPT_GROUP_TASK_<taskId>` (label "Accept task", carries a
+  //    chevron ⇒ it is a SUBMENU parent). Keying off this id prefix is
+  //    locale-independent — preferred over the en_GB label text.
   //
-  // These item texts are LOCALE-dependent (UI is en_GB) — treat them as
-  // config-adjacent and FAIL LOUD if not found on an eligible job rather than
-  // clicking a wrong item. The exact submenu DOM + the success signal still
-  // need an evidence-first capture on a real un-accepted Malay job; until then
-  // T026 confirms the outcome by RE-READING Active (FR-024), never by trusting
-  // the click. ACCEPT_ENABLED stays 0 until that capture lands.
+  // STILL UNCONFIRMED (submenu was not captured — recon hovered the wrong
+  // container): the expanded submenu's 6 children, incl. the bulk option (FR-006)
+  // whose en_GB text is assumed "Accept all tasks for this language in this
+  // group"; and the "Finish task" / not-acceptable case (D6). Until those land
+  // from the next recon, the accept path FAILS LOUD rather than clicking a wrong
+  // item, and T026 confirms outcome by RE-READING Active (FR-024), never the
+  // click. ACCEPT_ENABLED stays 0 until the submenu + success signal are captured.
   accept: {
     rowKebab: 'button[data-testid="context-menu-button"]', // open row menu (row-scoped)
-    menuContainer: '#context-menus-container', // Radix menu portal (in iframe)
-    acceptTaskItemText: 'Accept task', // submenu parent on an acceptable job — FAIL LOUD if absent
-    finishTaskItemText: 'Finish task', // same slot when the job is in-progress/done (NOT acceptable)
-    bulkForLanguageInGroupText: 'Accept all tasks for this language in this group', // FR-006
+    // The open dropdown renders inline (fixed position) — NOT the empty portal.
+    menuContainer: '[data-dropdown-menu="true"]',
+    menuItem: 'li[data-dropdown-menu-item="true"]',
+    // Acceptable-job signal — locale-independent id prefix (label "Accept task").
+    // Presence on a row's open menu ⇒ the job is claimable; absence ⇒ not (D6).
+    acceptTaskItem: '[id^="TASK_LISTING_ACCEPT_GROUP_TASK_"]',
+    acceptTaskItemText: 'Accept task', // en_GB label fallback — FAIL LOUD if absent
+    finishTaskItemText: 'Finish task', // UNCONFIRMED — the not-acceptable case (D6)
+    bulkForLanguageInGroupText: 'Accept all tasks for this language in this group', // UNCONFIRMED — FR-006 submenu child
     // UNCONFIRMED — success signal: re-fetch of the in-progress list after accept.
     successRefetchEndpoint: '/project-manager-gui/myinbox/getInProgressElements.serv',
     successToast: 'div.xtm-toast, div.Toastify', // HYPOTHESIS — never observed firing

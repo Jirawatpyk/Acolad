@@ -152,15 +152,20 @@ async function openBulkAcceptForLanguage(scope: Scope, targetLang: string): Prom
     throw new AcceptUnconfirmedError(`no Active row matching target language "${targetLang}"`);
   }
 
-  const menu = scope.locator(XTM.accept.menuContainer);
-  // "Accept task" submenu parent — absent (e.g. shows "Finish task") means the job
-  // is not acceptable; fail loud rather than click the wrong item (locale-dependent).
-  const acceptTask = menu.getByText(XTM.accept.acceptTaskItemText, { exact: true }).first();
+  // The open dropdown renders inline as [data-dropdown-menu="true"] (the
+  // #context-menus-container portal stays empty). The acceptable-job signal is the
+  // stable-id "Accept task" submenu parent (id prefix, locale-independent); its
+  // absence (e.g. the job shows "Finish task") means NOT acceptable — fail loud
+  // rather than click a wrong item.
+  const acceptTask = scope.locator(XTM.accept.acceptTaskItem).first();
   if ((await acceptTask.count()) === 0) {
-    throw new AcceptUnconfirmedError(`"${XTM.accept.acceptTaskItemText}" menu item not found`);
+    throw new AcceptUnconfirmedError('"Accept task" (acceptable) menu item not found');
   }
   await acceptTask.hover({ timeout: ACCEPT_TIMEOUT_MS });
 
+  // UNCONFIRMED submenu child (FR-006): its en_GB text is assumed until the next
+  // recon captures the expanded submenu DOM — fail loud if not found, never guess.
+  const menu = scope.locator(XTM.accept.menuContainer);
   const bulk = menu.getByText(XTM.accept.bulkForLanguageInGroupText, { exact: true }).first();
   if ((await bulk.count()) === 0) {
     throw new AcceptUnconfirmedError('bulk "for this language in this group" option not found');

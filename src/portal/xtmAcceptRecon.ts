@@ -36,13 +36,15 @@ export async function captureAcceptMenuDom(
     if (cell.toLowerCase() !== targetLang.trim().toLowerCase()) continue;
 
     await kebab.click({ timeout: RECON_TIMEOUT_MS }); // opens the row menu — no action
-    // Expand the "Accept task" submenu by HOVER only (never click an accept item).
-    const acceptTask = scope
-      .locator(XTM.accept.menuContainer)
-      .getByText(XTM.accept.acceptTaskItemText, { exact: true })
-      .first();
+    // Expand the "Accept task" submenu by HOVER only (NEVER click an accept item)
+    // so the capture includes the bulk children (FR-006). The menu renders inline
+    // as [data-dropdown-menu="true"] (the #context-menus-container portal stays
+    // empty), and the accept parent is keyed by its stable id (locale-independent),
+    // not the en_GB label. After hover, give the submenu level a moment to render.
+    const acceptTask = scope.locator(XTM.accept.acceptTaskItem).first();
     if ((await acceptTask.count()) > 0) {
       await acceptTask.hover({ timeout: RECON_TIMEOUT_MS }).catch(() => undefined);
+      await scope.waitForTimeout(1_000); // let the Radix submenu expand before capture
     }
     return deps.captureEvidence('accept_menu_recon');
   }
