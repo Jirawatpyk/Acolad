@@ -147,11 +147,12 @@ export const XTM = {
   // so it must be read by opening the row kebab — computed for the TARGET rows in the
   // post-accept re-read, not the bulk grid scrape (see [[xtm-accept-d6-finish-task]]).
   //
-  // STILL UNCONFIRMED: the expanded submenu's children, incl. the bulk option (FR-006)
-  // whose en_GB text is assumed "Accept all tasks for this language in this group" —
-  // the next eligible Malay job captures it (recon now expands the submenu). Until then
-  // the accept path FAILS LOUD rather than clicking a wrong item. ACCEPT_ENABLED stays 0
-  // until the bulk option DOM is captured AND acceptAvailable-from-menu is wired in.
+  // BULK OPTION CONFIRMED (recon 2026-06-22): hovering acceptTaskItem expands a submenu
+  // of 6 accept variants; FR-006 uses bulkForLanguageInGroupItem ("Accept all tasks for
+  // this language in this group", id prefix TASK_LISTING_ACCEPT_ALL_TASKS_OF_THIS_LANGUAGE_IN_THIS_GROUP_).
+  // With the menu container, accept item, bulk item, and D6 acceptAvailable all confirmed,
+  // the accept path is SELECTOR-COMPLETE — ACCEPT_ENABLED may be turned on via the runbook
+  // (start ACCEPT_MAX_PER_CYCLE=1) once a human signs off on auto-accepting on the shared account.
   accept: {
     rowKebab: 'button[data-testid="context-menu-button"]', // open row menu (row-scoped)
     // The open dropdown renders inline (fixed position) — NOT the empty portal.
@@ -161,9 +162,14 @@ export const XTM = {
     // Presence on a row's open menu ⇒ the job is claimable; absence ⇒ not (D6).
     acceptTaskItem: '[id^="TASK_LISTING_ACCEPT_GROUP_TASK_"]',
     acceptTaskItemText: 'Accept task', // en_GB label fallback — FAIL LOUD if absent
-    finishTaskItemText: 'Finish task', // UNCONFIRMED — the not-acceptable case (D6)
-    bulkForLanguageInGroupText: 'Accept all tasks for this language in this group', // UNCONFIRMED — FR-006 submenu child
-    // UNCONFIRMED — success signal: re-fetch of the in-progress list after accept.
+    finishTaskItemText: 'Finish task', // the not-acceptable case (D6) — accept item is simply absent
+    // FR-006 bulk option — CONFIRMED from the expanded submenu. Hovering acceptTaskItem
+    // reveals 6 variants; this is the "all tasks for this language in this group" one.
+    bulkForLanguageInGroupItem:
+      '[id^="TASK_LISTING_ACCEPT_ALL_TASKS_OF_THIS_LANGUAGE_IN_THIS_GROUP_"]',
+    bulkForLanguageInGroupText: 'Accept all tasks for this language in this group', // CONFIRMED en_GB label
+    // UNCONFIRMED — success signal: the FR-024 re-read (acceptAvailable from the row
+    // menu) is authoritative; no toast/endpoint is relied on.
     successRefetchEndpoint: '/project-manager-gui/myinbox/getInProgressElements.serv',
     successToast: 'div.xtm-toast, div.Toastify', // HYPOTHESIS — never observed firing
   },

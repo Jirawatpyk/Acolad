@@ -203,12 +203,11 @@ async function openBulkAcceptForLanguage(scope: Scope, targetLang: string): Prom
   if ((await acceptTask.count()) === 0) {
     throw new AcceptUnconfirmedError('"Accept task" (acceptable) menu item not found');
   }
-  await acceptTask.hover({ timeout: ACCEPT_TIMEOUT_MS });
+  await acceptTask.hover({ timeout: ACCEPT_TIMEOUT_MS }); // expand the 6-option submenu
 
-  // UNCONFIRMED submenu child (FR-006): its en_GB text is assumed until the next
-  // recon captures the expanded submenu DOM — fail loud if not found, never guess.
-  const menu = scope.locator(XTM.accept.menuContainer);
-  const bulk = menu.getByText(XTM.accept.bulkForLanguageInGroupText, { exact: true }).first();
+  // FR-006 bulk option (CONFIRMED recon 2026-06-22): click "Accept all tasks for this
+  // language in this group" by its stable id (locale-independent). Fail loud if absent.
+  const bulk = scope.locator(XTM.accept.bulkForLanguageInGroupItem).first();
   if ((await bulk.count()) === 0) {
     throw new AcceptUnconfirmedError('bulk "for this language in this group" option not found');
   }
