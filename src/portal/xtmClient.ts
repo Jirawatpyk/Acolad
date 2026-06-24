@@ -189,6 +189,16 @@ export class PlaywrightXtmClient implements XtmPortalClient {
           },
           err instanceof Error ? err.message : 'accept menu failed',
         ),
+      onAcceptObserved: (obs) =>
+        this.logger?.info(
+          {
+            module: 'xtmAccept',
+            action: 'accept_observed',
+            reReadRows: obs.reReadRows,
+            noClickWhilePresent: obs.noClickWhilePresent,
+          },
+          'accept pass observed',
+        ),
     });
   }
 

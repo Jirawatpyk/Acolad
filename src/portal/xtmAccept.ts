@@ -69,6 +69,8 @@ export interface AcceptDeps {
    * does not burn one full timeout budget per test (I3 fix).
    */
   rowAttachTimeoutMs?: number;
+  /** Per-accept observability: lets the caller log a regression signal for the read race. */
+  onAcceptObserved?(obs: { reReadRows: number; noClickWhilePresent: number }): void;
 }
 
 /**
@@ -172,6 +174,14 @@ export async function acceptEligibleTasks(
       return o.outcome === 'accepted' && clickedAt !== undefined ? { ...o, clickedAt } : o;
     },
   );
+  // Regression detector (A4): a claimed target that ended 'missing' WITHOUT a click while
+  // still PRESENT in the re-read = the scan missed a present, claimable job (the race). A
+  // settleGrid cap-hit cannot catch this (it settles fast at a partial grid), so surface it.
+  const reReadKeys = new Set(reRead.map((j) => computeXtmJobKey(j)));
+  const noClickWhilePresent = outcomes.filter(
+    (o) => o.outcome === 'missing' && !clickedKeys.has(o.jobKey) && reReadKeys.has(o.jobKey),
+  ).length;
+  deps.onAcceptObserved?.({ reReadRows: reRead.length, noClickWhilePresent });
   return [...outcomes, ...failed];
 }
 
