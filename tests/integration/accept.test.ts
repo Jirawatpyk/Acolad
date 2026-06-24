@@ -36,20 +36,23 @@ describe('determineAcceptOutcomes (FR-024 — outcome from re-read of Active)', 
   it('marks a target that is present but no longer acceptable as accepted', () => {
     const raw = xraw();
     const reRead = [xraw({ acceptAvailable: false })]; // same job, now owned
-    const out = determineAcceptOutcomes([target(raw)], reRead, AT);
+    const out = determineAcceptOutcomes([target(raw)], reRead, AT, new Set());
     expect(out).toEqual([{ jobKey: target(raw).jobKey, outcome: 'accepted', at: AT }]);
   });
 
   it('marks a target that vanished from Active as missing (snatched)', () => {
     const raw = xraw();
-    const out = determineAcceptOutcomes([target(raw)], [], AT);
+    const out = determineAcceptOutcomes([target(raw)], [], AT, new Set());
     expect(out).toEqual([{ jobKey: target(raw).jobKey, outcome: 'missing' }]);
   });
 
   it('marks a target still acceptable after the action as failed', () => {
+    // We actually clicked this group; the re-read still shows claimable → genuine failure.
     const raw = xraw();
     const reRead = [xraw({ acceptAvailable: true })]; // still claimable → our accept didn't take
-    const out = determineAcceptOutcomes([target(raw)], reRead, AT);
+    const key = computeXtmJobKey(raw);
+    const clickedKeys = new Set([key]);
+    const out = determineAcceptOutcomes([target(raw)], reRead, AT, clickedKeys);
     expect(out[0]?.outcome).toBe('failed');
   });
 
@@ -63,14 +66,68 @@ describe('determineAcceptOutcomes (FR-024 — outcome from re-read of Active)', 
       // b.docx vanished → missing
       xraw({ fileName: 'c.docx', acceptAvailable: true }), // failed
     ];
-    const out = determineAcceptOutcomes(targets, reRead, AT);
+    // c.docx is still claimable and its key IS in clickedKeys → genuine failed
+    const clickedKeys = new Set([target(c).jobKey]);
+    const out = determineAcceptOutcomes(targets, reRead, AT, clickedKeys);
     expect(out.find((o) => o.jobKey === target(a).jobKey)?.outcome).toBe('accepted');
     expect(out.find((o) => o.jobKey === target(b).jobKey)?.outcome).toBe('missing');
     expect(out.find((o) => o.jobKey === target(c).jobKey)?.outcome).toBe('failed');
   });
 
   it('returns an empty result for no targets', () => {
-    expect(determineAcceptOutcomes([], [xraw()], AT)).toEqual([]);
+    expect(determineAcceptOutcomes([], [xraw()], AT, new Set())).toEqual([]);
+  });
+
+  // --- Task 2 (A3): never-clicked-but-claimable is retriable 'missing', not terminal 'failed' ---
+
+  it('A3-1: target present + still claimable + clickedKeys EMPTY → missing (retriable, not terminal failed)', () => {
+    // A target whose row was never reached (group already-owned, row not rendered)
+    // must NOT be labelled terminal 'failed'. It should be 'missing' so accept_status
+    // resets to 'none' and the robustness path re-attempts on the next cycle.
+    const raw = xraw({ acceptAvailable: true });
+    const key = computeXtmJobKey(raw);
+    const reRead = [xraw({ acceptAvailable: true })]; // still claimable in re-read
+    const out = determineAcceptOutcomes(
+      [{ jobKey: key, targetLang: 'Malay (Malaysia)' }],
+      reRead,
+      AT,
+      new Set() /* no click */,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.outcome).toBe('missing');
+  });
+
+  it('A3-2: target present + still claimable + clickedKeys HAS the key → failed (genuine click did not take)', () => {
+    // We actually clicked this target's group but it is still claimable in the re-read
+    // → the accept genuinely failed; mark 'failed' (terminal alert, no re-attempt).
+    const raw = xraw({ acceptAvailable: true });
+    const key = computeXtmJobKey(raw);
+    const reRead = [xraw({ acceptAvailable: true })];
+    const clickedKeys = new Set([key]);
+    const out = determineAcceptOutcomes(
+      [{ jobKey: key, targetLang: 'Malay (Malaysia)' }],
+      reRead,
+      AT,
+      clickedKeys,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.outcome).toBe('failed');
+  });
+
+  it('A3-3: target present + NOT claimable (acceptAvailable:false) + empty clickedKeys → accepted', () => {
+    // Already-owned group (openBulkAcceptForLanguage returned "already-owned", no click).
+    // FR-024 re-read shows acceptAvailable:false → we own it → 'accepted'.
+    const raw = xraw({ acceptAvailable: false });
+    const key = computeXtmJobKey(raw);
+    const reRead = [xraw({ acceptAvailable: false })];
+    const out = determineAcceptOutcomes(
+      [{ jobKey: key, targetLang: 'Malay (Malaysia)' }],
+      reRead,
+      AT,
+      new Set(),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.outcome).toBe('accepted');
   });
 });
 

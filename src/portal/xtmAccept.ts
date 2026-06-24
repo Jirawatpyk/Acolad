@@ -11,9 +11,11 @@ const ACCEPT_TIMEOUT_MS = 15_000;
 /**
  * FR-024: resolve each target's outcome from the AUTHORITATIVE re-read of Active
  * after the accept action — never from the transient click/toast. Pure.
- *   - target gone from re-read            → missing (snatched before/at accept)
- *   - target present, not acceptable      → accepted (we own it now)
- *   - target present, still acceptable     → failed (the accept did not take)
+ *   - target gone from re-read                                      → missing (snatched before/at accept)
+ *   - target present, not acceptable                                → accepted (we own it now)
+ *   - target present, still acceptable + key IN clickedKeys         → failed (the accept did not take)
+ *   - target present, still acceptable + key NOT IN clickedKeys     → missing (retriable: row never
+ *       reached — group already-owned or not rendered; reset accept_status to 'none', not terminal)
  * This attributes bulk/partial outcomes per job and is restart-safe (a re-read on
  * the next cycle yields the same truth, so no job is re-accepted — supports FR-008).
  */
@@ -21,6 +23,10 @@ export function determineAcceptOutcomes(
   targets: AcceptTarget[],
   reRead: XtmRawJob[],
   at: string,
+  /** Keys (computeXtmJobKey) of jobs whose language group actually received a
+   *  confirm-click. Used to distinguish a genuine failed accept (clicked → still
+   *  claimable) from a never-reached target (not clicked → retriable 'missing'). */
+  clickedKeys: Set<string>,
   /** When the confirm-click fired (V16). Carried on accepted results for the
    *  latency split; omitted by callers that don't measure it (e.g. unit tests). */
   clickedAt?: string,
@@ -31,11 +37,17 @@ export function determineAcceptOutcomes(
     const found = byKey.get(t.jobKey);
     if (!found) return { jobKey: t.jobKey, outcome: 'missing' };
     if (found.acceptAvailable) {
-      return {
-        jobKey: t.jobKey,
-        outcome: 'failed',
-        reason: 'still acceptable after accept (not claimed)',
-      };
+      // Still claimable: only a genuine FAILED accept if we actually clicked this target's
+      // group. A never-clicked target (row not rendered / group already-owned) is retriable
+      // → 'missing' (resets accept_status to 'none' for the robustness re-attempt), NOT a
+      // terminal accept_failed alert.
+      return clickedKeys.has(t.jobKey)
+        ? {
+            jobKey: t.jobKey,
+            outcome: 'failed',
+            reason: 'still acceptable after accept (not claimed)',
+          }
+        : { jobKey: t.jobKey, outcome: 'missing' };
     }
     return clickedAt
       ? { jobKey: t.jobKey, outcome: 'accepted', at, clickedAt }
@@ -145,10 +157,13 @@ export async function acceptEligibleTasks(
   if (reRead.length === 0) {
     return failAllAttempted('post-accept re-read returned no rows (likely grid race)');
   }
-  const outcomes = determineAcceptOutcomes(attempted, reRead, deps.nowIso()).map((o) => {
-    const clickedAt = clickedAtByJob.get(o.jobKey);
-    return o.outcome === 'accepted' && clickedAt !== undefined ? { ...o, clickedAt } : o;
-  });
+  const clickedKeys = new Set(clickedAtByJob.keys());
+  const outcomes = determineAcceptOutcomes(attempted, reRead, deps.nowIso(), clickedKeys).map(
+    (o) => {
+      const clickedAt = clickedAtByJob.get(o.jobKey);
+      return o.outcome === 'accepted' && clickedAt !== undefined ? { ...o, clickedAt } : o;
+    },
+  );
   return [...outcomes, ...failed];
 }
 
