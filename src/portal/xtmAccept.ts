@@ -62,6 +62,13 @@ export interface AcceptDeps {
   nowIso: () => string;
   /** Log the real (redaction-safe) cause of an accept-menu failure, if available. */
   logError?: (err: unknown) => void;
+  /**
+   * Timeout (ms) for waiting on the target row to attach to the DOM inside
+   * openBulkAcceptForLanguage. Defaults to ACCEPT_TIMEOUT_MS (15 s) in production.
+   * Inject a short value (e.g. 200 ms) in tests covering the absent-row case so CI
+   * does not burn one full timeout budget per test (I3 fix).
+   */
+  rowAttachTimeoutMs?: number;
 }
 
 /**
@@ -96,13 +103,14 @@ export async function acceptEligibleTasks(
   }
 
   const failed: AcceptResult[] = [];
+  const rowAttachTimeoutMs = deps.rowAttachTimeoutMs ?? ACCEPT_TIMEOUT_MS;
   // Stamp each group's confirm-click moment BEFORE the re-read so click latency
   // (V16) excludes the re-read cost that outcome latency (V16b) includes — keyed
   // per job so a later group's click never overwrites an earlier group's latency.
   const clickedAtByJob = new Map<string, string>();
   for (const [, group] of byLang) {
     try {
-      const opened = await openBulkAcceptForLanguage(scope, group);
+      const opened = await openBulkAcceptForLanguage(scope, group, rowAttachTimeoutMs);
       if (opened === 'clicked') {
         // Stamp the confirm-click moment ONLY when a click actually happened, so the V16
         // click-latency split is never fabricated for an already-owned (no-click) group.
@@ -230,6 +238,7 @@ export async function readAcceptAvailability(
 async function openBulkAcceptForLanguage(
   scope: Scope,
   group: AcceptTarget[],
+  rowAttachTimeoutMs: number,
 ): Promise<'clicked' | 'already-owned'> {
   let ownedSeen = false;
   let anyRowFound = false;
@@ -237,8 +246,10 @@ async function openBulkAcceptForLanguage(
     const row = rowForTarget(scope, t);
     // Wait for THIS target's row to attach (it may not be rendered yet, or it was
     // snatched). A missing row is NOT "owned" — skip it (the re-read classifies it).
+    // rowAttachTimeoutMs is injectable (AcceptDeps.rowAttachTimeoutMs) so tests covering
+    // the absent-row case do not burn the full 15s production budget (I3 fix).
     const attached = await row
-      .waitFor({ state: 'attached', timeout: ACCEPT_TIMEOUT_MS })
+      .waitFor({ state: 'attached', timeout: rowAttachTimeoutMs })
       .then(() => true)
       .catch(() => false);
     if (!attached) continue; // this target's row hasn't rendered / is gone — skip (NOT owned)
@@ -246,16 +257,23 @@ async function openBulkAcceptForLanguage(
     const kebab = row.locator(XTM.accept.rowKebab).first();
     if ((await kebab.count()) === 0) continue;
     await kebab.click({ timeout: ACCEPT_TIMEOUT_MS }); // open this row's menu
-    await scope
-      .locator(XTM.accept.menuContainer)
-      .first()
-      .waitFor({ state: 'visible', timeout: ACCEPT_TIMEOUT_MS })
-      .catch(() => undefined);
+    // Scope all subsequent menu-item queries to the OPEN menu container
+    // ([data-dropdown-menu="true"]) so items from OTHER rows' still-in-DOM menus
+    // (which may share the same id prefix) cannot be picked up by a page-level
+    // first(). This is the correct scope regardless of whether the portal renders
+    // menus inline (recon 2026-06-22) or in a portal container.
+    const openMenu = scope.locator(XTM.accept.menuContainer).first();
+    await openMenu.waitFor({ state: 'visible', timeout: ACCEPT_TIMEOUT_MS }).catch(() => undefined);
     // Claimable row (stable-id "Accept task" submenu parent present)? → drive the bulk.
-    if ((await scope.locator(XTM.accept.acceptTaskItem).count()) > 0) {
-      await scope.locator(XTM.accept.acceptTaskItem).first().hover({ timeout: ACCEPT_TIMEOUT_MS });
-      // FR-006 bulk option (CONFIRMED recon 2026-06-22) — click by stable id.
-      const bulk = scope.locator(XTM.accept.bulkForLanguageInGroupItem).first();
+    // Query scoped to the open menu so a hidden accept item from another row is invisible.
+    if ((await openMenu.locator(XTM.accept.acceptTaskItem).count()) > 0) {
+      await openMenu
+        .locator(XTM.accept.acceptTaskItem)
+        .first()
+        .hover({ timeout: ACCEPT_TIMEOUT_MS });
+      // FR-006 bulk option (CONFIRMED recon 2026-06-22) — click by stable id,
+      // also scoped to the open menu to avoid cross-row id collision.
+      const bulk = openMenu.locator(XTM.accept.bulkForLanguageInGroupItem).first();
       if ((await bulk.count()) === 0) {
         throw new AcceptUnconfirmedError('bulk "for this language in this group" option not found');
       }
@@ -265,8 +283,8 @@ async function openBulkAcceptForLanguage(
       return 'clicked'; // one click claims the whole language group
     }
     // Not claimable on this row — already ours ("Finish task")? Note it and try the next
-    // target rather than giving up on the group.
-    if ((await scope.locator(XTM.accept.finishTaskItem).count()) > 0) ownedSeen = true;
+    // target rather than giving up on the group. Also scoped to the open menu.
+    if ((await openMenu.locator(XTM.accept.finishTaskItem).count()) > 0) ownedSeen = true;
     await kebab.click({ timeout: ACCEPT_TIMEOUT_MS }).catch(() => undefined); // toggle-close before the next target
   }
   if (ownedSeen) return 'already-owned'; // a target row is present and already ours
@@ -277,14 +295,30 @@ async function openBulkAcceptForLanguage(
 }
 
 /**
+ * Build an anchored, regex-escaped exact-match pattern for a cell's text content.
+ * Playwright's `hasText` with a RegExp anchored `^…$` matches the element's
+ * NORMALIZED text (whitespace collapsed) exactly — preventing a shorter string from
+ * being a substring of a longer cell value and causing `.first()` to pick the wrong
+ * row (C1 fix). The pattern is case-insensitive, mirroring `computeXtmJobKey` which
+ * is exact and trimmed.
+ */
+function exact(s: string): RegExp {
+  return new RegExp(`^${s.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+}
+
+/**
  * Stable locator for a target's data row by its File+Step+Role cell text (the jobKey
  * basis), so a mid-pass auto-refresh that reindexes rows cannot point us at the wrong row.
+ * Uses EXACT (anchored) text matching — not substring — so a cell value that is a
+ * prefix/substring of another row's cell cannot accidentally match (C1 fix).
  */
 function rowForTarget(scope: Scope, t: AcceptTarget): Locator {
   let row = scope
     .locator(`${XTM.active.gridContainer} tbody tr`)
-    .filter({ has: scope.locator(XTM.active.cell.file, { hasText: t.fileName }) });
-  if (t.step) row = row.filter({ has: scope.locator(XTM.active.cell.step, { hasText: t.step }) });
-  if (t.role) row = row.filter({ has: scope.locator(XTM.active.cell.role, { hasText: t.role }) });
+    .filter({ has: scope.locator(XTM.active.cell.file, { hasText: exact(t.fileName) }) });
+  if (t.step)
+    row = row.filter({ has: scope.locator(XTM.active.cell.step, { hasText: exact(t.step) }) });
+  if (t.role)
+    row = row.filter({ has: scope.locator(XTM.active.cell.role, { hasText: exact(t.role) }) });
   return row.first();
 }

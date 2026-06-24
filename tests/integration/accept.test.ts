@@ -438,13 +438,12 @@ describe('acceptEligibleTasks — locates the target row by cell text, not order
     expect(out[0]?.outcome).toBe('accepted'); // reconciled by the re-read
   });
 
-  it('fails loud when the target row is absent (the row never rendered → no false accept)', async () => {
+  it('fails loud when the target row is absent (the row never rendered → no false accept) [I3: fast via rowAttachTimeoutMs]', async () => {
     // A DIFFERENT Malay row is present but NOT the target — locating by cell text finds
     // no target row. The function must NOT click a non-target row; it returns
     // 'already-owned' (retriable) and the empty-of-target re-read drives the outcome.
-    // NOTE: this case necessarily burns one ACCEPT_TIMEOUT_MS (~15s) — the target row's
-    // waitFor({state:'attached'}) must time out to PROVE the row is absent before skipping
-    // it; that wait is the production accept-timeout budget, not a hang.
+    // I3 fix: pass rowAttachTimeoutMs:200 so the attach-wait is 200ms, not 15s,
+    // keeping CI fast without changing production behaviour (AcceptDeps default = 15s).
     await page.setContent(
       xtmActivePage(
         [
@@ -471,6 +470,7 @@ describe('acceptEligibleTasks — locates the target row by cell text, not order
         return undefined;
       },
       nowIso: () => AT,
+      rowAttachTimeoutMs: 200, // I3: injectable so CI does not burn 15s per absent-row case
     };
 
     const out = await acceptEligibleTasks(page, [target(claimable)], deps);
@@ -479,6 +479,131 @@ describe('acceptEligibleTasks — locates the target row by cell text, not order
     expect(out).toHaveLength(1);
     expect(out[0]?.jobKey).toBe(target(claimable).jobKey);
     // Target not in the re-read → missing (retriable), NOT a false accepted/failed.
+    expect(out[0]?.outcome).toBe('missing');
+  });
+});
+
+// ── C1: exact row match guards against substring collision (the "wrong row" bug) ──
+// The old substring hasText would match "captions.json" inside "captions.json.bak"
+// (or any superstring). With a superstring row listed FIRST, .first() picks the wrong
+// row — the exact same root cause as the lost-Malay-jobs bug but at the cell level.
+// After the fix, rowForTarget anchors the match (^…$), so only the EXACT cell text
+// matches and the superstring row is not a candidate.
+describe('acceptEligibleTasks — exact cell text match in rowForTarget (C1)', () => {
+  let browser: Browser;
+  let page: Page;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+  });
+  afterAll(async () => {
+    await browser.close();
+  });
+  beforeEach(async () => {
+    page = await browser.newPage();
+  });
+  afterEach(async () => {
+    await page.close();
+  });
+
+  // The EXACT target: a claimable Malay row whose File cell is "...captions.json".
+  const exactTarget = xraw({
+    fileName: 'F1 (ID-aaa)_captions.json',
+    step: 'Post-Editing (PE) 1',
+    role: 'Corrector',
+  });
+
+  it('C1-1: clicks the bulk for the EXACT target row, not the superstring row listed first', async () => {
+    // Grid: superstring row FIRST (claimable), exact target SECOND (also claimable).
+    // OLD substring match: .filter({hasText:"F1 (ID-aaa)_captions.json"}) matches BOTH rows
+    // because the text is a substring of "...captions.json.bak" → .first() picks the wrong row.
+    // NEW exact match: only the row whose cell equals "F1 (ID-aaa)_captions.json" matches.
+    await page.setContent(
+      xtmActivePage(
+        [
+          // Superstring row FIRST — file name CONTAINS the target name but is not equal.
+          xtmMenuRow('sup111', 'accept', {
+            file: 'F1 (ID-aaa)_captions.json.bak',
+            step: 'Post-Editing (PE) 1',
+            role: 'Corrector',
+          }),
+          // Exact target SECOND — this is the one that must be clicked.
+          xtmMenuRow('exact222', 'accept', {
+            file: exactTarget.fileName,
+            step: exactTarget.step ?? '',
+            role: exactTarget.role ?? '',
+          }),
+        ],
+        { total: 2 },
+      ),
+    );
+
+    const captured: string[] = [];
+    // After clicking the exact target's bulk, re-read shows it accepted.
+    const reReadActive = vi.fn(
+      async (): Promise<XtmRawJob[]> => [xraw({ ...exactTarget, acceptAvailable: false })],
+    );
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async (reason) => {
+        captured.push(reason);
+        return undefined;
+      },
+      nowIso: () => AT,
+      rowAttachTimeoutMs: 2_000, // fast enough for a real Chromium page
+    };
+
+    const out = await acceptEligibleTasks(page, [target(exactTarget)], deps);
+
+    // The bulk WAS clicked on the correct (exact) row → post_accept_click evidence fires.
+    expect(captured).toContain('post_accept_click');
+    expect(reReadActive).toHaveBeenCalledTimes(1);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.jobKey).toBe(target(exactTarget).jobKey);
+    expect(out[0]?.outcome).toBe('accepted');
+  });
+
+  it('C1-2: treats the target as absent when ONLY the superstring row exists (exact match required)', async () => {
+    // Grid contains ONLY the superstring row — the exact target is NOT present.
+    // With substring match the locator would incorrectly attach to the superstring row.
+    // With exact match, no row matches → waitFor times out → target treated as absent.
+    await page.setContent(
+      xtmActivePage(
+        [
+          xtmMenuRow('sup111', 'accept', {
+            file: 'F1 (ID-aaa)_captions.json.bak', // superstring only — exact target absent
+            step: 'Post-Editing (PE) 1',
+            role: 'Corrector',
+          }),
+        ],
+        { total: 1 },
+      ),
+    );
+
+    const reReadActive = vi.fn(
+      async (): Promise<XtmRawJob[]> => [
+        // The exact target is absent from the re-read as well → outcome: missing
+        xraw({ fileName: 'F1 (ID-aaa)_captions.json.bak', acceptAvailable: true }),
+      ],
+    );
+    const captured: string[] = [];
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async (reason) => {
+        captured.push(reason);
+        return undefined;
+      },
+      nowIso: () => AT,
+      rowAttachTimeoutMs: 200, // fast — exact target not in DOM, attach must time out quickly
+    };
+
+    const out = await acceptEligibleTasks(page, [target(exactTarget)], deps);
+
+    // No click on the superstring row (exact match rejected it).
+    expect(captured).not.toContain('post_accept_click');
+    expect(out).toHaveLength(1);
+    expect(out[0]?.jobKey).toBe(target(exactTarget).jobKey);
+    // Exact target absent from re-read → missing (retriable).
     expect(out[0]?.outcome).toBe('missing');
   });
 });
