@@ -455,3 +455,39 @@ describe('XtmPollCycle crash recovery (review #1/#2)', () => {
     expect(alerts.length).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe('XtmPollCycle field-change re-sync / Bug B (sheet:fieldsync)', () => {
+  it('enqueues a sheet:fieldsync event (no chat) when dueDate arrives after first_seen', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone(); // past baseline so per-job chat is enabled
+    const jobKey = computeXtmJobKey(xraw());
+    const cycle = new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), new StubAcceptor());
+
+    // Cycle 1: job appears with dueDate=null (first_seen — Sheet row + Chat emitted).
+    await cycle.run(snap([xraw({ dueDate: null })], 'c1'));
+
+    // Cycle 2: same job still visible, XTM now sets dueDate — no new appearance event,
+    // but detailsChanges fires. Assert Sheet re-sync enqueued, no Chat for this job.
+    await cycle.run(snap([xraw({ dueDate: '2026-07-15' })], 'c2'));
+
+    const sheetEventId = `sheet:fieldsync:${jobKey}|c2`;
+    const sheetRows = db
+      .prepare('SELECT event_id, payload_json FROM outbox WHERE channel = ?')
+      .all('sheets') as { event_id: string; payload_json: string }[];
+    const syncRow = sheetRows.find((r) => r.event_id === sheetEventId);
+    expect(syncRow, 'sheet:fieldsync event must be enqueued').toBeDefined();
+
+    // The re-synced row must carry the updated dueDate.
+    const payload = JSON.parse(syncRow!.payload_json) as { row: { dueDate: string | null } };
+    expect(payload.row.dueDate).toBe('2026-07-15');
+
+    // No chat: event for this jobKey in cycle 2 (field-sync is Sheet-only / silent).
+    const chatRows = db.prepare('SELECT event_id FROM outbox WHERE channel = ?').all('chat') as {
+      event_id: string;
+    }[];
+    const c2ChatForJob = chatRows.filter(
+      (r) => r.event_id.includes(jobKey) && r.event_id.includes('c2'),
+    );
+    expect(c2ChatForJob).toHaveLength(0);
+  });
+});

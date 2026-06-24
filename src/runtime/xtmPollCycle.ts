@@ -7,6 +7,7 @@ import { JobStore } from '../state/jobStore.js';
 import { MetaStore } from '../state/meta.js';
 import { Outbox, createOutbox } from '../state/outbox.js';
 import { raiseAlert } from '../reporting/systemAlerts.js';
+import { hasMaterialSheetChange } from '../reporting/sheetSync.js';
 import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
@@ -353,6 +354,22 @@ export class XtmPollCycle {
     };
     for (const ev of result.events) reportJob(ev.jobKey, ev);
     for (const jobKey of acceptResults.keys()) reportJob(jobKey, undefined);
+    // Field-change re-sync (Bug B): a still-visible job whose Due date/Words XTM set AFTER
+    // our last transition write reaches the DB but never the Sheet (which only writes on
+    // transitions). The diff already records the change in detailsChanges (FR-019) — enqueue
+    // a Sheet-ONLY upsert (no Chat: a silent correction) for any not-yet-reported job.
+    for (const dc of result.detailsChanges) {
+      if (reported.has(dc.jobKey) || !hasMaterialSheetChange(dc.changes)) continue;
+      const s = result.nextStates.get(dc.jobKey);
+      if (!s) continue;
+      reported.add(dc.jobKey);
+      this.outbox.enqueue(
+        `sheet:fieldsync:${dc.jobKey}|${snapshot.pollCycleId}`,
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, null) }),
+        snapshot.capturedAt,
+        'sheets',
+      );
+    }
     if (baseline) {
       const text = renderXtmColdStartSummary([...result.nextStates.values()], snapshot.capturedAt);
       this.outbox.enqueue(
