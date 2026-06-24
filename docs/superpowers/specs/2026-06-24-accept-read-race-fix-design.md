@@ -1,135 +1,158 @@
-# Accept-flow grid-read race fix — Design
+# Accept-flow read-race + sheet field-sync fixes — Design (v2)
 
 **Date:** 2026-06-24
-**Status:** Approved (brainstorming) — ready for writing-plans
-**Feature:** 002-xtm-detect-accept (bug fix)
+**Status:** Approved (brainstorming, post agent-review) — ready for writing-plans
+**Feature:** 002-xtm-detect-accept (bug fixes)
+**Supersedes:** the v1 count-stability `settleRows` approach (replaced after a
+playwright + reliability agent review found it false-passes on a partial render).
 
-## Problem
+This design bundles two independent bugs surfaced from live Malay jobs on 2026-06-23/24,
+both rooted in how the accept/reporting path treats a grid that renders incrementally:
 
-On 2026-06-23/24 eight Malay (eligible) jobs arrived; the bot **detected and
-logged all eight** to Sheets/Chat but **accepted only ~3** and lost ~5. The user
-confirmed every job stayed available **> 2 minutes** (not snatched in seconds).
+- **A — Malay jobs lost at accept** (read race): detected + logged, never accepted.
+- **B — Due date (and other late fields) missing from the Sheet** (sync gap).
 
-Evidence chain (from logs + DIAG + SQLite `jobs` table):
+---
 
-- All 8 jobs `eligible = 1` (Malay (Malaysia)); none were non-Malay → not a
-  Malay-only-rule skip.
-- The lost jobs (e.g. 4717761, 4717828, 4717469) have lifecycle `missing`,
-  `accepted:0`, **no `accept_failed` alert, and no `action:"accept"` log** — the
-  bot never completed a click.
-- `decideAccept` returns `{action:'accept'}` for them (Malay + ACCEPT_ENABLED=1 +
-  ACCEPT_MAX_PER_CYCLE=0) — the bot **did decide to accept**.
-- Job 4717761: detected 22:06:32 (`jobs:4`), the accept-flow re-read 3 s later
-  read `jobs:2` (job "gone"), yet a fresh detection at 22:06:58 logged it **again**
-  → the job was **still present the whole time**; the 22:06:37 read **raced** and
-  missed its row.
-- Worse with an owned Malay job in the same language group: `4717562` was accepted
-  20:42 and stayed in Active ("Finish task"); the four jobs lost between 21:15–22:47
-  all arrived **while it was owned**, the ones accepted (20:42, 03:20, 06:58)
-  arrived when no owned Malay row competed.
+## Problem A — Malay jobs lost at accept
 
-## Root cause
+8 Malay (eligible) jobs arrived; all 8 were **detected and logged**, but ~5 ended
+`missing`/`removed`, never accepted (`accepted:0`, no `accept_failed` alert, no
+`action:"accept"` log). `decideAccept` returns `accept` for them — the bot **decided**
+to accept but never clicked. The user confirmed every job stayed available **> 2 min**
+(not a genuine fast snatch). Evidence: job 4717761 detected 22:06:32, the accept-flow
+re-read 3 s later read fewer rows ("gone"), yet a fresh detection at 22:06:58 logged it
+again → it was **present the whole time**; the accept-flow read **raced**. The loss
+clustered when an already-owned Malay job ("Finish task") shared the language group.
 
-A **grid-read race in the accept flow** (NOT in detection — detection uses
-`settleGrid` and read all 8 correctly):
+### Root cause A
 
-1. `openBulkAcceptForLanguage` (`xtmAccept.ts`) **scans the live grid** for a row
-   still showing "Accept task". When the grid is mid-render (the AngularJS data XHR
-   re-rendered a **partial** row set), the new job's row is absent → the scan sees
-   only the owned row ("Finish task") → returns `'already-owned'` → **no click**.
-2. The FR-024 post-accept **re-read** (`reReadActive`) then also sees the partial
-   grid → the target is absent → `determineAcceptOutcomes` returns `'missing'`.
-3. `missing` resets `accept_status` to `'none'`, so the robustness pass **re-attempts
-   next cycle** — but the same race recurs every cycle until the job genuinely leaves
-   → final lifecycle `missing`, never accepted.
+A grid-read race **in the accept flow** (detection itself is fine — `settleGrid` read
+all 8). Two reads race a partial/auto-refreshing grid:
 
-The existing guard only catches a **wholesale-empty** re-read (`reRead.length === 0`,
-xtmAccept.ts:145). A **partial** race (some rows present, the target's row missing) is
-**not** guarded → false `missing`. An owned Malay row in the list widens the window:
-the scan opens its menu first (~1–2 s) before reaching the new job, giving the
-partial-render race more time to bite.
+1. `openBulkAcceptForLanguage` (`xtmAccept.ts`) **scans the live grid row-by-row via
+   `rows.nth(i)`**, opening each Malay row's kebab menu (~1–2 s each). XTM's own grid
+   auto-refresh fires a data XHR **during** the multi-second scan → rows reindex, the
+   new job's row is absent or `nth(i)` points at a different row → the scan sees only
+   the owned row → returns `'already-owned'` → **no click**.
+2. The FR-024 re-read (`reReadActive`) then also reads a partial grid → the target is
+   absent → `determineAcceptOutcomes` returns `'missing'`. `missing` resets
+   `accept_status` to `'none'`, so the robustness pass re-attempts next cycle — **but
+   the same race recurs every cycle** until the job genuinely leaves → permanent loss.
 
-## Fix: row-count stability gate (`settleRows`)
+The existing guard catches only a **wholesale-empty** re-read (`reRead.length === 0`).
+A **partial** race is unguarded. (v1's count-stability `settleRows` was rejected because
+"row count stable" ≠ "target row present" — it false-passes on a stable *partial* count,
+e.g. owned-row-only.)
 
-Make the accept-flow reads operate on a **fully-rendered** grid by waiting for the
-data-row count to **stabilise** before reading — closing the partial-render window
-that both the scan and the re-read fall into.
+### Fix A — target-keyed accept (deterministic, not count-based)
 
-### Component: `settleRows(scope, opts)` (new, `src/portal/xtmClient.ts`)
+We **know the exact jobKeys** we intend to accept (the cycle's claimed targets). Drive the
+accept off those, not a blind `nth(i)` scan of a mutating grid:
 
-After the existing `settleGrid` (networkidle), poll the kebab-data-row count and
-return once it is **stable across 2 consecutive samples** (~300 ms apart) or a hard
-cap (~4 s) elapses — whichever first. Pure timing/observation only; **issues no
-portal request** (FR-011 safe). Bounded so it can never block the cycle.
+1. **Locate the target row by jobKey, not `nth(i)`.** In `openBulkAcceptForLanguage`,
+   build a locator that matches the row whose File/Step/Role cells equal the target
+   jobKey, and `waitFor({ state: 'attached', timeout: ~3 s })` it. Then open **only that
+   row's** menu and drive the bulk. This:
+   - waits for the *specific* target row to render (kills the partial-render miss),
+   - never opens owned rows' menus (no added latency, no `nth(i)` reindex flakiness),
+   - is independent of row order and total count.
+   If the target row never attaches within the cap → the job is genuinely not present
+   this cycle → no click, classified retriable (see §3).
+2. **Re-read on a *complete* grid.** In `reReadActive`, after `settleGrid` (networkidle),
+   wait for a **deterministic completeness signal**: the footer "… of N" total equals the
+   rendered kebab-data-row count (bounded ~3 s). Read only then. (The footer total is the
+   authoritative row count; matching it to the DOM rows means the data XHR finished
+   rendering — not merely "count stopped changing".) Falls back to the existing
+   empty-re-read guard on cap-hit.
+3. **Fix the outcome classification** (`determineAcceptOutcomes` + caller). Thread a
+   per-target **`clicked`** flag out of `openBulkAcceptForLanguage`:
+   - target **never clicked** (group `'already-owned'`, or its row didn't attach) but the
+     re-read still shows it present + claimable → **retriable** (`'missing'` → resets
+     `accept_status` to `'none'`, robustness re-attempts) — NOT terminal `'failed'`.
+   - target **clicked** but re-read still claimable → genuine `'failed'` (alert) as today.
+   This stops a scan-miss from being mislabeled a terminal `accept_failed` (false alert +
+   no retry), which is *worse* than the retriable `missing`.
+4. **Regression metric.** Add a structured per-accept log
+   `{action:'accept', clicked, reReadRows, targetPresent, acceptAvailable, outcome}` and a
+   per-cycle counter `acceptNoClickWhilePresent` (claimed targets that ended no-click while
+   still present+claimable). `> 0` over consecutive cycles = the race is back — a true
+   detector (the v1 cap-hit log is a false negative: the dangerous case settles fast at a
+   partial count and never caps).
 
-The stability decision is extracted as a **pure function** for unit testing:
+---
 
-```
-isRowCountStable(samples: number[], required: number): boolean
-  // true once the last `required` samples are all equal (and ≥ 1 sample taken)
-```
+## Problem B — Due date (and late fields) missing from the Sheet
 
-`settleRows` samples `scope.locator('<gridContainer> tbody tr')` rows that carry the
-per-row kebab (the same data-row predicate the parser uses), feeds the counts to
-`isRowCountStable`, and resolves when stable or capped.
+Job 4717562 (PR Newswire / World Tennis) shows **Due date blank** in PM_Tracking, yet the
+SQLite `jobs` row has `due_date = 2026-06-24T16:41+07:00`. The bot read it correctly; the
+Sheet just never received it.
 
-### Wiring — two call sites
+### Root cause B
 
-1. **Before the accept scan** — call `settleRows` on the frame before
-   `openBulkAcceptForLanguage` scans, so it sees the new job's "Accept task" row and
-   clicks the bulk option.
-2. **In the FR-024 re-read** — `reReadActive` calls `settleRows` after `settleGrid`
-   and before `readActiveSnapshot`, so the outcome is judged on the full grid →
-   `accepted` confirmed (owned row present), never a false `missing`.
+The Sheet row is (re)written **only on a lifecycle transition** (first_seen / relisted /
+accepted / missing / removed) or an accept outcome — `xtmPollCycle.reportJob` fires for
+`result.events` + `acceptResults.keys()` only. When XTM **sets the Due date after the last
+transition** (here: after the 20:42 "Accepted" write), the new value flows to the DB (the
+per-cycle `upsertMany`) but **never to the Sheet** — no transition re-triggers a write.
+Other cells (Words/Step/Role) were present at write time, so only the late-set Due is blank.
 
-No change to `decideAccept`, `determineAcceptOutcomes`, the diff, or the detection
-read — the fix is localised to the accept-flow's two reads.
+### Fix B — field-change re-sync
 
-## Data flow (accept cycle, after fix)
+After `upsertMany`, for each job **present this cycle** that produced **no transition** and
+is **not already being reported**, compare its material display fields against the previous
+persisted state (`prev`); on a change, enqueue a **Sheet-only** upsert (no Chat):
 
-```
-cycle read snapshot (settleGrid)            → Malay job J detected + claimed
-acceptEligibleTasks([J]):
-  settleRows(frame)        ← NEW: wait for full render
-  openBulkAcceptForLanguage("Malay (Malaysia)")
-     scan → finds J's "Accept task" row     → hover → click bulk → 'clicked'
-  reReadActive():
-     navigate + settleGrid + settleRows      ← NEW
-     readActiveSnapshot                       → J present, menu shows "Finish task"
-  determineAcceptOutcomes([J], reRead)        → J acceptAvailable=false → 'accepted'
-record outcome 'accepted'                     → lifecycle accepted, Chat ✅
-```
+- Material fields watched: `due_date`, `words` (the fields XTM can populate late). Keep the
+  set minimal (YAGNI); status/accept changes already flow through transitions.
+- Distinct outbox `event_id` (e.g. `sheet:fieldsync:<jobKey>|<pollCycleId>`) so the dedup
+  never collides with a transition write; only enqueued when a field **actually** changed,
+  so it is not a per-cycle write.
+- No Chat (a silent Sheet correction, not an announcement).
+
+---
+
+## Components & files
+
+| Change | File |
+|---|---|
+| target-keyed locate + `waitFor` (A1), `clicked` flag (A3) | `src/portal/xtmAccept.ts` |
+| completeness-gated re-read (A2) | `src/portal/xtmClient.ts` (`reReadActive`, near `settleGrid`) |
+| outcome classification on `clicked` (A3) | `src/portal/xtmAccept.ts` (`determineAcceptOutcomes`) |
+| accept metric / structured log (A4) | `src/runtime/xtmPollCycle.ts` + `src/portal/xtmAccept.ts` |
+| field-change re-sync pass (B) | `src/runtime/xtmPollCycle.ts` (after `upsertMany`) |
+| pure helper `materialFieldsChanged(prev, next)` (B), `rowMatchesJobKey` locator builder (A1) | `detection/` or `portal/` (testable) |
+
+No change to `decideAccept`, the diff, or the detection read.
 
 ## Error handling
 
-- `settleRows` is **bounded** (~4 s cap). If the count never stabilises (busy
-  network / unusual render), it returns the last observed state and the read
-  proceeds — the existing empty-re-read guard (→ `failed`, re-checkable) and the
-  robustness re-attempt remain the safety net. Never blocks the cycle.
-- A `settleRows` cap-hit is **logged** (loud, like `settleGrid`'s timeout) so a
-  changed render profile is diagnosable, not silent (Constitution VI).
+- All new waits are **bounded** (~3 s each) and fall back to existing guards (empty-re-read
+  → `failed`/retry). A cap-hit is logged loud (Constitution VI). Total added latency is
+  bounded; verify steady-state cycle p95 stays well under the 25 s shutdown watchdog
+  (`report:latency`).
+- The claim→accept→record ordering is unchanged (no new double-accept / stranded-`accepting`
+  risk); the only widened window is the bounded waits — keep caps small (3 s).
 
 ## Testing
 
-- **Unit (TDD, pure):** `isRowCountStable` — empty samples, single sample, not-yet-
-  stable (counts still changing), stable (last N equal), stable-after-fluctuation.
-  This is the load-bearing logic and is fully unit-testable without a browser.
-- **Integration (fixture):** none reliably reproduces a *timing* race with static
-  HTML (same limitation as the original `settleGrid` race) — covered by ops below.
-- **Ops verify (DIAG, already enabled):** after deploy, the next live Malay jobs must
-  accept on the **first** attempt — confirmed by an `action:"accept","outcome":"ok"`
-  log per job and a DIAG capture showing the full grid (jobsRead matching the visible
-  rows) at accept time. Turn DIAG off once confirmed.
+- **Unit (TDD, pure):** `materialFieldsChanged(prev, next)` (Due appears / Words change /
+  no change / null↔value); the jobKey→row locator predicate; the classification decision
+  (clicked vs not × present vs claimable → outcome).
+- **Integration (deterministic race):** a Playwright fixture that **step-renders** the grid
+  (owned row first, target row attaches ~200 ms later) to assert the target-keyed
+  `waitFor` waits for the target and the scan clicks it — reproduces the race without
+  real-world timing.
+- **Ops verify (DIAG on):** next live Malay jobs accept on the **first** attempt
+  (`action:"accept","outcome":"ok"` per job; `acceptNoClickWhilePresent` stays 0); the Due
+  date appears in the Sheet for a job whose due is set post-acceptance.
 
 ## Constraints / non-goals
 
-- **FR-011 (rate):** `settleRows` observes the already-loaded DOM — zero extra portal
-  requests. Poll interval stays ≥ 20 s.
-- **Do not touch the detection read** — it already works (all 8 detected); only the
-  accept-flow reads change.
-- **Live shared account:** the change is additive (a wait before two reads) and
-  preserves all existing fail-loud guards; `ACCEPT_MAX_PER_CYCLE` stays 0.
-- **Not in scope:** speeding up the menu-scan by avoiding owned-row menu opens (D6:
-  ownership isn't in the grid cells, so each Malay row's menu must be opened) — the
-  stability gate makes the scan reliable, which is what matters; raw speed is moot
-  because jobs stay > 2 min.
+- **FR-011:** all new waits observe the already-loaded DOM — zero extra portal requests;
+  poll interval stays ≥ 20 s.
+- **Live shared account:** additive waits + a stricter classification; `ACCEPT_MAX_PER_CYCLE`
+  stays 0; all fail-loud guards preserved.
+- **Not in scope:** the "Removed overwrote Accepted" status display (4717847 — correct
+  behaviour: the job was pulled from Active after the bot owned it 5.5 min); the Closed-vs-
+  Removed key-match audit (separate, only if a job the user still owns is mislabeled).
