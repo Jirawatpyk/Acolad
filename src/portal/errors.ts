@@ -56,6 +56,10 @@ export class AcceptUnconfirmedError extends PortalError {
 export interface AcceptTarget {
   jobKey: string;
   targetLang: string;
+  /** Cell values to locate THIS row deterministically (not a volatile nth index). */
+  fileName: string;
+  step: string | null;
+  role: string | null;
 }
 
 /**

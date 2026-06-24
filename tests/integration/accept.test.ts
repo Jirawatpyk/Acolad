@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import type { Frame } from 'playwright';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { chromium, type Browser, type Frame, type Page } from 'playwright';
 import {
   determineAcceptOutcomes,
   acceptEligibleTasks,
@@ -9,6 +9,7 @@ import type { AcceptTarget } from '../../src/portal/errors.js';
 import type { XtmRawJob } from '../../src/detection/types.js';
 import { computeXtmJobKey } from '../../src/detection/jobKey.js';
 import { XTM } from '../../src/portal/selectors.js';
+import { xtmActivePage, xtmMenuRow } from '../fixtures/xtmPages.js';
 
 const AT = '2026-06-19T10:00:05+07:00';
 
@@ -30,6 +31,18 @@ const xraw = (over: Partial<XtmRawJob> = {}): XtmRawJob => ({
 const target = (raw: XtmRawJob): AcceptTarget => ({
   jobKey: computeXtmJobKey(raw),
   targetLang: raw.targetLang ?? '',
+  fileName: raw.fileName,
+  step: raw.step,
+  role: raw.role,
+});
+
+/** AcceptTarget literal for the stub-frame tests (cells are unused by those stubs). */
+const t = (jobKey: string, targetLang: string): AcceptTarget => ({
+  jobKey,
+  targetLang,
+  fileName: `${jobKey}.docx`,
+  step: 'PE 1',
+  role: 'Corrector',
 });
 
 describe('determineAcceptOutcomes (FR-024 — outcome from re-read of Active)', () => {
@@ -88,7 +101,7 @@ describe('determineAcceptOutcomes (FR-024 — outcome from re-read of Active)', 
     const key = computeXtmJobKey(raw);
     const reRead = [xraw({ acceptAvailable: true })]; // still claimable in re-read
     const out = determineAcceptOutcomes(
-      [{ jobKey: key, targetLang: 'Malay (Malaysia)' }],
+      [t(key, 'Malay (Malaysia)')],
       reRead,
       AT,
       new Set() /* no click */,
@@ -104,12 +117,7 @@ describe('determineAcceptOutcomes (FR-024 — outcome from re-read of Active)', 
     const key = computeXtmJobKey(raw);
     const reRead = [xraw({ acceptAvailable: true })];
     const clickedKeys = new Set([key]);
-    const out = determineAcceptOutcomes(
-      [{ jobKey: key, targetLang: 'Malay (Malaysia)' }],
-      reRead,
-      AT,
-      clickedKeys,
-    );
+    const out = determineAcceptOutcomes([t(key, 'Malay (Malaysia)')], reRead, AT, clickedKeys);
     expect(out).toHaveLength(1);
     expect(out[0]?.outcome).toBe('failed');
   });
@@ -120,33 +128,38 @@ describe('determineAcceptOutcomes (FR-024 — outcome from re-read of Active)', 
     const raw = xraw({ acceptAvailable: false });
     const key = computeXtmJobKey(raw);
     const reRead = [xraw({ acceptAvailable: false })];
-    const out = determineAcceptOutcomes(
-      [{ jobKey: key, targetLang: 'Malay (Malaysia)' }],
-      reRead,
-      AT,
-      new Set(),
-    );
+    const out = determineAcceptOutcomes([t(key, 'Malay (Malaysia)')], reRead, AT, new Set());
     expect(out).toHaveLength(1);
     expect(out[0]?.outcome).toBe('accepted');
   });
 });
 
 describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 mode 3)', () => {
-  const targets: AcceptTarget[] = [
-    { jobKey: 'k1', targetLang: 'Malay (Malaysia)' },
-    { jobKey: 'k2', targetLang: 'Malay (Malaysia)' },
-  ];
+  const targets: AcceptTarget[] = [t('k1', 'Malay (Malaysia)'), t('k2', 'Malay (Malaysia)')];
 
-  // A frame whose first grid query times out, so openBulkAcceptForLanguage throws
-  // (the Playwright failure mode for an accept timeout / changed menu).
-  const timingOutFrame = (): Frame =>
-    ({
-      locator: () => ({
-        count: async () => {
-          throw new Error('Timeout 15000ms exceeded waiting for locator');
-        },
-      }),
-    }) as unknown as Frame;
+  // A frame whose grid queries time out, so openBulkAcceptForLanguage throws (the
+  // Playwright failure mode for an accept timeout / changed menu). Chainable so the
+  // target-keyed rowForTarget locator builds, and the row's waitFor RESOLVES (the row
+  // is "attached"); the timeout then fires on the kebab count/click — an error the
+  // function does NOT swallow, so it propagates and the caller marks the group failed
+  // WITHOUT re-reading (matching the production accept-timeout failure mode).
+  const timingOutFrame = (): Frame => {
+    const timeout = async (): Promise<never> => {
+      throw new Error('Timeout 15000ms exceeded waiting for locator');
+    };
+    const loc: Record<string, unknown> = {
+      first: () => loc,
+      nth: () => loc,
+      locator: () => loc,
+      filter: () => loc,
+      count: timeout,
+      textContent: timeout,
+      click: timeout,
+      hover: timeout,
+      waitFor: async () => {}, // row attaches; the timeout fires on the kebab query
+    };
+    return { locator: () => loc } as unknown as Frame;
+  };
 
   it('marks every target failed with a bounded, evidence-only reason and never re-reads', async () => {
     const captured: string[] = [];
@@ -191,10 +204,7 @@ describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 
     };
     const out = await acceptEligibleTasks(
       timingOutFrame(),
-      [
-        { jobKey: 'k1', targetLang: 'Malay (Malaysia)' },
-        { jobKey: 'k2', targetLang: 'Indonesian' },
-      ],
+      [t('k1', 'Malay (Malaysia)'), t('k2', 'Indonesian')],
       deps,
     );
     expect(out).toHaveLength(2);
@@ -216,12 +226,15 @@ describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 
   });
 
   // A frame stub where openBulkAcceptForLanguage SUCCEEDS (one Malay row; "Accept task"
-  // + bulk items present) so the test can drive the post-accept re-read path.
+  // + bulk items present) so the test can drive the post-accept re-read path. The locator
+  // is chainable (filter/first/locator all return self) so the target-keyed rowForTarget
+  // chain resolves; waitFor resolves so the row counts as 'attached'.
   const acceptingFrame = (): Frame => {
-    const loc = {
+    const loc: Record<string, unknown> = {
       first: () => loc,
       nth: () => loc,
       locator: () => loc,
+      filter: () => loc,
       count: async () => 1,
       textContent: async () => 'Malay (Malaysia)',
       click: async () => {},
@@ -234,10 +247,11 @@ describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 
   // Per-selector stub: a single Malay row whose menu shows "Finish task" (already ours),
   // NO "Accept task" — openBulkAcceptForLanguage must return 'already-owned', not throw.
   const ownedFrame = (): Frame => {
-    const loc = (sel?: string): unknown => ({
+    const loc = (sel?: string): Record<string, unknown> => ({
       first: () => loc(sel),
       nth: () => loc(sel),
       locator: (s: string) => loc(s),
+      filter: () => loc(sel),
       count: async () => (sel === XTM.accept.acceptTaskItem ? 0 : 1),
       textContent: async () => 'Malay (Malaysia)',
       click: async () => {},
@@ -249,10 +263,11 @@ describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 
 
   // Per-selector stub: a matching row showing NEITHER "Accept task" nor "Finish task".
   const noMenuFrame = (): Frame => {
-    const loc = (sel?: string): unknown => ({
+    const loc = (sel?: string): Record<string, unknown> => ({
       first: () => loc(sel),
       nth: () => loc(sel),
       locator: (s: string) => loc(s),
+      filter: () => loc(sel),
       count: async () =>
         sel === XTM.accept.acceptTaskItem || sel === XTM.accept.finishTaskItem ? 0 : 1,
       textContent: async () => 'Malay (Malaysia)',
@@ -274,11 +289,7 @@ describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 
       },
       nowIso: () => AT,
     };
-    const out = await acceptEligibleTasks(
-      ownedFrame(),
-      [{ jobKey: key, targetLang: 'Malay (Malaysia)' }],
-      deps,
-    );
+    const out = await acceptEligibleTasks(ownedFrame(), [t(key, 'Malay (Malaysia)')], deps);
     expect(out).toHaveLength(1);
     expect(out[0]?.outcome).toBe('accepted'); // we own it (prior bulk) → reconciled, not failed
     expect(captured).not.toContain('post_accept_click'); // no click happened → no post-click evidence
@@ -291,11 +302,7 @@ describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 
       captureEvidence: async () => 'state/evidence/x',
       nowIso: () => AT,
     };
-    const out = await acceptEligibleTasks(
-      noMenuFrame(),
-      [{ jobKey: 'k1', targetLang: 'Malay (Malaysia)' }],
-      deps,
-    );
+    const out = await acceptEligibleTasks(noMenuFrame(), [t('k1', 'Malay (Malaysia)')], deps);
     expect(out).toHaveLength(1);
     expect(out[0]?.outcome).toBe('failed'); // fail-loud preserved — never assume success
     expect(reReadActive).not.toHaveBeenCalled(); // group failed → no re-read
@@ -308,16 +315,170 @@ describe('acceptEligibleTasks — accept timeout / menu-not-found (FR-011, T049 
       captureEvidence: async () => 'state/evidence/race',
       nowIso: () => AT,
     };
-    const out = await acceptEligibleTasks(
-      acceptingFrame(),
-      [{ jobKey: 'k1', targetLang: 'Malay (Malaysia)' }],
-      deps,
-    );
+    const out = await acceptEligibleTasks(acceptingFrame(), [t('k1', 'Malay (Malaysia)')], deps);
     expect(reReadActive).toHaveBeenCalledTimes(1);
     expect(out).toHaveLength(1);
     // Accepted jobs STAY in Active, so an empty re-read is a grid race — conservative
     // 'failed' (re-checkable + alerts), never the lossy 'missing' that resets to none.
     expect(out[0]?.outcome).toBe('failed');
     if (out[0]?.outcome === 'failed') expect(out[0].reason).toContain('grid race');
+  });
+});
+
+// ── A1: target-keyed row location on a REAL grid (the lost-Malay-jobs root fix) ──
+// The pre-fix code scanned rows by nth(i); an owned row listed FIRST short-circuited
+// the group to 'already-owned' and the claimable target never got clicked. The fix
+// locates each target's row by its File/Step/Role cell text (rowForTarget), so row
+// ORDER no longer matters — it opens the claimable target's own menu and clicks the
+// bulk. This runs against a real Chromium page whose kebabs open real inline menus.
+describe('acceptEligibleTasks — locates the target row by cell text, not order (A1)', () => {
+  let browser: Browser;
+  let page: Page;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+  });
+  afterAll(async () => {
+    await browser.close();
+  });
+  beforeEach(async () => {
+    page = await browser.newPage();
+  });
+  afterEach(async () => {
+    await page.close();
+  });
+
+  // The claimable target: a Malay row whose menu shows "Accept task" + the bulk item.
+  const claimable = xraw({
+    fileName: '4712942-1-21 (ID-1b270f065098)_captions.json',
+    step: 'Post-Editing (PE) 1',
+    role: 'Corrector',
+  });
+
+  it('clicks the bulk for a CLAIMABLE target even when an OWNED Malay row is listed first', async () => {
+    // Row order is owned-first, claimable-second — the exact ordering that defeated the
+    // old nth() scan (it returned 'already-owned' on the owned row and never clicked).
+    await page.setContent(
+      xtmActivePage(
+        [
+          // Owned Malay row FIRST (different file → different jobKey; menu = "Finish task").
+          xtmMenuRow('owned111', 'finish', {
+            file: 'OTHER-owned (ID-owned111)_done.json',
+            step: 'Post-Editing (PE) 1',
+            role: 'Corrector',
+          }),
+          // Claimable target SECOND (menu = "Accept task" + bulk item).
+          xtmMenuRow('clm222', 'accept', {
+            file: claimable.fileName,
+            step: claimable.step ?? '',
+            role: claimable.role ?? '',
+          }),
+        ],
+        { total: 2 },
+      ),
+    );
+
+    const captured: string[] = [];
+    // After the bulk click the target is ours → re-read shows acceptAvailable:false.
+    const reReadActive = vi.fn(
+      async (): Promise<XtmRawJob[]> => [xraw({ ...claimable, acceptAvailable: false })],
+    );
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async (reason) => {
+        captured.push(reason);
+        return undefined;
+      },
+      nowIso: () => AT,
+    };
+
+    const out = await acceptEligibleTasks(page, [target(claimable)], deps);
+
+    // The bulk WAS clicked (post-click evidence fires only on opened==='clicked'), so
+    // the owned-first row did NOT short-circuit the group to a false 'already-owned'.
+    expect(captured).toContain('post_accept_click');
+    expect(reReadActive).toHaveBeenCalledTimes(1);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.jobKey).toBe(target(claimable).jobKey);
+    expect(out[0]?.outcome).toBe('accepted');
+  });
+
+  it('returns already-owned (no false click) when the target row itself is owned', async () => {
+    // The target's OWN row shows "Finish task" (a prior bulk grabbed its group). Locating
+    // by cell text finds that row; no claimable target row exists → 'already-owned', and
+    // the FR-024 re-read reconciles it to 'accepted' — never a false click on a sibling.
+    await page.setContent(
+      xtmActivePage(
+        [
+          xtmMenuRow('clm222', 'finish', {
+            file: claimable.fileName,
+            step: claimable.step ?? '',
+            role: claimable.role ?? '',
+          }),
+        ],
+        { total: 1 },
+      ),
+    );
+    const captured: string[] = [];
+    const reReadActive = vi.fn(
+      async (): Promise<XtmRawJob[]> => [xraw({ ...claimable, acceptAvailable: false })],
+    );
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async (reason) => {
+        captured.push(reason);
+        return undefined;
+      },
+      nowIso: () => AT,
+    };
+
+    const out = await acceptEligibleTasks(page, [target(claimable)], deps);
+
+    expect(captured).not.toContain('post_accept_click'); // owned → no click
+    expect(out[0]?.outcome).toBe('accepted'); // reconciled by the re-read
+  });
+
+  it('fails loud when the target row is absent (the row never rendered → no false accept)', async () => {
+    // A DIFFERENT Malay row is present but NOT the target — locating by cell text finds
+    // no target row. The function must NOT click a non-target row; it returns
+    // 'already-owned' (retriable) and the empty-of-target re-read drives the outcome.
+    // NOTE: this case necessarily burns one ACCEPT_TIMEOUT_MS (~15s) — the target row's
+    // waitFor({state:'attached'}) must time out to PROVE the row is absent before skipping
+    // it; that wait is the production accept-timeout budget, not a hang.
+    await page.setContent(
+      xtmActivePage(
+        [
+          xtmMenuRow('other999', 'accept', {
+            file: 'SOMETHING-else (ID-other999)_x.json',
+            step: 'Post-Editing (PE) 1',
+            role: 'Corrector',
+          }),
+        ],
+        { total: 1 },
+      ),
+    );
+    // Re-read: the target is genuinely gone from Active → 'missing' (retriable).
+    const reReadActive = vi.fn(
+      async (): Promise<XtmRawJob[]> => [
+        xraw({ fileName: 'SOMETHING-else (ID-other999)_x.json', acceptAvailable: true }),
+      ],
+    );
+    const captured: string[] = [];
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async (reason) => {
+        captured.push(reason);
+        return undefined;
+      },
+      nowIso: () => AT,
+    };
+
+    const out = await acceptEligibleTasks(page, [target(claimable)], deps);
+
+    expect(captured).not.toContain('post_accept_click'); // target row absent → never clicked
+    expect(out).toHaveLength(1);
+    expect(out[0]?.jobKey).toBe(target(claimable).jobKey);
+    // Target not in the re-read → missing (retriable), NOT a false accepted/failed.
+    expect(out[0]?.outcome).toBe('missing');
   });
 });

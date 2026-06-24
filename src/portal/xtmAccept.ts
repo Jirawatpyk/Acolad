@@ -1,4 +1,4 @@
-import type { Frame, Page } from 'playwright';
+import type { Frame, Locator, Page } from 'playwright';
 import { XTM } from './selectors.js';
 import { AcceptUnconfirmedError, type AcceptTarget, type AcceptResult } from './errors.js';
 import type { XtmRawJob } from '../detection/types.js';
@@ -100,9 +100,9 @@ export async function acceptEligibleTasks(
   // (V16) excludes the re-read cost that outcome latency (V16b) includes — keyed
   // per job so a later group's click never overwrites an earlier group's latency.
   const clickedAtByJob = new Map<string, string>();
-  for (const [lang, group] of byLang) {
+  for (const [, group] of byLang) {
     try {
-      const opened = await openBulkAcceptForLanguage(scope, lang);
+      const opened = await openBulkAcceptForLanguage(scope, group);
       if (opened === 'clicked') {
         // Stamp the confirm-click moment ONLY when a click actually happened, so the V16
         // click-latency split is never fabricated for an already-owned (no-click) group.
@@ -212,29 +212,39 @@ export async function readAcceptAvailability(
 /**
  * Drive the row menu to the bulk "for this language in this group" option. The bulk is
  * group-level (one click claims the whole language group) but ownership is per-row, so
- * SCAN matching-language rows for one still showing "Accept task" and drive the bulk
- * from it — do NOT decide on the first row alone (the first might already be ours while
- * a sibling is still claimable; deciding on it would strand the sibling). Returns:
- *   - 'clicked'        → a claimable row was found and the bulk was clicked
- *   - 'already-owned'  → every matching row is already ours ("Finish task"); no click
- *                        needed, the FR-024 re-read reconciles those rows to 'accepted'
- * Throws AcceptUnconfirmedError (fail loud) only when no matching row exposes either item.
+ * we walk the group's TARGETS (whose jobKeys we already know) and, for EACH, locate its
+ * data row DETERMINISTICALLY by its File/Step/Role cell text (rowForTarget) rather than a
+ * volatile nth() index — XTM's grid auto-refreshes (a data XHR) mid-scan, reindexing rows,
+ * so an index-based scan would point at the wrong row and could miss a still-claimable
+ * target entirely (the lost-Malay-jobs bug; see [[xtm-accept-d6-finish-task]]). For the
+ * first target whose row is still claimable ("Accept task" present) we drive the bulk; one
+ * click claims the whole language group. Returns:
+ *   - 'clicked'        → a claimable target row was found and the bulk was clicked
+ *   - 'already-owned'  → no claimable target row this pass (every target's row is already
+ *                        ours, or no target row is currently rendered) → no click; the
+ *                        FR-024 re-read reconciles owned rows to 'accepted' and a
+ *                        not-rendered target to retriable 'missing'
+ * Throws AcceptUnconfirmedError (fail loud) only when a matching target row IS rendered but
+ * exposes neither "Accept task" nor "Finish task" (an unexpected menu — never guess).
  */
 async function openBulkAcceptForLanguage(
   scope: Scope,
-  targetLang: string,
+  group: AcceptTarget[],
 ): Promise<'clicked' | 'already-owned'> {
-  const rows = scope.locator(`${XTM.active.gridContainer} tbody tr`);
-  const count = await rows.count();
-  let matchedLang = false;
   let ownedSeen = false;
-  for (let i = 0; i < count; i++) {
-    const row = rows.nth(i);
+  let anyRowFound = false;
+  for (const t of group) {
+    const row = rowForTarget(scope, t);
+    // Wait for THIS target's row to attach (it may not be rendered yet, or it was
+    // snatched). A missing row is NOT "owned" — skip it (the re-read classifies it).
+    const attached = await row
+      .waitFor({ state: 'attached', timeout: ACCEPT_TIMEOUT_MS })
+      .then(() => true)
+      .catch(() => false);
+    if (!attached) continue; // this target's row hasn't rendered / is gone — skip (NOT owned)
+    anyRowFound = true;
     const kebab = row.locator(XTM.accept.rowKebab).first();
-    if ((await kebab.count()) === 0) continue; // header/placeholder row
-    const cell = (await row.locator(XTM.active.cell.target).first().textContent())?.trim() ?? '';
-    if (cell.toLowerCase() !== targetLang.trim().toLowerCase()) continue;
-    matchedLang = true;
+    if ((await kebab.count()) === 0) continue;
     await kebab.click({ timeout: ACCEPT_TIMEOUT_MS }); // open this row's menu
     await scope
       .locator(XTM.accept.menuContainer)
@@ -252,18 +262,29 @@ async function openBulkAcceptForLanguage(
       await bulk.click({ timeout: ACCEPT_TIMEOUT_MS });
       // A confirmation dialog may follow; its selector is captured evidence-first on the
       // first real accept. The FR-024 re-read is the source of truth regardless.
-      return 'clicked';
+      return 'clicked'; // one click claims the whole language group
     }
-    // Not claimable on this row — already ours ("Finish task")? Keep scanning for a
-    // still-claimable sibling rather than giving up on the group.
+    // Not claimable on this row — already ours ("Finish task")? Note it and try the next
+    // target rather than giving up on the group.
     if ((await scope.locator(XTM.accept.finishTaskItem).count()) > 0) ownedSeen = true;
-    await kebab.click({ timeout: ACCEPT_TIMEOUT_MS }).catch(() => undefined); // toggle-close before the next row
+    await kebab.click({ timeout: ACCEPT_TIMEOUT_MS }).catch(() => undefined); // toggle-close before the next target
   }
-  if (!matchedLang) {
-    throw new AcceptUnconfirmedError(`no Active row matching target language "${targetLang}"`);
-  }
-  if (ownedSeen) return 'already-owned'; // every matching row is already ours
+  if (ownedSeen) return 'already-owned'; // a target row is present and already ours
+  if (!anyRowFound) return 'already-owned'; // no target row present this pass -> retriable via classification
   throw new AcceptUnconfirmedError(
-    'matching rows present but neither "Accept task" nor "Finish task" found',
+    'matching target rows present but neither "Accept task" nor "Finish task" found',
   );
+}
+
+/**
+ * Stable locator for a target's data row by its File+Step+Role cell text (the jobKey
+ * basis), so a mid-pass auto-refresh that reindexes rows cannot point us at the wrong row.
+ */
+function rowForTarget(scope: Scope, t: AcceptTarget): Locator {
+  let row = scope
+    .locator(`${XTM.active.gridContainer} tbody tr`)
+    .filter({ has: scope.locator(XTM.active.cell.file, { hasText: t.fileName }) });
+  if (t.step) row = row.filter({ has: scope.locator(XTM.active.cell.step, { hasText: t.step }) });
+  if (t.role) row = row.filter({ has: scope.locator(XTM.active.cell.role, { hasText: t.role }) });
+  return row.first();
 }

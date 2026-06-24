@@ -85,6 +85,64 @@ export function thaiRow(over: Partial<XtmRowSpec> = {}): string {
   });
 }
 
+/**
+ * A data row that carries a WORKING per-row kebab → dropdown menu, faithful to the
+ * real XTM accept DOM (recon 2026-06-22): the kebab `button[data-testid=
+ * "context-menu-button"]` opens an INLINE `[data-dropdown-menu="true"]` div holding
+ * `li[data-dropdown-menu-item]` entries with stable id prefixes —
+ * `TASK_LISTING_ACCEPT_GROUP_TASK_<id>` ("Accept task", claimable) or
+ * `TASK_LISTING_FINISH_TASK_<id>` ("Finish task", already ours). The claimable menu
+ * also embeds the FR-006 bulk item `TASK_LISTING_ACCEPT_ALL_TASKS_OF_THIS_LANGUAGE_
+ * IN_THIS_GROUP_<id>`. The inline script toggles exactly the clicked row's menu
+ * (and closes any other open one) so a scope-level `[data-dropdown-menu]` query —
+ * the way production reads it — sees only the intended row's menu, which is what
+ * lets a real-Chromium test exercise the target-keyed row locator end to end.
+ */
+export function xtmMenuRow(
+  id: string,
+  menu: 'accept' | 'finish',
+  over: Partial<XtmRowSpec> = {},
+): string {
+  const base = over.target === 'Malay (Malaysia)' || over.target === undefined ? malayRow : xtmRow;
+  // Render the standard cells (Malay shape by default) but inject a menu after the kebab.
+  const rowHtml = over.target && over.target !== 'Malay (Malaysia)' ? xtmRow(over) : base(over);
+  const items =
+    menu === 'accept'
+      ? `<li data-dropdown-menu-item="true" id="TASK_LISTING_ACCEPT_GROUP_TASK_${id}">Accept task` +
+        `<ul><li data-dropdown-menu-item="true" id="TASK_LISTING_ACCEPT_ALL_TASKS_OF_THIS_LANGUAGE_IN_THIS_GROUP_${id}">Accept all tasks for this language in this group</li></ul>` +
+        `</li>`
+      : `<li data-dropdown-menu-item="true" id="TASK_LISTING_FINISH_TASK_${id}">Finish task</li>`;
+  // The menu starts CLOSED — it carries NO `data-dropdown-menu="true"` marker yet, so a
+  // scope-level `[data-dropdown-menu]` query sees nothing until the kebab opens it. This
+  // mirrors production, where the inline dropdown is RENDERED only while open (closed rows
+  // have no menu DOM at all) — keeping the menuContainer.first() query unambiguous.
+  const menuDiv = `<div data-menu-id="menu-${id}" style="position:fixed;top:0;left:0;width:200px;height:120px"><ul>${items}</ul></div>`;
+  // Mark the kebab so the toggle script can find its sibling menu, and inject the menu
+  // div right after the kebab button (still inside td:nth-child(1)).
+  return rowHtml.replace(
+    '<button data-testid="context-menu-button" aria-label="More actions">⋮</button>',
+    `<button data-testid="context-menu-button" aria-label="More actions" data-menu-for="menu-${id}">⋮</button>${menuDiv}`,
+  );
+}
+
+/**
+ * Inline toggle script for {@link xtmMenuRow} menus: clicking a kebab OPENS its own menu
+ * (adds `data-dropdown-menu="true"`, which is how production marks an open dropdown) and
+ * CLOSES any other open one (removes the marker). Mirrors the SPA's single-open-menu
+ * behaviour, so a scope-level `[data-dropdown-menu].first()` always resolves to exactly
+ * the intended row's open menu. Placed once per page; harmless when no menu rows exist.
+ */
+const MENU_TOGGLE_SCRIPT =
+  `<script>document.addEventListener('click',function(e){` +
+  `var btn=e.target.closest('[data-menu-for]');` +
+  `var open=document.querySelectorAll('[data-dropdown-menu="true"]');` +
+  `var id=btn?btn.getAttribute('data-menu-for'):null;` +
+  `var m=id?document.querySelector('[data-menu-id="'+id+'"]'):null;` +
+  `var wasOpen=m&&m.getAttribute('data-dropdown-menu')==='true';` +
+  `open.forEach(function(x){x.removeAttribute('data-dropdown-menu');});` +
+  `if(btn&&m&&!wasOpen)m.setAttribute('data-dropdown-menu','true');` +
+  `});</script>`;
+
 export function xtmActivePage(
   rows: string[],
   opts: { state?: string; total?: number; shown?: number } = {},
@@ -110,7 +168,7 @@ export function xtmActivePage(
     `</table>` +
     `<div data-testid="listing-section-footer"><span class="itemsCount__itemCount--1BMuy">${lo} - ${end} of ${total}</span></div>` +
     `<div class="en_GB" id="context-menus-container"></div>` +
-    `</div></body></html>`
+    `</div>${MENU_TOGGLE_SCRIPT}</body></html>`
   );
 }
 

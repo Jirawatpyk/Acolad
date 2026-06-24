@@ -178,7 +178,13 @@ export class XtmPollCycle {
         // Capture the live accept-menu DOM for this eligible job (hover only, in the
         // loop) so acceptAvailable can be computed before auto-accept is ever enabled.
         if (this.cfg.ACCEPT_RECON) {
-          summary.reconEligible.push({ jobKey: s.jobKey, targetLang: s.targetLang ?? '' });
+          summary.reconEligible.push({
+            jobKey: s.jobKey,
+            targetLang: s.targetLang ?? '',
+            fileName: s.fileName,
+            step: s.step,
+            role: s.role,
+          });
         }
       } else {
         candidates.push(s);
@@ -237,7 +243,13 @@ export class XtmPollCycle {
     const targets: AcceptTarget[] = [];
     for (const s of candidates) {
       if (this.accept.claimForAccept(s.jobKey)) {
-        targets.push({ jobKey: s.jobKey, targetLang: s.targetLang ?? '' });
+        targets.push({
+          jobKey: s.jobKey,
+          targetLang: s.targetLang ?? '',
+          fileName: s.fileName,
+          step: s.step,
+          role: s.role,
+        });
       }
     }
     const acceptResults = new Map<string, AcceptResult>();
