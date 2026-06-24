@@ -7,7 +7,11 @@ import type { RateLimiter } from '../runtime/rateLimiter.js';
 import type { XtmJobSnapshot } from '../detection/types.js';
 import { BrowserSession } from './browser.js';
 import { performXtmLogin, isXtmLoggedOut, type XtmCredentials } from './xtmLogin.js';
-import { readActiveSnapshot, readClosedKeys as readClosedKeysFromGrid } from './xtmInbox.js';
+import {
+  readActiveSnapshot,
+  readClosedKeys as readClosedKeysFromGrid,
+  parseItemsTotal,
+} from './xtmInbox.js';
 import { acceptEligibleTasks, readAcceptAvailability } from './xtmAccept.js';
 import { computeXtmJobKey } from '../detection/jobKey.js';
 import { captureAcceptMenuDom } from './xtmAcceptRecon.js';
@@ -127,6 +131,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     if (targets.length === 0) return [];
     const page = await this.browser.page();
     const frame = await this.activeFrame(page);
+    await this.waitForGridComplete(frame, 'accept-scan');
     const secrets = secretValues(this.cfg);
     const evidence = (reason: string): Promise<string | undefined> =>
       captureEvidence(page, this.cfg.STATE_DIR, reason, this.clock.nowIso(), secrets);
@@ -143,6 +148,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
         // after navigation (the iframe reloaded), then read + probe acceptability fresh.
         await this.navigateToInbox(page);
         const freshFrame = await this.activeFrame(page);
+        await this.waitForGridComplete(freshFrame, 'reread');
         const snap = await readActiveSnapshot(
           freshFrame,
           `reread-${this.clock.nowIso()}`,
@@ -258,6 +264,35 @@ export class PlaywrightXtmClient implements XtmPortalClient {
   private async navigateToInbox(page: Page): Promise<void> {
     this.rate.record(this.clock.nowMs());
     await page.goto(this.cfg.XTM_ACOLAD_OFFERS_URL, { waitUntil: 'domcontentloaded' });
+  }
+
+  /**
+   * After networkidle, wait until the grid is FULLY rendered: the footer "… of N" total
+   * equals the rendered kebab-data-row count. networkidle means the data XHR finished, but
+   * the AngularJS row render can lag it — reading in that gap sees a partial grid and
+   * mis-attributes a present accept target as 'missing'. Bounded (~3s); on cap we proceed
+   * (the empty-re-read guard + retriable classification remain the net) and log loud.
+   */
+  private async waitForGridComplete(frame: Frame, context: string): Promise<void> {
+    const deadline = this.clock.nowMs() + 3_000;
+    while (this.clock.nowMs() < deadline) {
+      const footer = await frame
+        .locator(XTM.active.itemsCount)
+        .first()
+        .textContent()
+        .catch(() => null);
+      const total = parseItemsTotal(footer);
+      const rows = await frame
+        .locator(`${XTM.active.gridContainer} tbody tr`)
+        .filter({ has: frame.locator(XTM.active.rowKebab) })
+        .count();
+      if (total !== null && rows === total) return;
+      await new Promise<void>((r) => setTimeout(r, 200));
+    }
+    this.logger?.warn(
+      { module: 'xtmClient', action: 'gridComplete', outcome: 'timeout', context },
+      'grid footer total != rendered rows within cap — read may see a partial grid',
+    );
   }
 
   /**

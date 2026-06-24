@@ -206,12 +206,12 @@ export async function readAcceptAvailability(
     const key = computeXtmJobKey({ fileName, step, role });
     if (!jobKeys.has(key) || result.has(key)) continue;
     await kebab.click({ timeout: ACCEPT_TIMEOUT_MS });
-    await scope
-      .locator(XTM.accept.menuContainer)
-      .first()
-      .waitFor({ state: 'visible', timeout: ACCEPT_TIMEOUT_MS })
-      .catch(() => undefined);
-    result.set(key, (await scope.locator(XTM.accept.acceptTaskItem).count()) > 0);
+    const openMenu = scope.locator(XTM.accept.menuContainer).first();
+    await openMenu.waitFor({ state: 'visible', timeout: ACCEPT_TIMEOUT_MS }).catch(() => undefined);
+    // Scope to the open menu container so items from OTHER rows' menus (same id prefix,
+    // still in the DOM from a prior open) cannot satisfy the count (C1b fix: mirrors
+    // the scope guard added to openBulkAcceptForLanguage).
+    result.set(key, (await openMenu.locator(XTM.accept.acceptTaskItem).count()) > 0);
     await page.keyboard.press('Escape').catch(() => undefined); // close menu — NO action on the task
   }
   return result;

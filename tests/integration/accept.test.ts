@@ -3,6 +3,7 @@ import { chromium, type Browser, type Frame, type Page } from 'playwright';
 import {
   determineAcceptOutcomes,
   acceptEligibleTasks,
+  readAcceptAvailability,
   type AcceptDeps,
 } from '../../src/portal/xtmAccept.js';
 import type { AcceptTarget } from '../../src/portal/errors.js';
@@ -605,5 +606,74 @@ describe('acceptEligibleTasks — exact cell text match in rowForTarget (C1)', (
     expect(out[0]?.jobKey).toBe(target(exactTarget).jobKey);
     // Exact target absent from re-read → missing (retriable).
     expect(out[0]?.outcome).toBe('missing');
+  });
+});
+
+// ── C1b: readAcceptAvailability scopes the probe to the open menu, not the page ──
+// The pre-fix code called `scope.locator(XTM.accept.acceptTaskItem).count()` at page
+// level, so an Accept-task item belonging to a DIFFERENT row's menu (still in the DOM)
+// could satisfy the count even when the TARGET row's open menu shows "Finish task".
+// After the fix, the query is scoped to `openMenu` (the active [data-dropdown-menu]
+// container), so only the TARGET row's open menu items are visible.
+describe('readAcceptAvailability — scopes acceptTaskItem query to the open menu (C1b)', () => {
+  let browser: Browser;
+  let page: Page;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+  });
+  afterAll(async () => {
+    await browser.close();
+  });
+  beforeEach(async () => {
+    page = await browser.newPage();
+  });
+  afterEach(async () => {
+    await page.close();
+  });
+
+  // Target row: owned (menu shows "Finish task" — acceptAvailable should be FALSE).
+  // Non-target row: claimable (menu shows "Accept task" — should NOT influence the result).
+  // The grid fixture renders them so the claimable row's menu is CLOSED (no
+  // data-dropdown-menu="true") and the target row's menu opens on kebab click. Even
+  // though the claimable row's Accept-task item IS in the DOM (closed menu div), a
+  // page-level query would find it and return true — the bug. The scoped query must
+  // find only the items inside the TARGET row's open menu and return false.
+  const targetRaw = xraw({
+    fileName: 'TARGET (ID-tgt)_file.json',
+    step: 'Post-Editing (PE) 1',
+    role: 'Corrector',
+  });
+
+  it('C1b: returns acceptAvailable=false when the target menu shows Finish-task, even when another row has Accept-task in the DOM', async () => {
+    await page.setContent(
+      xtmActivePage(
+        [
+          // Non-target row: claimable (Accept-task in DOM) — must NOT affect target's result.
+          xtmMenuRow('other111', 'accept', {
+            file: 'OTHER (ID-other111)_file.json',
+            step: 'Post-Editing (PE) 1',
+            role: 'Corrector',
+          }),
+          // Target row: owned (Finish-task) — the probe must return false for this key.
+          xtmMenuRow('tgt222', 'finish', {
+            file: targetRaw.fileName,
+            step: targetRaw.step ?? '',
+            role: targetRaw.role ?? '',
+          }),
+        ],
+        { total: 2 },
+      ),
+    );
+
+    const targetKey = computeXtmJobKey(targetRaw);
+    const result = await readAcceptAvailability(page, page, new Set([targetKey]));
+
+    // The probe must resolve the target key and return false (owned — not claimable).
+    // Pre-fix (page-level query) this returned true because the other row's Accept-task
+    // item was present anywhere on the page. Post-fix (scoped to open menu) it returns
+    // false — only the TARGET row's open menu items are visible to the count.
+    expect(result.has(targetKey)).toBe(true);
+    expect(result.get(targetKey)).toBe(false);
   });
 });
