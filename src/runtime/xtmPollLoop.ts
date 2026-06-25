@@ -94,11 +94,14 @@ export class XtmPollLoop {
       logger,
       {
         onDead: (eventId) => {
-          // Daily report delivery failure goes to its own alert (team channel only —
-          // must NOT page on-call). All other dead rows raise the generic outbox_dead alert.
+          // Branch on CHANNEL (not event-id prefix) so the team-page invariant holds
+          // even if new team-channel event types are added in future.
+          // Team-channel delivery failures NEVER page on-call (Constitution IV); they
+          // surface via this alert only. Today the only team row is the daily report.
+          // A null/unknown channel (null !== 'team' → true) pages — fail-loud safe default.
           const ch = this.outbox.getChannelByEventId(eventId);
-          if (ch === 'team' && eventId.startsWith('daily:')) {
-            const date = eventId.slice('daily:'.length);
+          if (ch === 'team') {
+            const date = eventId.startsWith('daily:') ? eventId.slice('daily:'.length) : eventId;
             raiseAlert(db, this.outbox, 'daily_report_dead', this.clock.nowIso(), date);
           } else {
             raiseAlert(
@@ -108,10 +111,7 @@ export class XtmPollLoop {
               this.clock.nowIso(),
               'outbox row exceeded retry limit',
             );
-          }
-          // Covers transient-exhausted, malformed, and 400-payload-rejected drops.
-          // A null/unknown channel (null !== 'team' → true) intentionally pages — fail-loud safe default.
-          if (ch !== 'team') {
+            // Covers transient-exhausted, malformed, and 400-payload-rejected drops.
             this.nonTeamFailureThisFlush = true;
           }
         },
