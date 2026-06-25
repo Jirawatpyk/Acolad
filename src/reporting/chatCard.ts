@@ -5,14 +5,11 @@
  * - Enforces Google Chat's 32 KB hard cap via a SIZE GUARD loop that drops
  *   trailing row-widgets until the serialized card fits under MAX_BYTES
  *   (30 000, a ~6% safety margin).
- * - The "…and N more" overflow marker is inserted AFTER the MAX_ROWS cap but
- *   BEFORE the size guard runs. If the size guard must drop widgets, it drops
- *   row widgets (from the tail) and then re-evaluates. The overflow marker
- *   itself is only re-inserted at the end if any rows were dropped by the size
- *   guard (it reflects the *original* overflow, not the guard's further drops,
- *   because the guard is a last-resort defence — in practice the 120-char
- *   truncation keeps values small enough that the guard rarely fires on ≤20
- *   rows of normal data).
+ * - The "…and N more" overflow marker reflects the TOTAL number of hidden rows
+ *   after both the MAX_ROWS cap and the size guard have run. The size guard
+ *   recomputes N as `originalCount − renderedRowCount`, so N is always
+ *   truthful: it counts every row not shown, whether dropped by the 20-row cap
+ *   or by the size guard. The marker is omitted when no rows are hidden.
  */
 
 const MAX_ROWS = 20;
@@ -149,6 +146,19 @@ export function buildCard(o: BuildCardOptions): { cardsV2: unknown[] } {
     // How many rows are now hidden in total?
     const totalDropped = originalCount - rowWidgets.length;
     result = assembleCard(rowWidgets, totalDropped > 0 ? totalDropped : 0);
+  }
+
+  // Terminal degraded path: if the card is STILL over the limit even with zero
+  // row-widgets (e.g. a pathologically huge header), return a visibly degraded
+  // card rather than silently returning an oversized payload. Keeps header +
+  // button section; row section becomes a single warning widget.
+  if (JSON.stringify(result).length >= MAX_BYTES) {
+    const degradedRowSection: Section = {
+      widgets: [{ decoratedText: { text: '⚠️ Content too large to display' } }],
+    };
+    const sections: Section[] = [degradedRowSection, ...(buttonSection ? [buttonSection] : [])];
+    const entry: CardEntry = { cardId: o.cardId, card: { header, sections } };
+    result = { cardsV2: [entry] };
   }
 
   return result;
