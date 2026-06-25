@@ -317,3 +317,213 @@ describe('XtmPollLoop — daily report', () => {
     expect(rows).toHaveLength(0); // nothing enqueued before 09:00
   });
 });
+
+// ---------------------------------------------------------------------------
+// Stuck-gate isolation: team-channel dead rows must NOT page on-call (Finding 1/2)
+// ---------------------------------------------------------------------------
+
+import { Outbox } from '../../src/state/outbox.js';
+
+describe('XtmPollLoop — heartbeat stuck gate excludes team channel', () => {
+  /**
+   * Helper: builds a loop with a sender that always fails transiently, then seeds
+   * a pre-dead outbox row for the given channel so the NEXT runOnce sees it via
+   * countDeadExcludingChannel (past-dead path). This covers the "dead row already
+   * in DB" case; the freshly-dead-this-flush path is covered by the transient-sender
+   * tests below.
+   */
+  function seedDeadRow(
+    outbox: Outbox,
+    eventId: string,
+    channel: 'team' | 'chat',
+    nowIso: string,
+  ): void {
+    // Enqueue then mark dead directly via SQL so we bypass the retry cap
+    outbox.enqueue(eventId, JSON.stringify({ text: 'test' }), nowIso, channel);
+    // Force status=dead via recordFailure exhaustion simulation — just update directly
+    const loopDb = (outbox as unknown as { db: import('../../src/state/db.js').DB }).db;
+    loopDb.prepare("UPDATE outbox SET status = 'dead' WHERE event_id = ?").run(eventId);
+  }
+
+  it('a dead team-channel row does NOT call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient(); // empty snapshot, no jobs
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: okChat,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pre-dead 'team' row directly (simulates daily report delivery failure)
+    const outbox = new Outbox(db, 10, 6);
+    seedDeadRow(outbox, 'daily:2026-06-24', 'team', NOW);
+
+    await loop.runOnce();
+
+    // The team dead row must NOT trigger paging
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+  });
+
+  it('a dead chat-channel row DOES call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: okChat,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pre-dead 'chat' row (simulates a failed job notification)
+    const outbox = new Outbox(db, 10, 6);
+    seedDeadRow(outbox, 'job:some-key:first_seen', 'chat', NOW);
+
+    await loop.runOnce();
+
+    // A dead chat row MUST page on-call
+    expect(heartbeat.fail).toHaveBeenCalled();
+    expect(heartbeat.ok).not.toHaveBeenCalled();
+  });
+
+  it('a freshly-dead team-channel row (exhausts retries this flush) does NOT call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that always returns transient so the row exhausts its retry cap this flush
+    const failingTeamSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'transient';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'transient', status: 503 };
+      },
+    };
+
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ OUTBOX_RETRY_CAP: 1, OUTBOX_DEAD_AFTER_HOURS: 6 }),
+      noopLogger,
+      clock,
+      {
+        chatSender: okChat,
+        teamChatSender: failingTeamSender,
+        sheetSender: new CapturingSheet(),
+        heartbeat,
+      },
+    );
+
+    // Seed a pending 'team' row — it will exhaust retries (cap=1) in this flush
+    const outbox = new Outbox(db, 1, 6);
+    outbox.enqueue('daily:2026-06-19', JSON.stringify({ text: 'daily' }), NOW, 'team');
+
+    await loop.runOnce();
+
+    // Even though the team row just died this flush, it must NOT page on-call
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+  });
+
+  it('a freshly-dead chat-channel row (exhausts retries this flush) DOES call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that always fails — will exhaust retry cap = 1 for chat
+    const failingChatSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'transient';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'transient', status: 503 };
+      },
+    };
+
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ OUTBOX_RETRY_CAP: 1, OUTBOX_DEAD_AFTER_HOURS: 6 }),
+      noopLogger,
+      clock,
+      { chatSender: failingChatSender, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    // Seed a pending 'chat' row — will die this flush
+    const outbox = new Outbox(db, 1, 6);
+    outbox.enqueue('job:some-key:first_seen', JSON.stringify({ text: 'job found' }), NOW, 'chat');
+
+    await loop.runOnce();
+
+    // A freshly-dead chat row MUST page on-call
+    expect(heartbeat.fail).toHaveBeenCalled();
+    expect(heartbeat.ok).not.toHaveBeenCalled();
+  });
+
+  it('a permanent-failure team-channel row does NOT call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that returns permanent (webhook revoked) for the team channel
+    const permanentTeamSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'permanent';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'permanent', status: 403 };
+      },
+    };
+
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: okChat,
+      teamChatSender: permanentTeamSender,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pending 'team' row — will get a permanent failure this flush (but stays pending)
+    const outbox = new Outbox(db, 10, 6);
+    outbox.enqueue('daily:2026-06-19', JSON.stringify({ cardsV2: [{}] }), NOW, 'team');
+
+    await loop.runOnce();
+
+    // A permanent-failure team row must NOT page on-call
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+  });
+
+  it('a permanent-failure chat-channel row DOES call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that returns permanent (webhook revoked) for the chat channel
+    const permanentChatSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'permanent';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'permanent', status: 403 };
+      },
+    };
+
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: permanentChatSender,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pending 'chat' row — will get a permanent failure this flush
+    const outbox = new Outbox(db, 10, 6);
+    outbox.enqueue('job:some-key:first_seen', JSON.stringify({ cardsV2: [{}] }), NOW, 'chat');
+
+    await loop.runOnce();
+
+    // A permanent-failure chat row MUST page on-call
+    expect(heartbeat.fail).toHaveBeenCalled();
+    expect(heartbeat.ok).not.toHaveBeenCalled();
+  });
+});

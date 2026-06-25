@@ -179,4 +179,14 @@ describe('buildDailyReportCard', () => {
     // should not throw
     expect(() => buildDailyReportCard([j], NOW_MS, XTM_URL)).not.toThrow();
   });
+
+  it('null dueDate and null dueRaw renders "due —" (not "due " blank)', () => {
+    const j = makeJob({ dueDate: null, dueRaw: null });
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const entry = firstEntry(card);
+    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    // Must show dash placeholder, not a trailing blank after "due "
+    expect(widget.decoratedText?.text).toContain('due —');
+    expect(widget.decoratedText?.text).not.toMatch(/due\s{2,}/); // no double-space "due  "
+  });
 });

@@ -133,4 +133,17 @@ export class Outbox {
       .get(channel) as { n: number };
     return row.n;
   }
+
+  /**
+   * Returns the channel of a row by its event_id, or null if not found.
+   * Used by the poll loop's onPermanent hook to determine whether a permanently-
+   * failing row belongs to the 'team' channel (daily report) so it can be excluded
+   * from the on-call paging gate.
+   */
+  getChannelByEventId(eventId: string): OutboxChannel | null {
+    const row = this.db
+      .prepare('SELECT channel FROM outbox WHERE event_id = ? LIMIT 1')
+      .get(eventId) as { channel: OutboxChannel } | undefined;
+    return row?.channel ?? null;
+  }
 }

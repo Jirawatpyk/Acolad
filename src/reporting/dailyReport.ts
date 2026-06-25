@@ -69,7 +69,7 @@ export function buildDailyReportCard(
     held.length > 0
       ? held.map((j) => ({
           label: dash(j.projectName),
-          value: `${dash(j.fileName)} · due ${formatReadableDate(j.dueDate ?? j.dueRaw ?? null)} · ${dash(j.words)}w`,
+          value: `${dash(j.fileName)} · due ${formatReadableDate(j.dueDate ?? j.dueRaw ?? null) || '—'} · ${dash(j.words)}w`,
         }))
       : [{ label: '—', value: 'No jobs in progress' }];
 
