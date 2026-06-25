@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   renderXtmNewJob,
+  renderXtmRelisted,
   renderXtmAccepted,
   renderXtmAcceptFailed,
   renderXtmColdStartSummary,
 } from '../../src/reporting/xtmNotifier.js';
 import type { XtmJobState } from '../../src/detection/types.js';
+
+const XTM_URL = 'https://xtm.example/inbox';
 
 const xstate = (over: Partial<XtmJobState> = {}): XtmJobState => ({
   jobKey: 'k',
@@ -31,67 +34,466 @@ const xstate = (over: Partial<XtmJobState> = {}): XtmJobState => ({
   ...over,
 });
 
-describe('XTM notifier (contracts/notifications.md, FR-019)', () => {
-  it('renders a new-job message with XTM fields + the status note', () => {
-    const msg = renderXtmNewJob(xstate(), '2026-06-19T03:00:00.000Z', 'เข้าเกณฑ์มาเลย์ (MS)');
-    expect(msg).toContain('🆕 งานใหม่บน XTM');
-    expect(msg).toContain('Acme Q3');
-    expect(msg).toContain('chapter-01.docx');
-    expect(msg).toContain('English (USA) → Malay (Malaysia)');
-    expect(msg).toContain('เข้าเกณฑ์มาเลย์ (MS)');
-    expect(msg).toMatch(/\+07:00/);
+// Helper: drill into cardsV2[0].card
+type AnyEntry = {
+  cardId: string;
+  card: {
+    header: { title: string; subtitle?: string };
+    sections: Array<{
+      widgets: Array<{
+        decoratedText?: { topLabel?: string; text: string };
+        buttonList?: { buttons: Array<{ text: string; onClick: { openLink: { url: string } } }> };
+      }>;
+    }>;
+  };
+};
+
+function entry(result: { cardsV2: unknown[] }): AnyEntry {
+  const e = result.cardsV2[0] as AnyEntry | undefined;
+  if (!e) throw new Error('cardsV2 is empty');
+  return e;
+}
+
+function rowTexts(result: { cardsV2: unknown[] }): string[] {
+  const e = entry(result);
+  return e.card.sections.flatMap((s) =>
+    s.widgets.flatMap((w) => (w.decoratedText ? [w.decoratedText.text] : [])),
+  );
+}
+
+function rowLabels(result: { cardsV2: unknown[] }): string[] {
+  const e = entry(result);
+  return e.card.sections.flatMap((s) =>
+    s.widgets.flatMap((w) => (w.decoratedText?.topLabel ? [w.decoratedText.topLabel] : [])),
+  );
+}
+
+function buttonUrl(result: { cardsV2: unknown[] }): string | undefined {
+  const e = entry(result);
+  for (const s of e.card.sections) {
+    for (const w of s.widgets) {
+      if (w.buttonList) return w.buttonList.buttons[0]?.onClick.openLink.url;
+    }
+  }
+  return undefined;
+}
+
+describe('XTM notifier — English cardsV2 (FR-019)', () => {
+  // ---------------------------------------------------------------------------
+  // renderXtmNewJob
+  // ---------------------------------------------------------------------------
+  describe('renderXtmNewJob', () => {
+    it('returns { cardsV2 } with header title "🆕 New Job · XTM"', () => {
+      const result = renderXtmNewJob(
+        xstate(),
+        '2026-06-19T03:00:00.000Z',
+        'Malay (MS) — accepting',
+        XTM_URL,
+      );
+      expect(entry(result).card.header.title).toBe('🆕 New Job · XTM');
+    });
+
+    it('includes English row labels: Project, File, Language, Due, Words, Step, Status', () => {
+      const result = renderXtmNewJob(
+        xstate(),
+        '2026-06-19T03:00:00.000Z',
+        'Malay (MS) — accepting',
+        XTM_URL,
+      );
+      const labels = rowLabels(result);
+      expect(labels.some((l) => l.includes('Project'))).toBe(true);
+      expect(labels.some((l) => l.includes('File'))).toBe(true);
+      expect(labels.some((l) => l.includes('Language'))).toBe(true);
+      expect(labels.some((l) => l.includes('Due'))).toBe(true);
+      expect(labels.some((l) => l.includes('Words'))).toBe(true);
+      expect(labels.some((l) => l.includes('Step'))).toBe(true);
+      expect(labels.some((l) => l.includes('Status'))).toBe(true);
+    });
+
+    it('includes project name, file name, language pair in row values', () => {
+      const result = renderXtmNewJob(
+        xstate(),
+        '2026-06-19T03:00:00.000Z',
+        'Malay (MS) — accepting',
+        XTM_URL,
+      );
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t.includes('Acme Q3'))).toBe(true);
+      expect(texts.some((t) => t.includes('chapter-01.docx'))).toBe(true);
+      expect(texts.some((t) => t.includes('English (USA) → Malay (Malaysia)'))).toBe(true);
+    });
+
+    it('renders dueRaw via formatReadableDate (DD/MM/YYYY HH:mm)', () => {
+      // dueRaw = '18-Jun-2026 19:25' — parseable by Date.parse; Bangkok shift keeps 19:25 since it's local
+      const result = renderXtmNewJob(
+        xstate(),
+        '2026-06-19T03:00:00.000Z',
+        'Malay (MS) — accepting',
+        XTM_URL,
+      );
+      const texts = rowTexts(result);
+      // formatReadableDate('18-Jun-2026 19:25') = '18/06/2026 19:25'
+      expect(texts.some((t) => t.includes('18/06/2026'))).toBe(true);
+    });
+
+    it('renders ISO dueDate via formatReadableDate as Bangkok DD/MM/YYYY HH:mm', () => {
+      const result = renderXtmNewJob(
+        xstate({ dueDate: '2026-06-18T12:25:00.000Z', dueRaw: null }),
+        '2026-06-19T03:00:00.000Z',
+        'Malay (MS) — accepting',
+        XTM_URL,
+      );
+      const texts = rowTexts(result);
+      // 2026-06-18T12:25Z → Bangkok = 19:25 → 18/06/2026 19:25
+      expect(texts.some((t) => t.includes('18/06/2026 19:25'))).toBe(true);
+    });
+
+    it('passes the statusNote as the Status row value', () => {
+      const result = renderXtmNewJob(
+        xstate(),
+        '2026-06-19T03:00:00.000Z',
+        'Not Malay — logged only',
+        XTM_URL,
+      );
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t.includes('Not Malay — logged only'))).toBe(true);
+    });
+
+    it('renders null words/step as — (dash)', () => {
+      const result = renderXtmNewJob(
+        xstate({ words: null, step: null }),
+        '2026-06-19T03:00:00.000Z',
+        'Not Malay — logged only',
+        XTM_URL,
+      );
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t.includes('—'))).toBe(true);
+    });
+
+    it('button onClick.openLink.url equals the passed xtmUrl', () => {
+      const result = renderXtmNewJob(
+        xstate(),
+        '2026-06-19T03:00:00.000Z',
+        'Malay (MS) — accepting',
+        XTM_URL,
+      );
+      expect(buttonUrl(result)).toBe(XTM_URL);
+    });
+
+    it('cardId starts with "new-"', () => {
+      const result = renderXtmNewJob(
+        xstate(),
+        '2026-06-19T03:00:00.000Z',
+        'Malay (MS) — accepting',
+        XTM_URL,
+      );
+      expect(entry(result).cardId).toMatch(/^new-/);
+    });
   });
 
-  it('renders a non-Malay new-job with a dash for unknown fields', () => {
-    const msg = renderXtmNewJob(
-      xstate({ targetLang: 'Thai', words: null, step: null }),
-      '2026-06-19T03:00:00.000Z',
-      'ไม่ใช่มาเลย์ — บันทึกไว้เฉย ๆ',
-    );
-    expect(msg).toContain('→ Thai');
-    expect(msg).toContain('—'); // dash for null words/step
+  // ---------------------------------------------------------------------------
+  // renderXtmRelisted
+  // ---------------------------------------------------------------------------
+  describe('renderXtmRelisted', () => {
+    it('returns header title "🔁 Job Relisted · XTM"', () => {
+      const result = renderXtmRelisted(
+        xstate(),
+        '2026-06-10T03:00:00.000Z',
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      expect(entry(result).card.header.title).toBe('🔁 Job Relisted · XTM');
+    });
+
+    it('headerSubtitle includes "First seen" + formatted firstSeenAt when provided', () => {
+      const result = renderXtmRelisted(
+        xstate(),
+        '2026-06-10T03:00:00.000Z',
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      // 2026-06-10T03:00Z → Bangkok = 10:00 → 10/06/2026 10:00
+      expect(entry(result).card.header.subtitle).toMatch(/First seen/);
+      expect(entry(result).card.header.subtitle).toContain('10/06/2026 10:00');
+    });
+
+    it('headerSubtitle is absent when firstSeenAt is undefined', () => {
+      const result = renderXtmRelisted(xstate(), undefined, '2026-06-19T03:00:00.000Z', XTM_URL);
+      expect(entry(result).card.header.subtitle).toBeUndefined();
+    });
+
+    it('includes English row labels: Project, File, Language, Due, Words, Step', () => {
+      const result = renderXtmRelisted(xstate(), undefined, '2026-06-19T03:00:00.000Z', XTM_URL);
+      const labels = rowLabels(result);
+      expect(labels.some((l) => l.includes('Project'))).toBe(true);
+      expect(labels.some((l) => l.includes('File'))).toBe(true);
+      expect(labels.some((l) => l.includes('Language'))).toBe(true);
+      expect(labels.some((l) => l.includes('Due'))).toBe(true);
+      expect(labels.some((l) => l.includes('Words'))).toBe(true);
+      expect(labels.some((l) => l.includes('Step'))).toBe(true);
+    });
+
+    it('button onClick.openLink.url equals the passed xtmUrl', () => {
+      const result = renderXtmRelisted(xstate(), undefined, '2026-06-19T03:00:00.000Z', XTM_URL);
+      expect(buttonUrl(result)).toBe(XTM_URL);
+    });
+
+    it('cardId starts with "relisted-"', () => {
+      const result = renderXtmRelisted(xstate(), undefined, '2026-06-19T03:00:00.000Z', XTM_URL);
+      expect(entry(result).cardId).toMatch(/^relisted-/);
+    });
   });
 
-  it('renders an accepted message (✅) with the accepted-at time', () => {
-    const msg = renderXtmAccepted(xstate({ acceptedAt: '2026-06-19T03:00:05.000Z' }));
-    expect(msg).toContain('✅ รับงานแล้ว');
-    expect(msg).toContain('chapter-01.docx');
-    expect(msg).toMatch(/10:00/); // 03:00 UTC -> 10:00 +07:00
+  // ---------------------------------------------------------------------------
+  // renderXtmAccepted
+  // ---------------------------------------------------------------------------
+  describe('renderXtmAccepted', () => {
+    it('returns header title "✅ Job Accepted · XTM"', () => {
+      const result = renderXtmAccepted(xstate({ acceptedAt: '2026-06-19T03:00:05.000Z' }), XTM_URL);
+      expect(entry(result).card.header.title).toBe('✅ Job Accepted · XTM');
+    });
+
+    it('includes English row labels: Project, File, Language, Due, Words, Accepted', () => {
+      const result = renderXtmAccepted(xstate({ acceptedAt: '2026-06-19T03:00:05.000Z' }), XTM_URL);
+      const labels = rowLabels(result);
+      expect(labels.some((l) => l.includes('Project'))).toBe(true);
+      expect(labels.some((l) => l.includes('File'))).toBe(true);
+      expect(labels.some((l) => l.includes('Language'))).toBe(true);
+      expect(labels.some((l) => l.includes('Due'))).toBe(true);
+      expect(labels.some((l) => l.includes('Words'))).toBe(true);
+      expect(labels.some((l) => l.includes('Accepted'))).toBe(true);
+    });
+
+    it('renders acceptedAt via formatReadableDate as Bangkok HH:mm', () => {
+      const result = renderXtmAccepted(xstate({ acceptedAt: '2026-06-19T03:00:05.000Z' }), XTM_URL);
+      // 03:00 UTC → 10:00 Bangkok
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t.includes('10:00'))).toBe(true);
+    });
+
+    it('renders — when acceptedAt is null', () => {
+      const result = renderXtmAccepted(xstate({ acceptedAt: null }), XTM_URL);
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t === '—')).toBe(true);
+    });
+
+    it('button onClick.openLink.url equals the passed xtmUrl', () => {
+      const result = renderXtmAccepted(xstate({ acceptedAt: null }), XTM_URL);
+      expect(buttonUrl(result)).toBe(XTM_URL);
+    });
+
+    it('cardId starts with "accepted-"', () => {
+      const result = renderXtmAccepted(xstate({ acceptedAt: null }), XTM_URL);
+      expect(entry(result).cardId).toMatch(/^accepted-/);
+    });
   });
 
-  it('renders a snatched (missing) message that needs no human action', () => {
-    const msg = renderXtmAcceptFailed(xstate(), 'missing', null, '2026-06-19T03:00:00.000Z');
-    expect(msg).toContain('⚠️ กดรับไม่สำเร็จ');
-    expect(msg).toContain('โดนแย่ง');
-    expect(msg).toMatch(/ไม่จำเป็น/);
+  // ---------------------------------------------------------------------------
+  // renderXtmAcceptFailed
+  // ---------------------------------------------------------------------------
+  describe('renderXtmAcceptFailed', () => {
+    it('returns header title "⚠️ Accept Failed · XTM" when outcome=failed', () => {
+      const result = renderXtmAcceptFailed(
+        xstate(),
+        'failed',
+        'unconfirmed',
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      expect(entry(result).card.header.title).toBe('⚠️ Accept Failed · XTM');
+    });
+
+    it('returns header title "⚠️ Job Snatched · XTM" when outcome=missing', () => {
+      const result = renderXtmAcceptFailed(
+        xstate(),
+        'missing',
+        null,
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      expect(entry(result).card.header.title).toBe('⚠️ Job Snatched · XTM');
+    });
+
+    it('Cause row for failed = "clicked but could not confirm — <reason>"', () => {
+      const result = renderXtmAcceptFailed(
+        xstate(),
+        'failed',
+        'timeout',
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t.includes('clicked but could not confirm — timeout'))).toBe(true);
+    });
+
+    it('Cause row for failed with null reason = "clicked but could not confirm — —"', () => {
+      const result = renderXtmAcceptFailed(
+        xstate(),
+        'failed',
+        null,
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t.includes('clicked but could not confirm — —'))).toBe(true);
+    });
+
+    it('Cause row for missing = "snatched before we could accept"', () => {
+      const result = renderXtmAcceptFailed(
+        xstate(),
+        'missing',
+        null,
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t.includes('snatched before we could accept'))).toBe(true);
+    });
+
+    it('Action row for failed = "Yes — check XTM"', () => {
+      const result = renderXtmAcceptFailed(
+        xstate(),
+        'failed',
+        'unconfirmed',
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t.includes('Yes — check XTM'))).toBe(true);
+    });
+
+    it('Action row for missing = "No (job already gone)"', () => {
+      const result = renderXtmAcceptFailed(
+        xstate(),
+        'missing',
+        null,
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t.includes('No (job already gone)'))).toBe(true);
+    });
+
+    it('includes English row labels: Project, File, Language, Cause, Action', () => {
+      const result = renderXtmAcceptFailed(
+        xstate(),
+        'failed',
+        null,
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      const labels = rowLabels(result);
+      expect(labels.some((l) => l.includes('Project'))).toBe(true);
+      expect(labels.some((l) => l.includes('File'))).toBe(true);
+      expect(labels.some((l) => l.includes('Language'))).toBe(true);
+      expect(labels.some((l) => l.includes('Cause'))).toBe(true);
+      expect(labels.some((l) => l.includes('Action'))).toBe(true);
+    });
+
+    it('button onClick.openLink.url equals the passed xtmUrl', () => {
+      const result = renderXtmAcceptFailed(
+        xstate(),
+        'failed',
+        null,
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      expect(buttonUrl(result)).toBe(XTM_URL);
+    });
+
+    it('cardId starts with "acceptfailed-"', () => {
+      const result = renderXtmAcceptFailed(
+        xstate(),
+        'failed',
+        null,
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      expect(entry(result).cardId).toMatch(/^acceptfailed-/);
+    });
   });
 
-  it('renders an accept-failed message that DOES need human action + reason', () => {
-    const msg = renderXtmAcceptFailed(
-      xstate(),
-      'failed',
-      'ยืนยันสำเร็จไม่ได้',
-      '2026-06-19T03:00:00.000Z',
-    );
-    expect(msg).toContain('⚠️ กดรับไม่สำเร็จ');
-    expect(msg).toContain('ยืนยันสำเร็จไม่ได้');
-    expect(msg).toMatch(/ใช่/);
-  });
+  // ---------------------------------------------------------------------------
+  // renderXtmColdStartSummary
+  // ---------------------------------------------------------------------------
+  describe('renderXtmColdStartSummary', () => {
+    it('returns header title "📋 XTM Monitor Started"', () => {
+      const result = renderXtmColdStartSummary(
+        [xstate({ jobKey: 'a' }), xstate({ jobKey: 'b', eligible: false })],
+        '2026-06-19T03:00:00.000Z',
+        'cycle-1',
+        XTM_URL,
+      );
+      expect(entry(result).card.header.title).toBe('📋 XTM Monitor Started');
+    });
 
-  it('renders a cold-start summary with the Malay-eligible count', () => {
-    const jobs = [
-      xstate({ jobKey: 'a', eligible: true }),
-      xstate({ jobKey: 'b', eligible: false, targetLang: 'Thai' }),
-      xstate({ jobKey: 'c', eligible: true }),
-    ];
-    const msg = renderXtmColdStartSummary(jobs, '2026-06-19T03:00:00.000Z');
-    expect(msg).toContain('📋');
-    expect(msg).toContain('3'); // total
-    expect(msg).toMatch(/มาเลย์.*2|2.*มาเลย์/); // 2 eligible
-  });
+    it('headerSubtitle shows job count and eligible count', () => {
+      const jobs = [
+        xstate({ jobKey: 'a', eligible: true }),
+        xstate({ jobKey: 'b', eligible: false, targetLang: 'Thai' }),
+        xstate({ jobKey: 'c', eligible: true }),
+      ];
+      const result = renderXtmColdStartSummary(
+        jobs,
+        '2026-06-19T03:00:00.000Z',
+        'cycle-1',
+        XTM_URL,
+      );
+      const subtitle = entry(result).card.header.subtitle ?? '';
+      expect(subtitle).toContain('3');
+      expect(subtitle).toMatch(/Malay-eligible.*2|2.*Malay-eligible/);
+    });
 
-  it('renders the empty cold-start summary', () => {
-    const msg = renderXtmColdStartSummary([], '2026-06-19T03:00:00.000Z');
-    expect(msg).toContain('📋');
+    it('one row per job with "projectName / fileName" as label and lang/due as value', () => {
+      const jobs = [
+        xstate({ jobKey: 'a', fileName: 'f1.docx' }),
+        xstate({ jobKey: 'b', fileName: 'f2.docx', targetLang: 'Thai' }),
+      ];
+      const result = renderXtmColdStartSummary(
+        jobs,
+        '2026-06-19T03:00:00.000Z',
+        'cycle-1',
+        XTM_URL,
+      );
+      const e = entry(result);
+      const labels = rowLabels(result);
+      expect(labels.some((l) => l.includes('f1.docx'))).toBe(true);
+      expect(labels.some((l) => l.includes('f2.docx'))).toBe(true);
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t.includes('English (USA) → Malay (Malaysia)'))).toBe(true);
+      expect(e.card.header.title).toBe('📋 XTM Monitor Started');
+    });
+
+    it('renders dueDate/dueRaw via formatReadableDate in row value', () => {
+      const jobs = [xstate({ jobKey: 'a', dueDate: '2026-06-18T12:25:00.000Z', dueRaw: null })];
+      const result = renderXtmColdStartSummary(
+        jobs,
+        '2026-06-19T03:00:00.000Z',
+        'cycle-1',
+        XTM_URL,
+      );
+      const texts = rowTexts(result);
+      expect(texts.some((t) => t.includes('18/06/2026 19:25'))).toBe(true);
+    });
+
+    it('0 jobs: subtitle "No open jobs in Active — monitoring 24/7" and no job rows', () => {
+      const result = renderXtmColdStartSummary([], '2026-06-19T03:00:00.000Z', 'cycle-1', XTM_URL);
+      expect(entry(result).card.header.subtitle).toContain('No open jobs in Active');
+    });
+
+    it('button onClick.openLink.url equals the passed xtmUrl', () => {
+      const result = renderXtmColdStartSummary(
+        [xstate({ jobKey: 'a' })],
+        '2026-06-19T03:00:00.000Z',
+        'cycle-1',
+        XTM_URL,
+      );
+      expect(buttonUrl(result)).toBe(XTM_URL);
+    });
+
+    it('cardId starts with "coldstart-"', () => {
+      const result = renderXtmColdStartSummary([], '2026-06-19T03:00:00.000Z', 'cycle-1', XTM_URL);
+      expect(entry(result).cardId).toMatch(/^coldstart-/);
+    });
   });
 });

@@ -21,6 +21,7 @@ const cfg = (over: Partial<AppConfig> = {}): AppConfig =>
     ACCEPT_MAX_PER_CYCLE: 0,
     OUTBOX_RETRY_CAP: 10,
     OUTBOX_DEAD_AFTER_HOURS: 6,
+    XTM_ACOLAD_OFFERS_URL: 'https://xtm.example/inbox',
     ...over,
   }) as AppConfig;
 
@@ -324,14 +325,26 @@ describe('XtmPollCycle (US1 — detect, accept, record)', () => {
   });
 });
 
-function outboxPayloads(
-  channel: 'chat' | 'sheets',
-): Array<{ row?: { status: string }; text?: string }> {
+function outboxPayloads(channel: 'chat' | 'sheets'): Array<{
+  row?: { status: string };
+  cardsV2?: Array<{ cardId: string; card: { header: { title: string } } }>;
+}> {
   return (
     db.prepare('SELECT payload_json FROM outbox WHERE channel = ?').all(channel) as {
       payload_json: string;
     }[]
-  ).map((r) => JSON.parse(r.payload_json) as { row?: { status: string }; text?: string });
+  ).map(
+    (r) =>
+      JSON.parse(r.payload_json) as {
+        row?: { status: string };
+        cardsV2?: Array<{ cardId: string; card: { header: { title: string } } }>;
+      },
+  );
+}
+
+/** Returns true if any chat payload card header title contains the given substring. */
+function chatHasTitle(sub: string): boolean {
+  return outboxPayloads('chat').some((c) => c.cardsV2?.[0]?.card.header.title.includes(sub));
 }
 
 describe('XtmPollCycle Closed/Removed (FR-014, T042)', () => {
@@ -368,7 +381,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     const sheets = outboxPayloads('sheets');
     expect(sheets).toHaveLength(1);
     expect(sheets[0]?.row?.status).toBe('Accepted');
-    expect(outboxPayloads('chat').some((c) => c.text?.includes('✅'))).toBe(true);
+    expect(chatHasTitle('✅')).toBe(true);
   });
 
   it('enqueues a Skipped sheets row + a 🆕 chat for a non-Malay job', async () => {
@@ -376,7 +389,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     new MetaStore(db).markBaselineDone();
     await new XtmPollCycle(db, cfg(), new StubAcceptor()).run(snap([xraw({ targetLang: 'Thai' })]));
     expect(outboxPayloads('sheets')[0]?.row?.status).toBe('Skipped');
-    expect(outboxPayloads('chat').some((c) => c.text?.includes('🆕'))).toBe(true);
+    expect(chatHasTitle('🆕')).toBe(true);
   });
 
   it('posts ONE cold-start summary (not per-job chat) during baseline, logs all to Sheets', async () => {
@@ -386,7 +399,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     );
     const chat = outboxPayloads('chat');
     expect(chat).toHaveLength(1);
-    expect(chat[0]?.text).toContain('📋');
+    expect(chat[0]?.cardsV2?.[0]?.card.header.title).toContain('📋');
     expect(outboxPayloads('sheets')).toHaveLength(2);
   });
 
@@ -397,7 +410,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), acc).run(snap([xraw()], 'c1'));
     await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: true }), acc).run(snap([xraw()], 'c2'));
     expect(outboxPayloads('sheets').at(-1)?.row?.status).toBe('Accepted'); // not silently accepted
-    expect(outboxPayloads('chat').some((c) => c.text?.includes('✅'))).toBe(true);
+    expect(chatHasTitle('✅')).toBe(true);
   });
 
   it('a no-event robustness accept that FAILS raises an alert + ⚠️ chat (never silent)', async () => {
@@ -413,7 +426,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
       .all(`accept_failed:${key}`);
     expect(alerts.length).toBeGreaterThanOrEqual(1); // failed accept with no appearance event is NOT silent
     expect(outboxPayloads('sheets').at(-1)?.row?.status).toBe('Accept failed');
-    expect(outboxPayloads('chat').some((c) => c.text?.includes('⚠️'))).toBe(true);
+    expect(chatHasTitle('⚠️')).toBe(true);
   });
 
   it('enqueues a New sheets row when auto-accept is disabled', async () => {
@@ -433,7 +446,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     await cycle.run(snap([], 'c2')); // absent (flicker)
     await cycle.run(snap([], 'c3')); // absent twice → missing
     await cycle.run(snap([xraw({ targetLang: 'Thai' })], 'c4')); // returns → relisted
-    expect(outboxPayloads('chat').some((c) => c.text?.includes('🔁'))).toBe(true);
+    expect(chatHasTitle('🔁')).toBe(true);
   });
 });
 
