@@ -203,6 +203,29 @@ describe('Dispatcher — {cardsV2} payload', () => {
     expect(summary.dead).toBe(0);
     expect(onPermanent).toHaveBeenCalledWith('ev-403');
   });
+
+  it('an empty cardsV2 array is malformed — sender is never called, row goes dead', async () => {
+    const ob = new Outbox(db, 10, 6);
+    ob.enqueue('ev-empty-card', JSON.stringify({ cardsV2: [] }), NOW, 'chat');
+    const sender = new StubSender('ok');
+    const onDead = vi.fn();
+    const summary = await makeDisp(ob, sender, { onDead }).flush(NOW, Date.parse(NOW));
+    expect(sender.calls).toBe(0);
+    expect(summary.dead).toBe(1);
+    expect(summary.sent).toBe(0);
+    expect(onDead).toHaveBeenCalledWith('ev-empty-card');
+  });
+
+  it('a 400 on a {text} row treats it as dead (payload rejected), not permanent', async () => {
+    const ob = new Outbox(db, 10, 6);
+    ob.enqueue('ev-text-400', JSON.stringify({ text: 'hi' }), NOW);
+    const sender = new StubSender('permanent', 400);
+    const onDead = vi.fn();
+    const summary = await makeDisp(ob, sender, { onDead }).flush(NOW, Date.parse(NOW));
+    expect(summary.dead).toBe(1);
+    expect(summary.permanentFailures).toBe(0);
+    expect(onDead).toHaveBeenCalledWith('ev-text-400');
+  });
 });
 
 describe('Dispatcher — team channel', () => {

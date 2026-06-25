@@ -200,7 +200,7 @@ export class Dispatcher {
     let payload: ChatPayload | undefined;
     try {
       const parsed = JSON.parse(row.payload_json) as Record<string, unknown>;
-      if (Array.isArray(parsed['cardsV2'])) {
+      if (Array.isArray(parsed['cardsV2']) && parsed['cardsV2'].length > 0) {
         payload = { cardsV2: parsed['cardsV2'] };
       } else if (typeof parsed['text'] === 'string' && parsed['text'] !== '') {
         payload = { text: parsed['text'] };
