@@ -356,6 +356,11 @@ export class XtmPollCycle {
         );
         if (card) {
           this.outbox.enqueue(`chat:${base}`, JSON.stringify(card), snapshot.capturedAt, 'chat');
+          // Also notify the team channel for accepted jobs (Task 9).
+          // Reuses the same card object — no rebuild. Fires ONLY on 'accepted'.
+          if (outcome?.outcome === 'accepted') {
+            this.outbox.enqueue(`team:${base}`, JSON.stringify(card), snapshot.capturedAt, 'team');
+          }
         }
       }
     };

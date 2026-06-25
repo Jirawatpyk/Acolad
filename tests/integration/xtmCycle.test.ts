@@ -448,6 +448,59 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     await cycle.run(snap([xraw({ targetLang: 'Thai' })], 'c4')); // returns → relisted
     expect(chatHasTitle('🔁')).toBe(true);
   });
+
+  it('accepted job enqueues BOTH a chat row AND a team row with the same card (Task 9)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone(); // past baseline → per-job chat fires
+    await new XtmPollCycle(db, cfg(), new StubAcceptor()).run(snap([xraw()]));
+
+    const rows = db
+      .prepare(
+        "SELECT event_id, channel, payload_json FROM outbox WHERE channel IN ('chat','team')",
+      )
+      .all() as { event_id: string; channel: string; payload_json: string }[];
+
+    const chatRow = rows.find((r) => r.channel === 'chat');
+    const teamRow = rows.find((r) => r.channel === 'team');
+
+    expect(chatRow, 'chat row must exist for accepted job').toBeDefined();
+    expect(teamRow, 'team row must exist for accepted job').toBeDefined();
+
+    // event_ids must be distinct (outbox dedup is (event_id, channel) unique)
+    expect(chatRow!.event_id).not.toBe(teamRow!.event_id);
+
+    // both carry the ✅ accepted card — payloads are byte-equal
+    expect(teamRow!.payload_json).toBe(chatRow!.payload_json);
+
+    // channels prefixed correctly
+    expect(chatRow!.event_id).toMatch(/^chat:/);
+    expect(teamRow!.event_id).toMatch(/^team:/);
+  });
+
+  it('non-accepted outcomes produce NO team row (only chat)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    // new job with accept disabled → lifecycleStatus = 'new', no accept outcome
+    await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), new StubAcceptor()).run(
+      snap([xraw()]),
+    );
+    const teamCount = (
+      db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE channel = 'team'").get() as { n: number }
+    ).n;
+    expect(teamCount).toBe(0);
+  });
+
+  it('accept_failed outcome produces NO team row', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const acc = new StubAcceptor();
+    acc.outcome = 'failed';
+    await new XtmPollCycle(db, cfg(), acc).run(snap([xraw()]));
+    const teamCount = (
+      db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE channel = 'team'").get() as { n: number }
+    ).n;
+    expect(teamCount).toBe(0);
+  });
 });
 
 describe('XtmPollCycle crash recovery (review #1/#2)', () => {
