@@ -222,6 +222,23 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
       expect(entry(result).card.header.subtitle).toBeUndefined();
     });
 
+    it('headerSubtitle is absent when firstSeenAt is empty string (truthy guard)', () => {
+      const result = renderXtmRelisted(xstate(), '', '2026-06-19T03:00:00.000Z', XTM_URL);
+      expect(entry(result).card.header.subtitle).toBeUndefined();
+    });
+
+    it('headerSubtitle includes formatted date when firstSeenAt is a real ISO timestamp', () => {
+      const result = renderXtmRelisted(
+        xstate(),
+        '2026-06-10T03:00:00.000Z',
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      // 2026-06-10T03:00Z → Bangkok +07:00 = 10:00 → 10/06/2026 10:00
+      expect(entry(result).card.header.subtitle).toMatch(/First seen/);
+      expect(entry(result).card.header.subtitle).toContain('10/06/2026 10:00');
+    });
+
     it('includes English row labels: Project, File, Language, Due, Words, Step', () => {
       const result = renderXtmRelisted(xstate(), undefined, '2026-06-19T03:00:00.000Z', XTM_URL);
       const labels = rowLabels(result);

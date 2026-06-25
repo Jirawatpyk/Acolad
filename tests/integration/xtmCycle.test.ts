@@ -413,7 +413,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     expect(chatHasTitle('✅')).toBe(true);
   });
 
-  it('a no-event robustness accept that FAILS raises an alert + ⚠️ chat (never silent)', async () => {
+  it('a no-event robustness accept that FAILS raises an alert + ⚠️ Accept Failed chat (never silent)', async () => {
     fresh();
     new MetaStore(db).markBaselineDone();
     const acc = new StubAcceptor();
@@ -426,7 +426,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
       .all(`accept_failed:${key}`);
     expect(alerts.length).toBeGreaterThanOrEqual(1); // failed accept with no appearance event is NOT silent
     expect(outboxPayloads('sheets').at(-1)?.row?.status).toBe('Accept failed');
-    expect(chatHasTitle('⚠️')).toBe(true);
+    expect(chatHasTitle('Accept Failed')).toBe(true); // distinct from 'Job Snatched' (both carry ⚠️)
   });
 
   it('enqueues a New sheets row when auto-accept is disabled', async () => {

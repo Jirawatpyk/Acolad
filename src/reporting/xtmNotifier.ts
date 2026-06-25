@@ -53,9 +53,7 @@ export function renderXtmRelisted(
   return buildCard({
     cardId: `relisted-${toCardId(job.jobKey)}`,
     headerTitle: '🔁 Job Relisted · XTM',
-    ...(firstSeenAt !== undefined
-      ? { headerSubtitle: `First seen ${formatReadableDate(firstSeenAt)}` }
-      : {}),
+    ...(firstSeenAt ? { headerSubtitle: `First seen ${formatReadableDate(firstSeenAt)}` } : {}),
     rows: [
       { label: 'Project', value: job.projectName ?? null },
       { label: 'File', value: job.fileName ?? null },
