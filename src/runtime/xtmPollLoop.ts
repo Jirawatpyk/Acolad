@@ -23,6 +23,7 @@ const PORTAL_DOWN_THRESHOLD_MS = 10 * 60_000;
 /** Collaborators injected for testing (default to production impls). */
 export interface XtmPollLoopDeps {
   chatSender?: ChatSender;
+  teamChatSender?: ChatSender;
   sheetSender?: SheetSender;
   heartbeat?: HeartbeatPinger;
 }
@@ -64,9 +65,15 @@ export class XtmPollLoop {
       );
     this.sheetSender = deps.sheetSender;
     const chatSender = deps.chatSender ?? new GoogleChatSender(cfg.GOOGLE_CHAT_WEBHOOK_SYSTEM);
+    const teamChatSender =
+      deps.teamChatSender ?? new GoogleChatSender(cfg.GOOGLE_CHAT_WEBHOOK_TEAM);
     this.dispatcher = new Dispatcher(
       this.outbox,
-      deps.sheetSender ? { chat: chatSender, sheet: deps.sheetSender } : { chat: chatSender },
+      {
+        chat: chatSender,
+        team: teamChatSender,
+        ...(deps.sheetSender ? { sheet: deps.sheetSender } : {}),
+      },
       logger,
       {
         onDead: () =>

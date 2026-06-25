@@ -46,6 +46,7 @@ const schema = z.object({
   ACCEPT_MAX_WORDS: z.coerce.number().int().min(0).default(0),
   ACCEPT_MAX_PER_CYCLE: z.coerce.number().int().min(0).default(0),
   GOOGLE_CHAT_WEBHOOK_SYSTEM: z.string().url(),
+  GOOGLE_CHAT_WEBHOOK_TEAM: z.string().url(),
   GOOGLE_CHAT_WEBHOOK_DAILY_REPORT: z.string().url().optional().or(z.literal('')),
   HEALTHCHECKS_PING_URL: z.string().url(),
   POLL_INTERVAL_MS: z.coerce.number().int().min(20_000).max(25_000).default(20_000),
@@ -84,6 +85,7 @@ export const SECRET_KEYS = [
   'XTM_ACOLAD_Username',
   'XTM_ACOLAD_Company',
   'GOOGLE_CHAT_WEBHOOK_SYSTEM',
+  'GOOGLE_CHAT_WEBHOOK_TEAM',
   'GOOGLE_CHAT_WEBHOOK_DAILY_REPORT',
   'HEALTHCHECKS_PING_URL',
 ] as const;
