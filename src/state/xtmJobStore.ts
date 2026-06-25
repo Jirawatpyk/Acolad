@@ -42,6 +42,13 @@ export class XtmJobStore {
     return map;
   }
 
+  listByLifecycle(status: XtmLifecycleStatus): XtmJobState[] {
+    const rows = this.db
+      .prepare("SELECT * FROM jobs WHERE lifecycle_status = ? AND file_name <> ''")
+      .all(status) as XtmJobRow[];
+    return rows.map(rowToState);
+  }
+
   /** Upsert by job_key (no duplicate rows, Constitution VII). Runs in one txn. */
   upsertMany(states: Iterable<XtmJobState>): void {
     const stmt = this.db.prepare(`

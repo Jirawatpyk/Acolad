@@ -110,4 +110,73 @@ describe('XtmJobStore', () => {
     ]);
     expect(store.loadAll().size).toBe(2);
   });
+
+  describe('listByLifecycle', () => {
+    it('returns only jobs with the requested lifecycle_status, correctly mapped', () => {
+      const store = freshStore();
+      store.upsertMany([
+        xstate({
+          jobKey: 'acc-1',
+          fileName: 'acc-1.docx',
+          projectName: 'Project Alpha',
+          targetLang: 'Malay (Malaysia)',
+          lifecycleStatus: 'accepted',
+          acceptStatus: 'accepted',
+          acceptedAt: NOW,
+          words: 200,
+        }),
+        xstate({
+          jobKey: 'acc-2',
+          fileName: 'acc-2.docx',
+          projectName: 'Project Beta',
+          lifecycleStatus: 'accepted',
+          acceptStatus: 'accepted',
+          acceptedAt: NOW,
+          words: 300,
+        }),
+        xstate({
+          jobKey: 'miss-1',
+          fileName: 'miss-1.docx',
+          lifecycleStatus: 'missing',
+          status: 'missing',
+          words: 50,
+        }),
+      ]);
+
+      const accepted = store.listByLifecycle('accepted');
+      expect(accepted).toHaveLength(2);
+
+      const keys = accepted.map((j) => j.jobKey).sort();
+      expect(keys).toEqual(['acc-1', 'acc-2']);
+
+      const a1 = accepted.find((j) => j.jobKey === 'acc-1')!;
+      expect(a1.projectName).toBe('Project Alpha');
+      expect(a1.targetLang).toBe('Malay (Malaysia)');
+      expect(a1.words).toBe(200);
+      expect(a1.acceptStatus).toBe('accepted');
+      expect(a1.acceptedAt).toBe(NOW);
+      expect(a1.lifecycleStatus).toBe('accepted');
+    });
+
+    it('excludes rows with empty file_name even if lifecycle_status matches', () => {
+      const store = freshStore();
+      store.upsertMany([
+        xstate({ jobKey: 'real', fileName: 'real.docx', lifecycleStatus: 'accepted' }),
+      ]);
+      // insert a legacy partner row (empty file_name) with accepted lifecycle
+      db.prepare(
+        'INSERT INTO jobs (job_key, title, lifecycle_status, status, first_seen_at, last_seen_at, snapshot_hash) VALUES (?,?,?,?,?,?,?)',
+      ).run('legacy-acc', 'old job', 'accepted', 'visible', NOW, NOW, 'h');
+
+      const accepted = store.listByLifecycle('accepted');
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]?.jobKey).toBe('real');
+    });
+
+    it('returns empty array when no jobs match the status', () => {
+      const store = freshStore();
+      store.upsertMany([xstate({ jobKey: 'n1', fileName: 'n1.docx', lifecycleStatus: 'new' })]);
+      expect(store.listByLifecycle('accepted')).toEqual([]);
+    });
+  });
 });
