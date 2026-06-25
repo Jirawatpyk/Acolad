@@ -526,4 +526,69 @@ describe('XtmPollLoop — heartbeat stuck gate excludes team channel', () => {
     expect(heartbeat.fail).toHaveBeenCalled();
     expect(heartbeat.ok).not.toHaveBeenCalled();
   });
+
+  it('a malformed/payload-rejected chat-channel drop DOES call heartbeat.fail() (parity with pre-branch behavior)', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that returns 400 payload-rejection for the chat channel — dispatcher drops via markSent + onDead
+    const rejectionChatSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'permanent';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'permanent', status: 400 }; // isPayloadRejection(400) → true → onDead path
+      },
+    };
+
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: rejectionChatSender,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pending 'chat' row with a cardsV2 payload so it passes shape-check and hits the sender
+    const outbox = new Outbox(db, 10, 6);
+    outbox.enqueue('job:some-key:first_seen', JSON.stringify({ cardsV2: [{}] }), NOW, 'chat');
+
+    await loop.runOnce();
+
+    // A dropped (payload-rejected) non-team row MUST page on-call — regression guard
+    expect(heartbeat.fail).toHaveBeenCalled();
+    expect(heartbeat.ok).not.toHaveBeenCalled();
+  });
+
+  it('a malformed/payload-rejected team-channel drop does NOT call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that returns 400 payload-rejection for the team channel — dispatcher drops via markSent + onDead
+    const rejectionTeamSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'permanent';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'permanent', status: 400 }; // isPayloadRejection(400) → true → onDead path
+      },
+    };
+
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: okChat,
+      teamChatSender: rejectionTeamSender,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pending 'team' row with a cardsV2 payload so it passes shape-check and hits the sender
+    const outbox = new Outbox(db, 10, 6);
+    outbox.enqueue('daily:2026-06-19', JSON.stringify({ cardsV2: [{}] }), NOW, 'team');
+
+    await loop.runOnce();
+
+    // A dropped (payload-rejected) team row must NOT page on-call
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+  });
 });

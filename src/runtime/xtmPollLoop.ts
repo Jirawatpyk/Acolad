@@ -51,12 +51,15 @@ export class XtmPollLoop {
   private firstPortalErrorMs = 0;
   private lastDiagMs = 0;
   /**
-   * Set true during flush() when onPermanent fires for a non-team channel row.
-   * A permanent-failure team row (daily report webhook revoked) must NOT page on-call
-   * — it surfaces via the onPermanent system alert only (same design as dead team rows).
-   * Reset before each flush() call.
+   * Set true during flush() when onDead OR onPermanent fires for a non-team channel row.
+   * Covers all terminal failures this flush: transient-exhausted, malformed, 400-payload-
+   * rejected (onDead path), and webhook-revoked (onPermanent path). A terminal failure on
+   * the 'team' channel (daily report delivery) must NOT page on-call — it surfaces via
+   * the system alert only (Constitution IV). Reset once before the first flush() so the
+   * flag accumulates across both flush() calls in a malformed cycle.
+   * null channel (unknown event) intentionally pages — fail-loud safe default.
    */
-  private nonTeamPermanentFailureThisFlush = false;
+  private nonTeamFailureThisFlush = false;
 
   constructor(
     private readonly db: DB,
@@ -90,14 +93,21 @@ export class XtmPollLoop {
       },
       logger,
       {
-        onDead: () =>
+        onDead: (eventId) => {
           raiseAlert(
             db,
             this.outbox,
             'outbox_dead',
             this.clock.nowIso(),
             'รายการ outbox เกินเพดาน retry',
-          ),
+          );
+          // Covers transient-exhausted, malformed, and 400-payload-rejected drops.
+          // A null/unknown channel (null !== 'team' → true) intentionally pages — fail-loud safe default.
+          const ch = this.outbox.getChannelByEventId(eventId);
+          if (ch !== 'team') {
+            this.nonTeamFailureThisFlush = true;
+          }
+        },
         onPermanent: (eventId) => {
           raiseAlert(
             db,
@@ -106,13 +116,11 @@ export class XtmPollLoop {
             this.clock.nowIso(),
             'ช่องแจ้ง/Sheets ถูก revoke (ถาวร)',
           );
-          // Track whether this permanent failure belongs to a non-team channel so the
-          // stuck gate below can page on-call for chat/sheets revocations but not for
-          // a revoked team/daily-report webhook (daily report failures surface via the
-          // onDead system alert only — they must never page on-call; Constitution IV).
+          // Covers webhook-revoked (permanent) failures on non-team channels.
+          // A null/unknown channel (null !== 'team' → true) intentionally pages — fail-loud safe default.
           const ch = this.outbox.getChannelByEventId(eventId);
           if (ch !== 'team') {
-            this.nonTeamPermanentFailureThisFlush = true;
+            this.nonTeamFailureThisFlush = true;
           }
         },
       },
@@ -254,9 +262,10 @@ export class XtmPollLoop {
         );
       }
 
-      // Reset the per-flush permanent-failure flag before dispatching so stale state
-      // from a previous cycle cannot bleed into the stuck gate.
-      this.nonTeamPermanentFailureThisFlush = false;
+      // Reset the per-flush terminal-failure flag once, before the first flush(), so it
+      // accumulates across both flush() calls in a malformed cycle (the second flush sends
+      // the layout-alert row). Stale state from a prior cycle must not bleed in.
+      this.nonTeamFailureThisFlush = false;
       const disp = await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
 
       if (snapshot.malformed.length > 0) {
@@ -283,18 +292,17 @@ export class XtmPollLoop {
       // A dead or permanently-failing 'team' channel row (daily report delivery
       // failure) must NEVER page on-call — it surfaces only via the onDead/onPermanent
       // system alert (Constitution IV: reporting outages never block detection or
-      // on-call paging). Only non-team failures trigger the /fail dead-man switch.
+      // on-call paging). Only non-team terminal failures trigger the /fail dead-man switch.
       //
-      // disp.dead is channel-agnostic (counts ALL channels that died this flush), so
-      // we drop it in favour of countDeadExcludingChannel('team'): a freshly-dead row
-      // has status='dead' committed to the DB before flush() returns, so the query
-      // catches it on this same cycle.
+      // nonTeamFailureThisFlush is set by BOTH onDead (transient-exhausted, malformed,
+      // 400-payload-rejected) and onPermanent (webhook-revoked) when the failing row's
+      // channel is NOT 'team'. This supersedes the former channel-agnostic disp.dead /
+      // disp.permanentFailures terms which leaked team failures into the page gate.
       //
-      // disp.permanentFailures is also channel-agnostic; the onPermanent hook above
-      // sets nonTeamPermanentFailureThisFlush only when the failing row's channel is
-      // NOT 'team', giving us the same channel-aware gate for permanent failures.
+      // countDeadExcludingChannel('team') catches the persistent cross-cycle dead backlog
+      // (rows that died in a prior cycle and were never resolved).
       const stuck =
-        this.nonTeamPermanentFailureThisFlush || this.outbox.countDeadExcludingChannel('team') > 0;
+        this.nonTeamFailureThisFlush || this.outbox.countDeadExcludingChannel('team') > 0;
       if (stuck) {
         await this.heartbeat.fail();
       } else {
