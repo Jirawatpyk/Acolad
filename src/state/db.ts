@@ -160,19 +160,25 @@ function ensureJobColumns(db: DB): void {
 }
 
 /**
- * Widen the outbox channel CHECK to include 'sheets'. SQLite cannot ALTER a
- * CHECK in place, so an existing v1 outbox (chat-only) is rebuilt preserving
+ * Widen the outbox channel CHECK to include 'team'. SQLite cannot ALTER a
+ * CHECK in place, so an existing outbox (chat/sheets-only) is rebuilt preserving
  * its rows. A fresh db already has the v2 CHECK (from DDL) and is skipped. The
- * unique index is recreated AFTER dropping the old table so its name never
- * clashes with the renamed copy.
+ * guard (`SELECT sql … includes("'team'")`) runs OUTSIDE the transaction so an
+ * already-migrated db is returned cheaply with zero writes.
+ *
+ * Fix 4: the five DDL statements (RENAME → CREATE → INSERT…SELECT → DROP →
+ * CREATE INDEX) are wrapped in a single transaction so a crash between any two
+ * steps either fully commits or fully rolls back — no orphaned outbox_old or
+ * partially-migrated outbox can survive a restart.
  */
 function ensureOutboxChannel(db: DB): void {
   const row = db
     .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='outbox'")
     .get() as { sql: string } | undefined;
   if (!row || row.sql.includes("'team'")) return;
-  db.exec('ALTER TABLE outbox RENAME TO outbox_old');
-  db.exec(`
+  db.transaction(() => {
+    db.exec('ALTER TABLE outbox RENAME TO outbox_old');
+    db.exec(`
 CREATE TABLE outbox (
   outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL,
@@ -184,10 +190,11 @@ CREATE TABLE outbox (
   created_at TEXT NOT NULL,
   sent_at TEXT
 );`);
-  db.exec(
-    `INSERT INTO outbox (outbox_id, event_id, channel, payload_json, status, attempts, next_attempt_at, created_at, sent_at)
-     SELECT outbox_id, event_id, channel, payload_json, status, attempts, next_attempt_at, created_at, sent_at FROM outbox_old`,
-  );
-  db.exec('DROP TABLE outbox_old');
-  db.exec('CREATE UNIQUE INDEX idx_outbox_dedup ON outbox (event_id, channel)');
+    db.exec(
+      `INSERT INTO outbox (outbox_id, event_id, channel, payload_json, status, attempts, next_attempt_at, created_at, sent_at)
+       SELECT outbox_id, event_id, channel, payload_json, status, attempts, next_attempt_at, created_at, sent_at FROM outbox_old`,
+    );
+    db.exec('DROP TABLE outbox_old');
+    db.exec('CREATE UNIQUE INDEX idx_outbox_dedup ON outbox (event_id, channel)');
+  })();
 }
