@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, type DB } from '../../src/state/db.js';
 import { XtmPollLoop } from '../../src/runtime/xtmPollLoop.js';
+import { XtmJobStore } from '../../src/state/xtmJobStore.js';
 import { LoginFailedError } from '../../src/portal/errors.js';
 import type { XtmPortalClient } from '../../src/portal/xtmClient.js';
 import type { AppConfig } from '../../src/config/index.js';
-import type { XtmRawJob, XtmJobSnapshot } from '../../src/detection/types.js';
+import type { XtmRawJob, XtmJobSnapshot, XtmJobState } from '../../src/detection/types.js';
 import type { ChatSender, SendOutcome } from '../../src/reporting/googleChat.js';
 import type { SheetSender, SheetRow } from '../../src/reporting/sheets.js';
 
@@ -193,5 +194,126 @@ describe('XtmPollLoop (runtime driver)', () => {
     const result = await loop.runOnce(); // still locked out
     expect(result).toBe(false);
     expect(before).toBeInstanceOf(LoginFailedError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Daily report integration tests
+// ---------------------------------------------------------------------------
+
+/** Seed an accepted XtmJobState directly into the store (bypassing a full cycle). */
+function seedAcceptedJob(db: DB, over: Partial<XtmJobState> = {}): void {
+  const store = new XtmJobStore(db);
+  const base: XtmJobState = {
+    jobKey: `J-${Math.random().toString(36).slice(2)}`,
+    xtmTaskId: 'T1',
+    projectName: 'Project X',
+    fileName: 'doc.xlf',
+    sourceLang: 'English (USA)',
+    targetLang: 'Malay (Malaysia)',
+    dueDate: '2026-06-30T00:00:00Z',
+    dueRaw: null,
+    words: 1000,
+    step: 'PE 1',
+    role: 'Corrector',
+    eligible: true,
+    lifecycleStatus: 'accepted',
+    acceptStatus: 'accepted',
+    acceptedAt: '2026-06-25T02:00:00Z',
+    status: 'visible',
+    firstSeenAt: '2026-06-24T10:00:00Z',
+    lastSeenAt: '2026-06-25T03:00:00Z',
+    snapshotHash: 'abc',
+    consecutiveMisses: 0,
+    ...over,
+  };
+  store.upsertMany([base]);
+}
+
+// Clock at 10:00 Bangkok (UTC 03:00 on 25 Jun)
+const BKK_10_00 = Date.parse('2026-06-25T03:00:00Z');
+// Clock at 08:00 Bangkok (UTC 01:00 on 25 Jun) — before 09:00 trigger
+const BKK_08_00 = Date.parse('2026-06-25T01:00:00Z');
+
+describe('XtmPollLoop — daily report', () => {
+  it('enqueues exactly one team outbox row at 10:00 Bangkok with 2 accepted jobs', async () => {
+    fresh();
+    // Seed 2 accepted jobs
+    seedAcceptedJob(db, { jobKey: 'J-A1', projectName: 'Alpha', fileName: 'a.xlf' });
+    seedAcceptedJob(db, { jobKey: 'J-A2', projectName: 'Beta', fileName: 'b.xlf' });
+
+    const clockAt10 = { nowMs: () => BKK_10_00, nowIso: () => new Date(BKK_10_00).toISOString() };
+    const client = new StubClient(); // empty Active → no new jobs, just daily trigger
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ XTM_ACOLAD_OFFERS_URL: 'https://xtm.example.com' } as Partial<AppConfig>),
+      noopLogger,
+      clockAt10,
+      { chatSender: okChat, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    await loop.runOnce();
+
+    // Exactly one 'team' outbox row with event_id 'daily:2026-06-25'
+    const rows = db
+      .prepare("SELECT * FROM outbox WHERE event_id = 'daily:2026-06-25' AND channel = 'team'")
+      .all() as { payload_json: string }[];
+    expect(rows).toHaveLength(1);
+
+    // Card title includes (2)
+    const payload = JSON.parse(rows[0]!.payload_json) as { cardsV2: unknown[] };
+    const entry = payload.cardsV2[0] as { card: { header: { title: string } } };
+    expect(entry.card.header.title).toBe('📋 Jobs in Progress (2)');
+  });
+
+  it('does NOT enqueue a second daily row when runOnce is called again on the same Bangkok day', async () => {
+    fresh();
+    seedAcceptedJob(db, { jobKey: 'J-B1' });
+
+    const clockAt10 = { nowMs: () => BKK_10_00, nowIso: () => new Date(BKK_10_00).toISOString() };
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ XTM_ACOLAD_OFFERS_URL: 'https://xtm.example.com' } as Partial<AppConfig>),
+      noopLogger,
+      clockAt10,
+      { chatSender: okChat, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    await loop.runOnce(); // first run — enqueues
+    await loop.runOnce(); // second run same clock — meta gate prevents duplicate
+
+    const rows = db
+      .prepare("SELECT * FROM outbox WHERE event_id = 'daily:2026-06-25' AND channel = 'team'")
+      .all();
+    expect(rows).toHaveLength(1); // still exactly one, not two
+  });
+
+  it('does NOT enqueue a daily row when Bangkok hour < 09 (08:00 Bangkok)', async () => {
+    fresh();
+    seedAcceptedJob(db, { jobKey: 'J-C1' });
+
+    const clockAt8 = { nowMs: () => BKK_08_00, nowIso: () => new Date(BKK_08_00).toISOString() };
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ XTM_ACOLAD_OFFERS_URL: 'https://xtm.example.com' } as Partial<AppConfig>),
+      noopLogger,
+      clockAt8,
+      { chatSender: okChat, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    await loop.runOnce();
+
+    const rows = db
+      .prepare("SELECT * FROM outbox WHERE channel = 'team' AND event_id LIKE 'daily:%'")
+      .all();
+    expect(rows).toHaveLength(0); // nothing enqueued before 09:00
   });
 });

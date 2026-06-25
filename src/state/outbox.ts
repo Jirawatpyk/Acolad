@@ -120,4 +120,17 @@ export class Outbox {
     };
     return row.n;
   }
+
+  /**
+   * Counts dead rows whose channel is NOT the given channel. Used to gate the
+   * Healthchecks /fail ping: a dead team-channel row (daily report delivery
+   * failure) surfaces via the onDead system alert but should NOT trigger paging
+   * (Constitution IV — reporting outages never block the on-call).
+   */
+  countDeadExcludingChannel(channel: OutboxChannel): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM outbox WHERE status = 'dead' AND channel <> ?")
+      .get(channel) as { n: number };
+    return row.n;
+  }
 }

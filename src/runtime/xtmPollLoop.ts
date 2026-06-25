@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { DB } from '../state/db.js';
 import { Outbox, createOutbox } from '../state/outbox.js';
+import { XtmJobStore } from '../state/xtmJobStore.js';
+import { MetaStore } from '../state/meta.js';
 import { Dispatcher } from '../reporting/dispatcher.js';
 import { GoogleChatSender, type ChatSender } from '../reporting/googleChat.js';
 import type { SheetSender } from '../reporting/sheets.js';
 import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
+import { bangkokDate, buildDailyReportCard, dueDailyReport } from '../reporting/dailyReport.js';
 import { Heartbeat, type HeartbeatPinger } from '../monitoring/heartbeat.js';
 import type { XtmPortalClient } from '../portal/xtmClient.js';
 import { XtmPollCycle } from './xtmPollCycle.js';
@@ -37,6 +40,8 @@ export interface XtmPollLoopDeps {
  */
 export class XtmPollLoop {
   private readonly outbox: Outbox;
+  private readonly store: XtmJobStore;
+  private readonly meta: MetaStore;
   private readonly cycle: XtmPollCycle;
   private readonly dispatcher: Dispatcher;
   private readonly heartbeat: HeartbeatPinger;
@@ -55,6 +60,8 @@ export class XtmPollLoop {
     deps: XtmPollLoopDeps = {},
   ) {
     this.outbox = createOutbox(db, cfg);
+    this.store = new XtmJobStore(db);
+    this.meta = new MetaStore(db);
     this.cycle = new XtmPollCycle(db, cfg, client, {
       readClosedKeys: () => client.readClosedKeys(),
     });
@@ -208,6 +215,29 @@ export class XtmPollLoop {
         }
       }
 
+      // Daily 09:00 Bangkok report — once per calendar day, crash-safe via one
+      // SQLite transaction (enqueue outbox row + set meta in same txn so a crash
+      // between them can't double-send or lose the sent date).
+      if (dueDailyReport(this.clock.nowMs(), this.meta.lastDailyReportDate)) {
+        const held = this.store.listByLifecycle('accepted');
+        const card = buildDailyReportCard(held, this.clock.nowMs(), this.cfg.XTM_ACOLAD_OFFERS_URL);
+        const date = bangkokDate(this.clock.nowMs());
+        this.db.transaction(() => {
+          this.outbox.enqueue(`daily:${date}`, JSON.stringify(card), this.clock.nowIso(), 'team');
+          this.meta.set('last_daily_report_date', date);
+        })();
+        this.logger.info(
+          {
+            module: 'xtmPollLoop',
+            action: 'daily_report',
+            outcome: 'enqueued',
+            date,
+            held: held.length,
+          },
+          'daily in-progress report enqueued',
+        );
+      }
+
       const disp = await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
 
       if (snapshot.malformed.length > 0) {
@@ -231,8 +261,13 @@ export class XtmPollLoop {
         );
       }
 
+      // A dead 'team' channel row (daily report delivery failure) does NOT page
+      // on-call: it surfaces via the onDead system alert. Only non-team dead rows
+      // trigger the Healthchecks /fail dead-man switch (Constitution IV).
       const stuck =
-        disp.dead > 0 || disp.permanentFailures > 0 || this.outbox.countByStatus('dead') > 0;
+        disp.dead > 0 ||
+        disp.permanentFailures > 0 ||
+        this.outbox.countDeadExcludingChannel('team') > 0;
       if (stuck) {
         await this.heartbeat.fail();
       } else {

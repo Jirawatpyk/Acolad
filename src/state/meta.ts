@@ -33,4 +33,8 @@ export class MetaStore {
   recordSuccessfulPoll(nowIso: string): void {
     this.set('last_successful_poll_at', nowIso);
   }
+
+  get lastDailyReportDate(): string | null {
+    return this.get('last_daily_report_date') ?? null;
+  }
 }
