@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DB } from '../state/db.js';
-import { Outbox, createOutbox } from '../state/outbox.js';
+import { Outbox, createOutbox, type OutboxChannel } from '../state/outbox.js';
 import { XtmJobStore } from '../state/xtmJobStore.js';
 import { MetaStore } from '../state/meta.js';
 import { Dispatcher } from '../reporting/dispatcher.js';
@@ -93,42 +93,21 @@ export class XtmPollLoop {
       },
       logger,
       {
-        onDead: (eventId) => {
+        onDead: (eventId, channel, reason) => {
           // Branch on CHANNEL (not event-id prefix) so the team-page invariant holds
           // even if new team-channel event types are added in future.
           // Team-channel delivery failures NEVER page on-call (Constitution IV); they
           // surface via this alert only. Today the only team row is the daily report.
           // A null/unknown channel (null !== 'team' → true) pages — fail-loud safe default.
-          const ch = this.outbox.getChannelByEventId(eventId);
-          if (ch === 'team') {
-            const date = eventId.startsWith('daily:') ? eventId.slice('daily:'.length) : eventId;
-            raiseAlert(db, this.outbox, 'daily_report_dead', this.clock.nowIso(), date);
-          } else {
-            raiseAlert(
-              db,
-              this.outbox,
-              'outbox_dead',
-              this.clock.nowIso(),
-              'outbox row exceeded retry limit',
-            );
-            // Covers transient-exhausted, malformed, and 400-payload-rejected drops.
-            this.nonTeamFailureThisFlush = true;
-          }
+          // Fix 5: channel passed by dispatcher — no extra DB lookup needed.
+          this.raiseTerminalAlert(eventId, channel, reason);
         },
-        onPermanent: (eventId) => {
-          raiseAlert(
-            db,
-            this.outbox,
-            'outbox_dead',
-            this.clock.nowIso(),
-            'channel/Sheets webhook permanently revoked',
-          );
-          // Covers webhook-revoked (permanent) failures on non-team channels.
-          // A null/unknown channel (null !== 'team' → true) intentionally pages — fail-loud safe default.
-          const ch = this.outbox.getChannelByEventId(eventId);
-          if (ch !== 'team') {
-            this.nonTeamFailureThisFlush = true;
-          }
+        onPermanent: (eventId, channel) => {
+          // Fix 1: mirror the onDead channel branch so a revoked team webhook raises
+          // daily_report_dead instead of the generic outbox_dead (which would be wrong
+          // and would also incorrectly omit the team channel from the page gate).
+          // Fix 5: channel passed by dispatcher — no extra DB lookup needed.
+          this.raiseTerminalAlert(eventId, channel, 'webhook rejected (permanent)');
         },
       },
     );
@@ -341,6 +320,36 @@ export class XtmPollLoop {
     } catch (err) {
       await this.handleError(err);
       return false;
+    }
+  }
+
+  /**
+   * Shared terminal-alert helper for onDead and onPermanent (Fix 1 + Fix 5 + Fix 6).
+   *
+   * Branch on CHANNEL so the team-page invariant holds for both dead and permanent paths:
+   *   team   → raise 'daily_report_dead' with a detail of `${date} — ${reason}` (Fix 6).
+   *            Does NOT set nonTeamFailureThisFlush (Constitution IV: team failures never page).
+   *   others → raise 'outbox_dead' and set nonTeamFailureThisFlush = true.
+   *
+   * A null/unknown channel routes to the non-team branch intentionally — fail-loud safe default.
+   */
+  private raiseTerminalAlert(eventId: string, channel: OutboxChannel, reason: string): void {
+    if (channel === 'team') {
+      // Fix 6: detail = "<date> — <reason>" so the card's Detail row is informative.
+      const date = eventId.startsWith('daily:') ? eventId.slice('daily:'.length) : eventId;
+      const detail = `${date} — ${reason}`;
+      raiseAlert(this.db, this.outbox, 'daily_report_dead', this.clock.nowIso(), detail);
+    } else {
+      raiseAlert(
+        this.db,
+        this.outbox,
+        'outbox_dead',
+        this.clock.nowIso(),
+        'outbox row exceeded retry limit',
+      );
+      // Covers transient-exhausted, malformed, 400-payload-rejected (onDead path), and
+      // webhook-revoked (onPermanent path) failures on non-team channels.
+      this.nonTeamFailureThisFlush = true;
     }
   }
 

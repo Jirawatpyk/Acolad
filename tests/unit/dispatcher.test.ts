@@ -93,7 +93,7 @@ describe('Dispatcher — {text} payload (backward-compatible)', () => {
     expect(ob.countByStatus('pending')).toBe(1);
   });
 
-  it('fires onDead when a row exhausts retries', async () => {
+  it('fires onDead when a row exhausts retries — passes channel + reason (Fix 5)', async () => {
     const ob = new Outbox(db, 1, 6);
     ob.enqueue('e1', JSON.stringify({ text: 'a' }), NOW);
     const onDead = vi.fn();
@@ -102,15 +102,17 @@ describe('Dispatcher — {text} payload (backward-compatible)', () => {
       Date.parse(NOW),
     );
     expect(summary.dead).toBe(1);
-    expect(onDead).toHaveBeenCalledWith('e1');
+    // New signature: (eventId, channel, reason)
+    expect(onDead).toHaveBeenCalledWith('e1', 'chat', 'retry limit exceeded');
   });
 
-  it('fires onPermanent for a revoked webhook (403)', async () => {
+  it('fires onPermanent for a revoked webhook (403) — passes channel (Fix 5)', async () => {
     const ob = new Outbox(db, 10, 6);
     ob.enqueue('e1', JSON.stringify({ text: 'a' }), NOW);
     const onPermanent = vi.fn();
     await makeDisp(ob, new StubSender('permanent'), { onPermanent }).flush(NOW, Date.parse(NOW));
-    expect(onPermanent).toHaveBeenCalledWith('e1');
+    // New signature: (eventId, channel)
+    expect(onPermanent).toHaveBeenCalledWith('e1', 'chat');
   });
 
   it('V13/FR-018: a permanent failure never becomes dead and stays queued', async () => {
@@ -126,7 +128,7 @@ describe('Dispatcher — {text} payload (backward-compatible)', () => {
     expect(ob.countByStatus('sent')).toBe(0);
   });
 
-  it('drops a malformed payload (no text, no cardsV2) with onDead alert', async () => {
+  it('drops a malformed payload (no text, no cardsV2) with onDead alert — passes channel+reason (Fix 5)', async () => {
     const ob = new Outbox(db, 10, 6);
     ob.enqueue('bad', JSON.stringify({ notText: 'oops' }), NOW);
     const sender = new StubSender('ok');
@@ -134,7 +136,8 @@ describe('Dispatcher — {text} payload (backward-compatible)', () => {
     const summary = await makeDisp(ob, sender, { onDead }).flush(NOW, Date.parse(NOW));
     expect(sender.calls).toBe(0);
     expect(summary.dead).toBe(1);
-    expect(onDead).toHaveBeenCalledWith('bad');
+    // Malformed drop: reason = 'malformed payload'
+    expect(onDead).toHaveBeenCalledWith('bad', 'chat', 'malformed payload');
     expect(ob.due(NOW)).toHaveLength(0);
   });
 
@@ -166,7 +169,7 @@ describe('Dispatcher — {cardsV2} payload', () => {
     expect(sender.lastPayload).toEqual({ cardsV2: [card] });
   });
 
-  it('a 400 on a card payload treats row as dead+onDead (payload rejection, not permanent webhook)', async () => {
+  it('a 400 on a card payload treats row as dead+onDead (payload rejection, not permanent webhook) — passes channel+reason (Fix 5)', async () => {
     const ob = new Outbox(db, 10, 6);
     ob.enqueue(
       'ev-bad-card',
@@ -184,13 +187,14 @@ describe('Dispatcher — {cardsV2} payload', () => {
     }).flush(NOW, Date.parse(NOW));
     expect(summary.dead).toBe(1);
     expect(summary.permanentFailures).toBe(0);
-    expect(onDead).toHaveBeenCalledWith('ev-bad-card');
+    // Payload-rejected drop: reason = 'rejected by Chat (400)'
+    expect(onDead).toHaveBeenCalledWith('ev-bad-card', 'chat', 'rejected by Chat (400)');
     expect(onPermanent).not.toHaveBeenCalled();
     expect(ob.countByStatus('sent')).toBe(1); // markSent (dropped)
     expect(ob.countByStatus('pending')).toBe(0);
   });
 
-  it('a 403 on a card payload stays permanent (webhook revoked, not payload fault)', async () => {
+  it('a 403 on a card payload stays permanent (webhook revoked, not payload fault) — passes channel (Fix 5)', async () => {
     const ob = new Outbox(db, 10, 6);
     ob.enqueue('ev-403', JSON.stringify({ cardsV2: [{ cardId: 'x', card: {} }] }), NOW, 'chat');
     const sender = new StubSender('permanent', 403);
@@ -201,10 +205,10 @@ describe('Dispatcher — {cardsV2} payload', () => {
     );
     expect(summary.permanentFailures).toBe(1);
     expect(summary.dead).toBe(0);
-    expect(onPermanent).toHaveBeenCalledWith('ev-403');
+    expect(onPermanent).toHaveBeenCalledWith('ev-403', 'chat');
   });
 
-  it('an empty cardsV2 array is malformed — sender is never called, row goes dead', async () => {
+  it('an empty cardsV2 array is malformed — sender is never called, row goes dead — passes channel+reason (Fix 5)', async () => {
     const ob = new Outbox(db, 10, 6);
     ob.enqueue('ev-empty-card', JSON.stringify({ cardsV2: [] }), NOW, 'chat');
     const sender = new StubSender('ok');
@@ -213,10 +217,11 @@ describe('Dispatcher — {cardsV2} payload', () => {
     expect(sender.calls).toBe(0);
     expect(summary.dead).toBe(1);
     expect(summary.sent).toBe(0);
-    expect(onDead).toHaveBeenCalledWith('ev-empty-card');
+    // Malformed drop (no sender / empty cardsV2)
+    expect(onDead).toHaveBeenCalledWith('ev-empty-card', 'chat', 'malformed payload');
   });
 
-  it('a 400 on a {text} row treats it as dead (payload rejected), not permanent', async () => {
+  it('a 400 on a {text} row treats it as dead (payload rejected), not permanent — passes channel+reason (Fix 5)', async () => {
     const ob = new Outbox(db, 10, 6);
     ob.enqueue('ev-text-400', JSON.stringify({ text: 'hi' }), NOW);
     const sender = new StubSender('permanent', 400);
@@ -224,7 +229,7 @@ describe('Dispatcher — {cardsV2} payload', () => {
     const summary = await makeDisp(ob, sender, { onDead }).flush(NOW, Date.parse(NOW));
     expect(summary.dead).toBe(1);
     expect(summary.permanentFailures).toBe(0);
-    expect(onDead).toHaveBeenCalledWith('ev-text-400');
+    expect(onDead).toHaveBeenCalledWith('ev-text-400', 'chat', 'rejected by Chat (400)');
   });
 });
 
@@ -244,7 +249,7 @@ describe('Dispatcher — team channel', () => {
     expect(chatSender.calls).toBe(0);
   });
 
-  it('treats a team row as malformed/dead when no team sender is configured', async () => {
+  it('treats a team row as malformed/dead when no team sender is configured — passes channel+reason (Fix 5)', async () => {
     const ob = new Outbox(db, 10, 6);
     ob.enqueue('et1', JSON.stringify({ text: 'team msg' }), NOW, 'team');
     const chatSender = new StubSender('ok');
@@ -255,6 +260,7 @@ describe('Dispatcher — team channel', () => {
     );
     expect(summary.dead).toBe(1);
     expect(chatSender.calls).toBe(0);
-    expect(onDead).toHaveBeenCalledWith('et1');
+    // No sender for 'team' → malformed
+    expect(onDead).toHaveBeenCalledWith('et1', 'team', 'malformed payload');
   });
 });

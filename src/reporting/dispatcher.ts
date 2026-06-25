@@ -1,4 +1,4 @@
-import type { Outbox, OutboxRow } from '../state/outbox.js';
+import type { Outbox, OutboxRow, OutboxChannel } from '../state/outbox.js';
 import type { ChatSender, ChatPayload, SendOutcome } from './googleChat.js';
 import { isPayloadRejection } from './googleChat.js';
 import type { SheetSender, SheetRow } from './sheets.js';
@@ -12,10 +12,22 @@ export interface DispatchSummary {
 }
 
 export interface DispatcherHooks {
-  /** Called when a row exhausts retries (FR-018: raise system alert + /fail ping). */
-  onDead?: (eventId: string) => void;
-  /** Called when the channel returns a permanent error (webhook revoked). */
-  onPermanent?: (eventId: string) => void;
+  /**
+   * Called when a row is terminally dropped (retries exhausted, malformed, or
+   * 400 payload-rejected). Passes the row's channel and a human-readable reason
+   * so callers can branch without an extra DB lookup (Fix 5).
+   *
+   * Reasons:
+   *   'retry limit exceeded'     — transient exhausted retry cap/age
+   *   'malformed payload'        — invalid JSON / missing sender / unknown shape
+   *   'rejected by Chat (400)'   — Google Chat rejected the payload (400)
+   */
+  onDead?: (eventId: string, channel: OutboxChannel, reason: string) => void;
+  /**
+   * Called when the channel returns a permanent error (webhook revoked: 401/403/404).
+   * Passes the row's channel so callers can branch without an extra DB lookup (Fix 5).
+   */
+  onPermanent?: (eventId: string, channel: OutboxChannel) => void;
 }
 
 /** Map of senders keyed by channel. Only `chat` is required; `team` and `sheet` are optional. */
@@ -83,7 +95,7 @@ export class Dispatcher {
           },
           'dropped malformed outbox payload',
         );
-        this.hooks.onDead?.(row.event_id);
+        this.hooks.onDead?.(row.event_id, row.channel, 'malformed payload');
         continue;
       }
       const { outcome, latencyMs, payloadRejected } = sent;
@@ -115,7 +127,7 @@ export class Dispatcher {
             },
             'card rejected (payload) — dropped',
           );
-          this.hooks.onDead?.(row.event_id);
+          this.hooks.onDead?.(row.event_id, row.channel, 'rejected by Chat (400)');
         } else {
           // Webhook revoked/removed: defer slowly, do NOT count toward dead (FR-018)
           // so queued events flush once the channel is fixed. Out-of-band signal is
@@ -132,7 +144,7 @@ export class Dispatcher {
             },
             'notification channel permanently failing',
           );
-          this.hooks.onPermanent?.(row.event_id);
+          this.hooks.onPermanent?.(row.event_id, row.channel);
         }
         continue;
       }
@@ -151,7 +163,7 @@ export class Dispatcher {
           },
           'notification exhausted retries',
         );
-        this.hooks.onDead?.(row.event_id);
+        this.hooks.onDead?.(row.event_id, row.channel, 'retry limit exceeded');
       } else {
         summary.transientFailures++;
         this.logger.warn(
