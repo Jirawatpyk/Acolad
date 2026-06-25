@@ -115,7 +115,7 @@ main/once → bootstrap.createXtmBot() ประกอบทุกชิ้น (
 | `detection/` | logic บริสุทธิ์ (TDD + coverage gate) | `diff.ts` (engine `diffGeneric`), `xtmDiff.ts`, `eligibility.ts`, `acceptDecision.ts`, `jobKey.ts`, `types.ts` |
 | `state/` | SQLite (TDD + coverage gate) | `db.ts`, `xtmJobStore.ts` (job state), `jobStore.ts` (accept state machine), `outbox.ts`, `meta.ts` (baseline/cursor) |
 | `portal/` | Playwright I/O เฉพาะ XTM | `xtmClient.ts` (impl ของ interface), `xtmInbox.ts` (อ่าน grid ใน iframe), `xtmLogin.ts`, `xtmAccept.ts`, `xtmAcceptRecon.ts`, `selectors.ts` (รวมศูนย์), `evidence.ts`, `htmlSanitize.ts`, `errors.ts` |
-| `reporting/` | ส่งออก (TDD + coverage gate) | `dispatcher.ts`, `googleChat.ts`, `sheets.ts` (Sink + Sender), `xtmNotifier.ts` (template ข้อความ), `systemAlerts.ts` |
+| `reporting/` | ส่งออก (TDD + coverage gate) | `dispatcher.ts` (channel→sender + payload-shape routing), `googleChat.ts` (`ChatPayload` union), `chatCard.ts`/`cardText.ts`/`dateFormat.ts` (cardsV2 builder + helpers), `sheets.ts` (Sink + Sender), `xtmNotifier.ts` (EN card builders), `dailyReport.ts` (รายงาน 09:00), `systemAlerts.ts` (EN alert cards) |
 | `runtime/` | orchestration + entry points | (ดู Entry points ด้านบน) + `rateLimiter.ts`, `scheduler.ts` |
 | `monitoring/` | สุขภาพระบบ | `heartbeat.ts` (Healthchecks), `logger.ts` (pino + redaction) |
 
@@ -140,8 +140,11 @@ main/once → bootstrap.createXtmBot() ประกอบทุกชิ้น (
   ตาราง outbox เดียว — ห้ามส่งแจ้งเตือนตรงโดยไม่ผ่าน outbox; การส่งเป็น
   at-least-once (mark sent ทันทีหลัง 2xx — ข้อยกเว้นบันทึกแล้ว)
 - **ส่งงานละ 1 ข้อความเสมอ ไม่มี batch** (ตัดสินใจแล้วใน /speckit-analyze
-  — อย่าเพิ่มกลับ); template ข้อความตายตัวใน contracts/notifications.md
-  (ภาษาไทย, เวลา ISO 8601 +07:00)
+  — อย่าเพิ่มกลับ); แจ้งเตือนเป็น **Google Chat cardsV2 ภาษาอังกฤษ** วันที่อ่านง่าย
+  แบบ Bangkok `DD/MM/YYYY HH:mm` (ผ่าน `reporting/dateFormat.ts` + `chatCard.ts` +
+  `cardText.ts`) — *ไม่ใช่* Thai/ISO-8601 แบบเดิมแล้ว. งานที่กดรับ + รายงานสรุป
+  ประจำวัน 09:00 (`reporting/dailyReport.ts`) ส่งเข้า **team channel** เพิ่ม
+  (`GOOGLE_CHAT_WEBHOOK_TEAM`). template อ้างอิงใน contracts/notifications.md
 - **Fail loud**: selector/marker หาย, locale เปลี่ยน, เจอ pagination,
   CAPTCHA → เก็บ evidence (sanitized) + system alert — ห้ามเดา parse
   ห้ามทำงานต่อเงียบๆ; selector รวมศูนย์ที่ `src/portal/selectors.ts` ไฟล์เดียว
