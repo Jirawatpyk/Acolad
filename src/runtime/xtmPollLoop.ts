@@ -66,7 +66,7 @@ export class XtmPollLoop {
     const chatSender = deps.chatSender ?? new GoogleChatSender(cfg.GOOGLE_CHAT_WEBHOOK_SYSTEM);
     this.dispatcher = new Dispatcher(
       this.outbox,
-      chatSender,
+      deps.sheetSender ? { chat: chatSender, sheet: deps.sheetSender } : { chat: chatSender },
       logger,
       {
         onDead: () =>
@@ -86,7 +86,6 @@ export class XtmPollLoop {
             'ช่องแจ้ง/Sheets ถูก revoke (ถาวร)',
           ),
       },
-      deps.sheetSender,
     );
   }
 

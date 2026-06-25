@@ -72,6 +72,9 @@ const okChat: ChatSender = {
   async send(): Promise<SendOutcome> {
     return 'ok';
   },
+  async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+    return { outcome: 'ok', status: 200 };
+  },
 };
 class CapturingSheet implements SheetSender {
   rows: SheetRow[] = [];

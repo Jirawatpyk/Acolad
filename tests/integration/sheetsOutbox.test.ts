@@ -14,6 +14,9 @@ const okChat: ChatSender = {
   async send(): Promise<SendOutcome> {
     return 'ok';
   },
+  async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+    return { outcome: 'ok', status: 200 };
+  },
 };
 
 class FakeSheetSender implements SheetSender {
@@ -59,7 +62,7 @@ describe('Sheets outbox routing (T040/T038, FR-018)', () => {
     const outbox = fresh();
     outbox.enqueue('ev1', JSON.stringify({ op: 'append', row: sheetRow() }), NOW, 'sheets');
     const sheet = new FakeSheetSender();
-    const summary = await new Dispatcher(outbox, okChat, noopLogger, {}, sheet).flush(
+    const summary = await new Dispatcher(outbox, { chat: okChat, sheet }, noopLogger, {}).flush(
       NOW,
       Date.parse(NOW),
     );
@@ -73,7 +76,7 @@ describe('Sheets outbox routing (T040/T038, FR-018)', () => {
     outbox.enqueue('ev1', JSON.stringify({ row: sheetRow() }), NOW, 'sheets');
     const sheet = new FakeSheetSender();
     sheet.outcome = 'transient';
-    const summary = await new Dispatcher(outbox, okChat, noopLogger, {}, sheet).flush(
+    const summary = await new Dispatcher(outbox, { chat: okChat, sheet }, noopLogger, {}).flush(
       NOW,
       Date.parse(NOW),
     );
@@ -87,7 +90,7 @@ describe('Sheets outbox routing (T040/T038, FR-018)', () => {
     outbox.enqueue('e-chat', JSON.stringify({ text: 'hi' }), NOW, 'chat');
     outbox.enqueue('e-sheet', JSON.stringify({ row: sheetRow() }), NOW, 'sheets');
     const sheet = new FakeSheetSender();
-    const summary = await new Dispatcher(outbox, okChat, noopLogger, {}, sheet).flush(
+    const summary = await new Dispatcher(outbox, { chat: okChat, sheet }, noopLogger, {}).flush(
       NOW,
       Date.parse(NOW),
     );
@@ -97,7 +100,7 @@ describe('Sheets outbox routing (T040/T038, FR-018)', () => {
   it('drops a sheets row (no wedge) when no SheetSender is configured', async () => {
     const outbox = fresh();
     outbox.enqueue('ev1', JSON.stringify({ row: sheetRow() }), NOW, 'sheets');
-    const summary = await new Dispatcher(outbox, okChat, noopLogger, {}).flush(
+    const summary = await new Dispatcher(outbox, { chat: okChat }, noopLogger, {}).flush(
       NOW,
       Date.parse(NOW),
     );
