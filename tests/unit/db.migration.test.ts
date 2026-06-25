@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../../src/state/db.js';
+import { Outbox } from '../../src/state/outbox.js';
 
 const NOW = '2026-06-19T10:00:00.000Z';
 
@@ -93,6 +94,20 @@ describe('db migration v2 (fresh db)', () => {
     expect(v).toBe('2');
     expect(cols(b.db, 'jobs')).toContain('lifecycle_status');
     b.db.close();
+  });
+});
+
+describe('outbox team channel', () => {
+  it('outbox accepts the team channel and migration is idempotent', () => {
+    const { db } = openDatabase(tmp(), '2026-06-25T00:00:00Z');
+    const ob = new Outbox(db, 10, 6);
+    expect(ob.enqueue('t1', '{"text":"x"}', '2026-06-25T00:00:00Z', 'team')).toBe(true);
+    expect(ob.due('2026-06-25T01:00:00Z').some((r) => r.channel === 'team')).toBe(true);
+    const sql = (
+      db.prepare("SELECT sql FROM sqlite_master WHERE name='outbox'").get() as { sql: string }
+    ).sql;
+    expect(sql).toContain("'team'");
+    db.close();
   });
 });
 

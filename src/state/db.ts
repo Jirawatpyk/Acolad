@@ -49,7 +49,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_system_active_alert
 CREATE TABLE IF NOT EXISTS outbox (
   outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL,
-  channel TEXT NOT NULL CHECK (channel IN ('chat','sheets')),
+  channel TEXT NOT NULL CHECK (channel IN ('chat','sheets','team')),
   payload_json TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dead')),
   attempts INTEGER NOT NULL DEFAULT 0,
@@ -170,13 +170,13 @@ function ensureOutboxChannel(db: DB): void {
   const row = db
     .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='outbox'")
     .get() as { sql: string } | undefined;
-  if (!row || row.sql.includes("'sheets'")) return;
+  if (!row || row.sql.includes("'team'")) return;
   db.exec('ALTER TABLE outbox RENAME TO outbox_old');
   db.exec(`
 CREATE TABLE outbox (
   outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL,
-  channel TEXT NOT NULL CHECK (channel IN ('chat','sheets')),
+  channel TEXT NOT NULL CHECK (channel IN ('chat','sheets','team')),
   payload_json TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dead')),
   attempts INTEGER NOT NULL DEFAULT 0,

@@ -1,7 +1,7 @@
 import type { DB } from './db.js';
 import type { AppConfig } from '../config/index.js';
 
-export type OutboxChannel = 'chat' | 'sheets';
+export type OutboxChannel = 'chat' | 'sheets' | 'team';
 
 export interface OutboxRow {
   outbox_id: number;
