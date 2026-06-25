@@ -189,4 +189,32 @@ describe('buildDailyReportCard', () => {
     expect(widget.decoratedText?.text).toContain('due —');
     expect(widget.decoratedText?.text).not.toMatch(/due\s{2,}/); // no double-space "due  "
   });
+
+  it('null words renders "—" not "—w" (Fix 8 — no stray w on em-dash)', () => {
+    const j = makeJob({ words: null });
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const entry = firstEntry(card);
+    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    const text = widget.decoratedText?.text ?? '';
+    // Must NOT produce "—w"
+    expect(text).not.toContain('—w');
+    // Must still contain the em-dash fallback somewhere
+    expect(text).toContain(' · —');
+  });
+
+  it('words=0 renders "0w" (Fix 8 — zero is a real value)', () => {
+    const j = makeJob({ words: 0 });
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const entry = firstEntry(card);
+    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    expect(widget.decoratedText?.text).toContain('0w');
+  });
+
+  it('positive words render with "w" suffix (e.g. 1500w)', () => {
+    const j = makeJob({ words: 1500 });
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const entry = firstEntry(card);
+    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    expect(widget.decoratedText?.text).toContain('1500w');
+  });
 });

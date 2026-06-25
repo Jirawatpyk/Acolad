@@ -1,8 +1,17 @@
 import type { DB } from '../state/db.js';
 import { SystemEventStore } from '../state/systemEvents.js';
 import { Outbox } from '../state/outbox.js';
-import type { SystemAlertFields } from './notifier.js';
 import { buildCard } from './chatCard.js';
+import { sanitizeCardId } from './cardText.js';
+
+export interface SystemAlertFields {
+  severity: 'warn' | 'critical';
+  title: string;
+  cause: string;
+  impact: string;
+  action: string;
+  occurredAt: string;
+}
 
 export type TriggerKind =
   | 'login_failed'
@@ -109,11 +118,6 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     hasRecovered: false,
   },
 };
-
-/** Sanitize a string so it can be used as a Google Chat cardId (A-Za-z0-9-). */
-function sanitizeCardId(s: string): string {
-  return s.replace(/[^A-Za-z0-9-]/g, '-');
-}
 
 /** Build a cardsV2 alert payload for the given fields and dedup key. */
 function buildAlertCard(

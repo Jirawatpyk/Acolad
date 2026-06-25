@@ -189,6 +189,20 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
       );
       expect(entry(result).cardId).toMatch(/^new-/);
     });
+
+    it('includes a "Detected" row with the capturedAt formatted in Bangkok time (Fix 2)', () => {
+      // capturedAt = 2026-06-19T03:00Z → Bangkok = 10:00 → 19/06/2026 10:00
+      const result = renderXtmNewJob(
+        xstate(),
+        '2026-06-19T03:00:00.000Z',
+        'Malay (MS) — accepting',
+        XTM_URL,
+      );
+      const labels = rowLabels(result);
+      const texts = rowTexts(result);
+      expect(labels.some((l) => l.includes('Detected'))).toBe(true);
+      expect(texts.some((t) => t.includes('19/06/2026 10:00'))).toBe(true);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -258,6 +272,20 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
     it('cardId starts with "relisted-"', () => {
       const result = renderXtmRelisted(xstate(), undefined, '2026-06-19T03:00:00.000Z', XTM_URL);
       expect(entry(result).cardId).toMatch(/^relisted-/);
+    });
+
+    it('includes a "Detected" row with capturedAt formatted in Bangkok time (Fix 2)', () => {
+      // capturedAt = 2026-06-19T03:00Z → Bangkok = 10:00 → 19/06/2026 10:00
+      const result = renderXtmRelisted(
+        xstate(),
+        '2026-06-10T03:00:00.000Z',
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      const labels = rowLabels(result);
+      const texts = rowTexts(result);
+      expect(labels.some((l) => l.includes('Detected'))).toBe(true);
+      expect(texts.some((t) => t.includes('19/06/2026 10:00'))).toBe(true);
     });
   });
 
@@ -427,6 +455,21 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
         XTM_URL,
       );
       expect(entry(result).cardId).toMatch(/^acceptfailed-/);
+    });
+
+    it('includes a "Time" row with at formatted in Bangkok time (Fix 2)', () => {
+      // at = 2026-06-19T03:00Z → Bangkok = 10:00 → 19/06/2026 10:00
+      const result = renderXtmAcceptFailed(
+        xstate(),
+        'failed',
+        'timeout',
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      const labels = rowLabels(result);
+      const texts = rowTexts(result);
+      expect(labels.some((l) => l.includes('Time'))).toBe(true);
+      expect(texts.some((t) => t.includes('19/06/2026 10:00'))).toBe(true);
     });
   });
 

@@ -111,7 +111,7 @@ export function buildCard(o: BuildCardOptions): { cardsV2: unknown[] } {
   // --- Convert rows to decoratedText widgets --------------------------------
   const makeRowWidget = (row: CardRow): DecoratedTextWidget => ({
     decoratedText: {
-      topLabel: row.emoji ? `${row.emoji} ${row.label}` : row.label,
+      topLabel: truncate(row.emoji ? `${row.emoji} ${row.label}` : row.label, 100),
       text: truncate((row.value ?? '—') || '—'),
     },
   });

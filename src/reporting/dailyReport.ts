@@ -8,17 +8,8 @@
 
 import { buildCard } from './chatCard.js';
 import { formatReadableDate } from './dateFormat.js';
+import { dash } from './cardText.js';
 import type { XtmJobState } from '../detection/types.js';
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/** Safe display fallback: null / empty string → '—'. */
-function dash(v: string | number | null | undefined): string {
-  if (v == null || v === '') return '—';
-  return String(v);
-}
 
 /** Shift to Asia/Bangkok (+07:00) then read UTC hours. */
 function bangkokHour(nowMs: number): number {
@@ -69,7 +60,7 @@ export function buildDailyReportCard(
     held.length > 0
       ? held.map((j) => ({
           label: dash(j.projectName),
-          value: `${dash(j.fileName)} · due ${formatReadableDate(j.dueDate ?? j.dueRaw ?? null) || '—'} · ${dash(j.words)}w`,
+          value: `${dash(j.fileName)} · due ${formatReadableDate(j.dueDate ?? j.dueRaw ?? null) || '—'} · ${j.words != null ? `${j.words}w` : '—'}`,
         }))
       : [{ label: '—', value: 'No jobs in progress' }];
 
