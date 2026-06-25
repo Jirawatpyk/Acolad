@@ -16,37 +16,37 @@ const dash = (v: string | null | undefined): string => (v && v !== '' ? v : '—
 
 function jobLines(job: JobState): string {
   return [
-    `งาน: ${job.title}`,
-    `รหัส: ${dash(job.portalJobId ?? job.jobKey)}`,
-    `คู่ภาษา: ${dash(job.languagePair)}`,
-    `กำหนดส่ง: ${dash(job.deadline ?? job.deadlineRaw)}`,
-    `ค่าตอบแทน: ${dash(job.fee)}`,
-    `ลิงก์: ${dash(job.url)}`,
+    `Job: ${job.title}`,
+    `ID: ${dash(job.portalJobId ?? job.jobKey)}`,
+    `Language pair: ${dash(job.languagePair)}`,
+    `Deadline: ${dash(job.deadline ?? job.deadlineRaw)}`,
+    `Fee: ${dash(job.fee)}`,
+    `Link: ${dash(job.url)}`,
   ].join('\n');
 }
 
 export function renderNewJob(ev: AppearanceEvent): string {
-  return `🆕 งานใหม่บน Acolad\n${jobLines(ev.job)}\nพบเมื่อ: ${formatBangkok(ev.occurredAt)}`;
+  return `🆕 New job on Acolad\n${jobLines(ev.job)}\nDetected: ${formatBangkok(ev.occurredAt)}`;
 }
 
 export function renderRelistedJob(ev: AppearanceEvent): string {
-  const since = ev.firstSeenAt ? ` (เคยแจ้งเมื่อ ${formatBangkok(ev.firstSeenAt)})` : '';
-  return `🔁 งานกลับมาอีกครั้ง${since}\n${jobLines(ev.job)}\nพบเมื่อ: ${formatBangkok(ev.occurredAt)}`;
+  const since = ev.firstSeenAt ? ` (previously seen ${formatBangkok(ev.firstSeenAt)})` : '';
+  return `🔁 Job relisted${since}\n${jobLines(ev.job)}\nDetected: ${formatBangkok(ev.occurredAt)}`;
 }
 
 const COLD_START_MAX_ROWS = 20;
 
 export function renderColdStartSummary(jobs: JobState[], _occurredAt: string): string {
   if (jobs.length === 0) {
-    return '📋 เริ่มระบบเฝ้างาน — ยังไม่มีงานบน portal ระบบเฝ้าต่อ 24/7';
+    return '📋 Monitoring started — no jobs on portal yet. Watching 24/7';
   }
   const shown = jobs.slice(0, COLD_START_MAX_ROWS);
   const rows = shown
-    .map((j) => `• ${j.title} | ${dash(j.languagePair)} | ส่ง ${dash(j.deadline ?? j.deadlineRaw)}`)
+    .map((j) => `• ${j.title} | ${dash(j.languagePair)} | due ${dash(j.deadline ?? j.deadlineRaw)}`)
     .join('\n');
   const more =
-    jobs.length > COLD_START_MAX_ROWS ? `\n…และอีก ${jobs.length - COLD_START_MAX_ROWS} งาน` : '';
-  return `📋 เริ่มระบบเฝ้างาน — พบงานค้างอยู่ ${jobs.length} งาน\n${rows}${more}`;
+    jobs.length > COLD_START_MAX_ROWS ? `\n…and ${jobs.length - COLD_START_MAX_ROWS} more` : '';
+  return `📋 Monitoring started — found ${jobs.length} existing job(s)\n${rows}${more}`;
 }
 
 export interface SystemAlertFields {
@@ -62,10 +62,10 @@ export function renderSystemAlert(f: SystemAlertFields): string {
   const sev = f.severity === 'critical' ? 'CRITICAL' : 'WARN';
   return [
     `🚨 [${sev}] ${f.title}`,
-    `สาเหตุ: ${f.cause}`,
-    `ผลกระทบ: ${f.impact}`,
-    `ต้องทำ: ${f.action}`,
-    `เวลา: ${formatBangkok(f.occurredAt)}`,
+    `Cause: ${f.cause}`,
+    `Impact: ${f.impact}`,
+    `Action: ${f.action}`,
+    `Time: ${formatBangkok(f.occurredAt)}`,
   ].join('\n');
 }
 
@@ -74,7 +74,7 @@ export function renderSystemRecovered(
   downDuration: string,
   occurredAt: string,
 ): string {
-  return `✅ ระบบกลับมาทำงานปกติ: ${subject} (หยุดไป ${downDuration})\nเวลา: ${formatBangkok(occurredAt)}`;
+  return `✅ Recovered: ${subject} (was down for ${downDuration})\nTime: ${formatBangkok(occurredAt)}`;
 }
 
 /** Render the Chat message for a job appearance event. */

@@ -102,7 +102,7 @@ export class XtmPollCycle {
         this.outbox,
         'accept_failed',
         snapshot.capturedAt,
-        `${s.projectName} / ${s.fileName}: ค้างสถานะ accepting (รอบก่อนหยุดกลางคัน)`,
+        `${s.projectName} / ${s.fileName}: stuck in 'accepting' (prior cycle stopped mid-way)`,
         {},
         `accept_failed:${s.jobKey}`,
       );

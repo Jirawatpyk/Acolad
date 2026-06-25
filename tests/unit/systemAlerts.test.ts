@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, type DB } from '../../src/state/db.js';
 import { Outbox } from '../../src/state/outbox.js';
-import { raiseAlert, resolveAlert } from '../../src/reporting/systemAlerts.js';
+import { raiseAlert, resolveAlert, TRIGGERS } from '../../src/reporting/systemAlerts.js';
 
 const NOW = '2026-06-10T10:00:00.000Z';
+const THAI_RE = /[฀-๿]/;
 let dir: string;
 let db: DB;
 let outbox: Outbox;
@@ -21,17 +22,116 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe('raiseAlert', () => {
-  it('enqueues an alert and renders the action text for the trigger', () => {
-    expect(raiseAlert(db, outbox, 'login_failed', NOW, 'rejected 3x')).toBe(true);
-    const due = outbox.due(NOW);
-    expect(due).toHaveLength(1);
-    const text = (JSON.parse(due[0]!.payload_json) as { text: string }).text;
-    expect(text).toContain('🚨 [CRITICAL]');
-    expect(text).toContain('ต้องทำ:');
-    expect(text).toContain('XTM_ACOLAD_Password');
+// ---------------------------------------------------------------------------
+// Helper
+// ---------------------------------------------------------------------------
+
+function firstPayload(): unknown {
+  const due = outbox.due(NOW);
+  expect(due.length).toBeGreaterThan(0);
+  return JSON.parse(due[0]!.payload_json) as unknown;
+}
+
+function assertCard(payload: unknown): { cardsV2: unknown[] } {
+  expect(payload).toHaveProperty('cardsV2');
+  const card = payload as { cardsV2: unknown[] };
+  expect(Array.isArray(card.cardsV2)).toBe(true);
+  expect(card.cardsV2.length).toBeGreaterThan(0);
+  return card;
+}
+
+function cardTitle(payload: unknown): string {
+  const card = assertCard(payload);
+  const entry = card.cardsV2[0] as { card: { header: { title: string } } };
+  return entry.card.header.title;
+}
+
+function cardJson(payload: unknown): string {
+  return JSON.stringify(payload);
+}
+
+// ---------------------------------------------------------------------------
+// All triggers produce English cardsV2 (no Thai)
+// ---------------------------------------------------------------------------
+
+describe('raiseAlert — all triggers produce cardsV2 English cards', () => {
+  const allKinds = Object.keys(TRIGGERS) as (keyof typeof TRIGGERS)[];
+
+  for (const kind of allKinds) {
+    it(`${kind}: payload is cardsV2 with English title, Impact/Action/Detail rows, NO Thai`, () => {
+      raiseAlert(db, outbox, kind, NOW, 'test-detail');
+      const payload = firstPayload();
+
+      // Must be cardsV2, NOT {text:...}
+      expect(payload).toHaveProperty('cardsV2');
+      expect(payload).not.toHaveProperty('text');
+
+      const json = cardJson(payload);
+      // No Thai characters anywhere in the serialized payload
+      expect(THAI_RE.test(json)).toBe(false);
+
+      // Header title must contain the English trigger title
+      const title = cardTitle(payload);
+      expect(title.length).toBeGreaterThan(0);
+
+      // Rows must include Impact, Action, Detail labels
+      expect(json).toContain('Impact');
+      expect(json).toContain('Action');
+      expect(json).toContain('Detail');
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Specific trigger assertions
+// ---------------------------------------------------------------------------
+
+describe('raiseAlert — login_failed', () => {
+  it('header contains "Login failed" and action mentions npm run deploy', () => {
+    raiseAlert(db, outbox, 'login_failed', NOW, 'rejected 3x');
+    const payload = firstPayload();
+    const json = cardJson(payload);
+    expect(cardTitle(payload)).toContain('Login failed');
+    expect(json).toContain('npm run deploy');
+  });
+});
+
+describe('raiseAlert — daily_report_dead', () => {
+  it('exists in TRIGGERS with severity warn', () => {
+    expect(TRIGGERS.daily_report_dead).toBeDefined();
+    expect(TRIGGERS.daily_report_dead.severity).toBe('warn');
+    expect(TRIGGERS.daily_report_dead.hasRecovered).toBe(false);
   });
 
+  it('raises a card naming the date when detail includes it', () => {
+    raiseAlert(db, outbox, 'daily_report_dead', NOW, '2026-06-10');
+    const payload = firstPayload();
+    const json = cardJson(payload);
+    expect(THAI_RE.test(json)).toBe(false);
+    expect(cardTitle(payload)).toContain('Daily report delivery failed');
+    expect(json).toContain('2026-06-10');
+  });
+});
+
+describe('raiseAlert — outbox_dead', () => {
+  it('header contains "Notifications stuck"', () => {
+    raiseAlert(db, outbox, 'outbox_dead', NOW, 'retries exhausted');
+    expect(cardTitle(firstPayload())).toContain('Notifications stuck');
+  });
+});
+
+describe('raiseAlert — accept_failed', () => {
+  it('header contains "Job accept failed"', () => {
+    raiseAlert(db, outbox, 'accept_failed', NOW, 'proj/file', {}, 'accept_failed:JK1');
+    expect(cardTitle(firstPayload())).toContain('Job accept failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dedup
+// ---------------------------------------------------------------------------
+
+describe('raiseAlert — dedup', () => {
   it('dedupes a second active alert of the same kind', () => {
     expect(raiseAlert(db, outbox, 'portal_down', NOW, 'down')).toBe(true);
     expect(raiseAlert(db, outbox, 'portal_down', NOW, 'still down')).toBe(false);
@@ -39,15 +139,30 @@ describe('raiseAlert', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// resolveAlert
+// ---------------------------------------------------------------------------
+
 describe('resolveAlert', () => {
-  it('emits SYSTEM_RECOVERED for a trigger that supports it', () => {
+  it('emits an English SYSTEM_RECOVERED card for a trigger that supports it', () => {
     raiseAlert(db, outbox, 'portal_down', NOW, 'down');
     const later = '2026-06-10T10:20:00.000Z';
-    expect(resolveAlert(db, outbox, 'portal_down', later, '20 นาที')).toBe(true);
-    const texts = outbox
-      .due(later)
-      .map((r) => (JSON.parse(r.payload_json) as { text: string }).text);
-    expect(texts.some((t) => t.includes('✅ ระบบกลับมาทำงานปกติ'))).toBe(true);
+    expect(resolveAlert(db, outbox, 'portal_down', later, '20 min')).toBe(true);
+
+    const due = outbox.due(later);
+    // Both the original alert and the recovered event are in the outbox
+    const payloads = due.map((r) => JSON.parse(r.payload_json) as unknown);
+    const recoveredPayload = payloads.find((p) => {
+      const json = JSON.stringify(p);
+      return json.includes('Recovered') || json.includes('recovered');
+    });
+    expect(recoveredPayload).toBeDefined();
+
+    // Must be cardsV2 (not {text})
+    expect(recoveredPayload).toHaveProperty('cardsV2');
+    const json = cardJson(recoveredPayload);
+    // No Thai in recovered payload
+    expect(THAI_RE.test(json)).toBe(false);
   });
 
   it('does not emit recovered for a one-shot trigger (db_corrupt)', () => {

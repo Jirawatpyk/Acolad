@@ -44,9 +44,9 @@ describe('formatBangkok', () => {
 describe('renderNewJob', () => {
   it('shows — for missing optional fields (FR-004 best-effort)', () => {
     const msg = renderNewJob(ev());
-    expect(msg).toContain('🆕 งานใหม่บน Acolad');
-    expect(msg).toContain('ค่าตอบแทน: —');
-    expect(msg).toContain('ลิงก์: —');
+    expect(msg).toContain('🆕 New job on Acolad');
+    expect(msg).toContain('Fee: —');
+    expect(msg).toContain('Link: —');
   });
 });
 
@@ -55,27 +55,27 @@ describe('renderRelistedJob', () => {
     const msg = renderRelistedJob(
       ev({ eventType: 'relisted', firstSeenAt: '2026-06-09T03:00:00.000Z' }),
     );
-    expect(msg).toContain('🔁 งานกลับมาอีกครั้ง');
+    expect(msg).toContain('🔁 Job relisted');
     expect(msg).toContain('2026-06-09T10:00+07:00');
   });
 });
 
 describe('renderColdStartSummary', () => {
   it('handles the empty (0 jobs) case', () => {
-    expect(renderColdStartSummary([], '2026-06-10T03:00:00.000Z')).toContain('ยังไม่มีงาน');
+    expect(renderColdStartSummary([], '2026-06-10T03:00:00.000Z')).toContain('no jobs on portal');
   });
 
   it('reports count for a few jobs', () => {
     const jobs = [job({ title: 'A' }), job({ title: 'B' }), job({ title: 'C' })];
     const msg = renderColdStartSummary(jobs, '2026-06-10T03:00:00.000Z');
-    expect(msg).toContain('พบงานค้างอยู่ 3 งาน');
+    expect(msg).toContain('found 3 existing job(s)');
   });
 
   it('truncates at 20 rows with an overflow line for 25 jobs', () => {
     const jobs = Array.from({ length: 25 }, (_, i) => job({ title: `Job ${i}` }));
     const msg = renderColdStartSummary(jobs, '2026-06-10T03:00:00.000Z');
-    expect(msg).toContain('พบงานค้างอยู่ 25 งาน');
-    expect(msg).toContain('…และอีก 5 งาน');
+    expect(msg).toContain('found 25 existing job(s)');
+    expect(msg).toContain('…and 5 more');
     expect((msg.match(/•/g) ?? []).length).toBe(20);
   });
 });
@@ -84,13 +84,13 @@ describe('renderSystemAlert', () => {
   it('includes severity, cause, impact, and required action', () => {
     const msg = renderSystemAlert({
       severity: 'critical',
-      title: 'เข้าสู่ระบบไม่สำเร็จ',
-      cause: 'รหัสผ่านถูกปฏิเสธ 3 ครั้ง',
-      impact: 'หยุดเฝ้างานชั่วคราว',
-      action: 'แก้ ACOLAD_PASSWORD แล้ว restart',
+      title: 'Login failed',
+      cause: 'password rejected 3 times',
+      impact: 'Monitoring paused (lockout)',
+      action: 'Update ACOLAD_PASSWORD then npm run deploy',
       occurredAt: '2026-06-10T03:00:00.000Z',
     });
     expect(msg).toContain('[CRITICAL]');
-    expect(msg).toContain('ต้องทำ: แก้ ACOLAD_PASSWORD');
+    expect(msg).toContain('Update ACOLAD_PASSWORD');
   });
 });

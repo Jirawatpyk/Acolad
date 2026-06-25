@@ -1,76 +1,111 @@
-# Contract: Notifications (Google Chat) — ส่วนเพิ่มของ 002
+# Contract: Notifications (Google Chat) — feature 002
 
-ยึด message schema คงที่ต่อประเภทเหตุการณ์ (Constitution III); เวลา ISO 8601
-Asia/Bangkok (+07:00); ทุกข้อความไหลผ่าน outbox channel `chat` (at-least-once,
-1 ข้อความต่อ job — ไม่ batch). ระบุ **เฉพาะข้อความที่ 002 เพิ่ม/ปรับ**
+All messages flow through the outbox (at-least-once, Constitution IV).
+Time: ISO 8601 Asia/Bangkok (+07:00).
+1 event = 1 outbox row = 1 message (no batching).
+Channels: `chat` = system webhook (`GOOGLE_CHAT_WEBHOOK_SYSTEM`);
+`team` = team webhook (`GOOGLE_CHAT_WEBHOOK_TEAM`).
 
-## เหตุการณ์ระดับงาน
+---
 
-### 1) พบงานใหม่ (reuse แนวเดิม "งานใหม่" — ปรับฟิลด์เป็นของ XTM)
+## §1 Job-level events (channel: `chat`)
 
-ส่งเมื่อ job เปลี่ยนเป็น `lifecycle_status='new'` (หลัง baseline). ทุกภาษา (รวมไม่ใช่
-มาเลย์):
+All job-level messages are **cardsV2** cards built by `src/reporting/xtmNotifier.ts`.
+See that file for the exact template; field labels and values are in English.
+
+### 1a) New job detected (`lifecycle_status = 'new'`, post-baseline)
+
+Sent for every language pair including non-Malay.
+
+Header: `🆕 New job on XTM`
+Rows: Project, File, Language pair, Due date, Words, Step/Role, Status
+(Status = `Eligible (Malay) — accepting` or `Not Malay — logged only`)
+
+### 1b) Job accepted (`accept_status → 'accepted'`)
+
+Header: `✅ Job accepted (XTM)`
+Rows: Project, File, Language pair, Due date, Words, Accepted at
+
+One card per `job_key` even for bulk accepts (1 message per job rule).
+
+### 1c) Accept failed / snatched (`accept_status → 'failed'` or `'missing'`)
+
+Header: `⚠️ Accept failed (XTM)`
+Rows: Project, File, Language pair, Cause, Needs human check, Time
+
+---
+
+## §2 System alerts (channel: `chat`)
+
+System alerts are **cardsV2** cards built by `src/reporting/systemAlerts.ts`
+via `buildCard` from `src/reporting/chatCard.js`.
+
+### Card shape
 
 ```
-🆕 งานใหม่บน XTM
-โปรเจกต์: {projectName}
-ไฟล์: {fileName}
-ภาษา: {sourceLang} → {targetLang}
-ครบกำหนด: {dueDate|"-"} | คำ: {words|"-"} | ขั้น: {step|"-"} ({role|"-"})
-สถานะ: {eligible ? "เข้าเกณฑ์มาเลย์ — กำลังกดรับ" : "ไม่ใช่มาเลย์ — บันทึกไว้เฉย ๆ"}
-เวลา: {capturedAt}
+Header:  {severity-emoji} {title}
+         🔴 = critical  |  ⚠️ = warn
+
+Rows:
+  Impact  — what stops working
+  Action  — what the operator must do
+  Detail  — raw cause string passed to raiseAlert()
 ```
 
-### 2) รับงานสำเร็จ (ใหม่)
+`cardId` = `alert-{dedupKey}` sanitized to `[A-Za-z0-9-]`.
 
-ส่งเมื่อ `accept_status` → `accepted`:
+### Trigger table
+
+| Kind | Severity | Recovered? | Title |
+|---|---|---|---|
+| `login_failed` | critical | yes | Login failed |
+| `captcha` | critical | yes | CAPTCHA / identity check detected |
+| `layout_changed` | critical | yes | Job list layout changed — cannot be read |
+| `pagination` | warn | no | Pagination indicator detected |
+| `portal_down` | warn | yes | Portal unreachable for over 10 minutes |
+| `outbox_dead` | critical | yes | Notifications stuck — delivery failed |
+| `cold_start_repeat` | warn | no | State store may be lost (cold start repeated within 7 days) |
+| `db_corrupt` | critical | no | State store corrupt — reset to cold start |
+| `accept_failed` | critical | no | Job accept failed (could not confirm) |
+| `daily_report_dead` | warn | no | Daily report delivery failed |
+
+`daily_report_dead` is raised on channel `chat` (not `team`) when the
+`daily:<date>` outbox row dies. The `onDead` hook in `xtmPollLoop.ts`
+branches on `eventId.startsWith('daily:')` to select this trigger;
+all other dead rows raise `outbox_dead`.
+
+### SYSTEM_RECOVERED card shape
 
 ```
-✅ รับงานแล้ว (XTM)
-โปรเจกต์: {projectName}
-ไฟล์: {fileName} | {sourceLang} → {targetLang}
-ครบกำหนด: {dueDate|"-"} | คำ: {words|"-"}
-รับเมื่อ: {acceptedAt}
+Header:  ✅ Recovered · {title}
+
+Rows:
+  Down for — duration string (e.g. "12 min")
 ```
 
-> bulk accept ที่รับหลายแถวพร้อมกัน → **ส่ง 1 ข้อความต่อ job_key** (ตามกติกา "งาน
-> ละ 1 ข้อความ ไม่ batch")
+Only triggers with `hasRecovered: true` emit this card.
 
-### 3) กดรับไม่สำเร็จ / โดนแย่ง (ใหม่)
+---
 
-ส่งเมื่อผล accept = `failed` หรือ `missing`:
+## §3 Daily in-progress report (channel: `team`)
 
-```
-⚠️ กดรับไม่สำเร็จ (XTM)
-โปรเจกต์: {projectName} | ไฟล์: {fileName}
-{sourceLang} → {targetLang}
-สาเหตุ: {outcome=='missing' ? "โดนแย่ง/ถูกรับไปแล้วก่อนกดทัน" : "กดแล้วยืนยันไม่สำเร็จ — {reason}"}
-ต้องตรวจสอบ: {outcome=='failed' ? "ใช่ — เข้าไปดูใน XTM" : "ไม่จำเป็น (งานหลุดไปแล้ว)"}
-เวลา: {at|capturedAt}
-```
+Sent once per calendar day at ≥ 09:00 Bangkok time.
+Card built by `src/reporting/dailyReport.ts` (`buildDailyReportCard`).
+Event ID: `daily:<YYYY-MM-DD>`.
+If delivery fails (dead outbox row), `daily_report_dead` alert is raised
+on the `chat` channel so on-call is informed without paging via heartbeat.
 
-`outcome=='failed'` → severity เทียบเท่า system alert (มี evidence ref ใน Sheets
-Note); `missing` = info
+---
 
-## เหตุการณ์ระดับระบบ (reuse 001 — ปรับ trigger ให้เป็น XTM)
+## §4 Sheet-only states (no Chat message — intentional, N7)
 
-- **Cold-start summary** (reuse): ตอน start ถ้า Active มีงานค้าง → 1 ข้อความสรุป
-  `📋 พบงานค้าง {N} รายการตอนเริ่มระบบ` (+ จำนวนมาเลย์ที่ "ยังกดได้/กดให้แล้ว" ตาม
-  FR-005)
-- **System alert / recovered** (reuse): login fail (cap), layout changed,
-  accept ยืนยันไม่ได้, outbox dead, Sheets auth/quota — รูปแบบ `🚨 [CRITICAL/WARN]`
-  เดิม. **re-login ปกติบนบัญชีแชร์ = ไม่ส่ง alert** (FR-021)
+- `Closed` / `Removed` — job finished or cancelled after being accepted
+- `Missing` from a job that was never accepted (gone from Active silently)
 
-## สถานะที่เป็น "sheet-only" (ไม่ส่ง Chat — ตั้งใจ, N7)
+---
 
-สถานะปลายวงจรที่เกิดทีหลังและไม่ใช่ "ผลการกดรับ" จะ **อัปเดตเฉพาะใน Sheets ไม่ส่ง
-Chat** เพื่อกัน channel รก (SC-006 บังคับเฉพาะ detection + acceptance outcome):
-- `Closed` / `Removed` (งานที่รับแล้วจบ/ถูกยกเลิก — FR-014)
-- `Missing` ที่มาจาก **งานไม่เคยรับแล้วหายจาก Active** (ต่างจาก `Missing` ตอนกดรับ
-  ที่โดนแย่ง ซึ่ง = acceptance outcome → ส่ง ⚠️ ข้อความ 3)
+## §5 Invariants (unchanged from 001)
 
-## กติกาที่ไม่เปลี่ยนจาก 001
-
-- 1 เหตุการณ์ = 1 แถว outbox = 1 ข้อความ (dedup ด้วย event_id)
-- ไม่มี secret/cookie/credential ในข้อความหรือ payload
-- ช่อง: ใช้ `GOOGLE_CHAT_WEBHOOK_SYSTEM` (daily report ช่องสอง ยังเลื่อน)
+- No secrets / cookies / credentials in any message or payload
+- Dedup via `event_id` in the outbox — re-enqueue is safe
+- Recon ping (`ACCEPT_RECON=1`) uses plain `{ text: … }` — not a card

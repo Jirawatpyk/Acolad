@@ -94,16 +94,23 @@ export class XtmPollLoop {
       logger,
       {
         onDead: (eventId) => {
-          raiseAlert(
-            db,
-            this.outbox,
-            'outbox_dead',
-            this.clock.nowIso(),
-            'รายการ outbox เกินเพดาน retry',
-          );
+          // Daily report delivery failure goes to its own alert (team channel only —
+          // must NOT page on-call). All other dead rows raise the generic outbox_dead alert.
+          const ch = this.outbox.getChannelByEventId(eventId);
+          if (ch === 'team' && eventId.startsWith('daily:')) {
+            const date = eventId.slice('daily:'.length);
+            raiseAlert(db, this.outbox, 'daily_report_dead', this.clock.nowIso(), date);
+          } else {
+            raiseAlert(
+              db,
+              this.outbox,
+              'outbox_dead',
+              this.clock.nowIso(),
+              'outbox row exceeded retry limit',
+            );
+          }
           // Covers transient-exhausted, malformed, and 400-payload-rejected drops.
           // A null/unknown channel (null !== 'team' → true) intentionally pages — fail-loud safe default.
-          const ch = this.outbox.getChannelByEventId(eventId);
           if (ch !== 'team') {
             this.nonTeamFailureThisFlush = true;
           }
@@ -114,7 +121,7 @@ export class XtmPollLoop {
             this.outbox,
             'outbox_dead',
             this.clock.nowIso(),
-            'ช่องแจ้ง/Sheets ถูก revoke (ถาวร)',
+            'channel/Sheets webhook permanently revoked',
           );
           // Covers webhook-revoked (permanent) failures on non-team channels.
           // A null/unknown channel (null !== 'team' → true) intentionally pages — fail-loud safe default.
@@ -225,7 +232,7 @@ export class XtmPollLoop {
             this.outbox.enqueue(
               'accept_recon_captured',
               JSON.stringify({
-                text: `🔍 เก็บ DOM เมนู accept จริงแล้ว (${path}) — พร้อม verify selector + คำนวณ acceptAvailable ก่อนเปิด accept`,
+                text: `🔍 Accept-menu DOM captured (${path}) — ready to verify selector + compute acceptAvailable before enabling accept`,
               }),
               this.clock.nowIso(),
               'chat',
@@ -274,7 +281,7 @@ export class XtmPollLoop {
           this.outbox,
           'layout_changed',
           this.clock.nowIso(),
-          `พบ ${snapshot.malformed.length} แถวที่ parse ไม่ผ่าน (quarantine)`,
+          `${snapshot.malformed.length} row(s) failed parsing (quarantined)`,
         );
         await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
       } else {
@@ -285,7 +292,7 @@ export class XtmPollLoop {
           this.outbox,
           'layout_changed',
           this.clock.nowIso(),
-          'อ่านหน้าได้ปกติ',
+          'page read clean',
         );
       }
 
@@ -311,7 +318,7 @@ export class XtmPollLoop {
           this.outbox,
           'outbox_dead',
           this.clock.nowIso(),
-          'แจ้งเตือนส่งได้ตามปกติ',
+          'notifications delivering normally',
         );
         await this.heartbeat.ok();
       }
@@ -346,11 +353,11 @@ export class XtmPollLoop {
         this.outbox,
         'portal_down',
         this.clock.nowIso(),
-        `${Math.round(downMs / 60000)} นาที`,
+        `${Math.round(downMs / 60000)} min`,
       );
       this.firstPortalErrorMs = 0;
     }
-    resolveAlert(this.db, this.outbox, 'login_failed', this.clock.nowIso(), 'login สำเร็จ');
+    resolveAlert(this.db, this.outbox, 'login_failed', this.clock.nowIso(), 'login succeeded');
     // layout_changed is resolved/raised in runOnce based on THIS cycle's malformed
     // count — not here — so a persistently-malformed row does not flap recovered↔alert
     // every cycle (onCycleSuccess runs before the malformed check).
@@ -370,7 +377,7 @@ export class XtmPollLoop {
             this.outbox,
             'login_failed',
             at,
-            `login ล้มเหลว ${this.loginFailures} ครั้งติดต่อกัน`,
+            `login failed ${this.loginFailures} consecutive times`,
           );
           await this.dispatcher.flush(at, this.clock.nowMs());
         }
@@ -388,7 +395,9 @@ export class XtmPollLoop {
         // Transient (network/timeout/session): track the portal-down window.
         if (this.firstPortalErrorMs === 0) this.firstPortalErrorMs = this.clock.nowMs();
         if (this.clock.nowMs() - this.firstPortalErrorMs >= PORTAL_DOWN_THRESHOLD_MS) {
-          if (raiseAlert(this.db, this.outbox, 'portal_down', at, 'portal ไม่ตอบสนองต่อเนื่อง')) {
+          if (
+            raiseAlert(this.db, this.outbox, 'portal_down', at, 'portal not responding (sustained)')
+          ) {
             await this.dispatcher.flush(at, this.clock.nowMs());
           }
         }

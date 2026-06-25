@@ -40,7 +40,7 @@ export function createXtmBot(): XtmBot {
       outbox,
       'db_corrupt',
       systemClock.nowIso(),
-      `สำเนา: ${opened.corruptCopyPath ?? 'n/a'}`,
+      `corrupt copy: ${opened.corruptCopyPath ?? 'n/a'}`,
     );
   }
 
