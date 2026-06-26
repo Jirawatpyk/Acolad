@@ -77,7 +77,8 @@ export type XtmLifecycleStatus =
   | 'missing'
   | 'accept_failed'
   | 'closed'
-  | 'removed';
+  | 'removed'
+  | 'rejected';
 
 export type XtmAcceptStatus = 'none' | 'accepting' | 'accepted' | 'failed';
 
