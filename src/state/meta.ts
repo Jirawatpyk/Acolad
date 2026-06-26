@@ -37,4 +37,24 @@ export class MetaStore {
   get lastDailyReportDate(): string | null {
     return this.get('last_daily_report_date') ?? null;
   }
+
+  // --- auto-yield state (ms epoch; 0 = unset/not-yielding) ---
+  get lastAuthSuccessMs(): number {
+    return this.getNumber('last_auth_success_ms', 0);
+  }
+  setLastAuthSuccessMs(ms: number): void {
+    this.set('last_auth_success_ms', String(ms));
+  }
+  get yieldUntilMs(): number {
+    return this.getNumber('yield_until_ms', 0);
+  }
+  setYieldUntilMs(ms: number): void {
+    this.set('yield_until_ms', String(ms));
+  }
+  get yieldEpisodeStartedMs(): number {
+    return this.getNumber('yield_episode_started_ms', 0);
+  }
+  setYieldEpisodeStartedMs(ms: number): void {
+    this.set('yield_episode_started_ms', String(ms));
+  }
 }
