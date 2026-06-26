@@ -124,16 +124,18 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
     });
 
     it('renders dueRaw via formatReadableDate (DD/MM/YYYY HH:mm)', () => {
-      // dueRaw = '18-Jun-2026 19:25' — parseable by Date.parse; Bangkok shift keeps 19:25 since it's local
+      // Use a TZ-explicit dueRaw (+07:00) so formatReadableDate is deterministic on
+      // ANY host/CI runner — a TZ-naive string would be parsed in the runner's local
+      // timezone and roll the date on a UTC runner.
       const result = renderXtmNewJob(
-        xstate(),
+        xstate({ dueDate: null, dueRaw: '2026-06-18T19:25:00+07:00' }),
         '2026-06-19T03:00:00.000Z',
         'Malay (MS) — accepting',
         XTM_URL,
       );
       const texts = rowTexts(result);
-      // formatReadableDate('18-Jun-2026 19:25') = '18/06/2026 19:25'
-      expect(texts.some((t) => t.includes('18/06/2026'))).toBe(true);
+      // formatReadableDate('2026-06-18T19:25:00+07:00') = '18/06/2026 19:25'
+      expect(texts.some((t) => t.includes('18/06/2026 19:25'))).toBe(true);
     });
 
     it('renders ISO dueDate via formatReadableDate as Bangkok DD/MM/YYYY HH:mm', () => {
