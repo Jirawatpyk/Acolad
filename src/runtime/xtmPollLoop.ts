@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { DB } from '../state/db.js';
-import { Outbox, createOutbox } from '../state/outbox.js';
+import { Outbox, createOutbox, type OutboxChannel } from '../state/outbox.js';
+import { XtmJobStore } from '../state/xtmJobStore.js';
+import { MetaStore } from '../state/meta.js';
 import { Dispatcher } from '../reporting/dispatcher.js';
 import { GoogleChatSender, type ChatSender } from '../reporting/googleChat.js';
 import type { SheetSender } from '../reporting/sheets.js';
 import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
+import { bangkokDate, buildDailyReportCard, dueDailyReport } from '../reporting/dailyReport.js';
 import { Heartbeat, type HeartbeatPinger } from '../monitoring/heartbeat.js';
 import type { XtmPortalClient } from '../portal/xtmClient.js';
 import { XtmPollCycle } from './xtmPollCycle.js';
@@ -23,6 +26,7 @@ const PORTAL_DOWN_THRESHOLD_MS = 10 * 60_000;
 /** Collaborators injected for testing (default to production impls). */
 export interface XtmPollLoopDeps {
   chatSender?: ChatSender;
+  teamChatSender?: ChatSender;
   sheetSender?: SheetSender;
   heartbeat?: HeartbeatPinger;
 }
@@ -36,6 +40,8 @@ export interface XtmPollLoopDeps {
  */
 export class XtmPollLoop {
   private readonly outbox: Outbox;
+  private readonly store: XtmJobStore;
+  private readonly meta: MetaStore;
   private readonly cycle: XtmPollCycle;
   private readonly dispatcher: Dispatcher;
   private readonly heartbeat: HeartbeatPinger;
@@ -44,6 +50,16 @@ export class XtmPollLoop {
   private lockoutUntilMs = 0;
   private firstPortalErrorMs = 0;
   private lastDiagMs = 0;
+  /**
+   * Set true during flush() when onDead OR onPermanent fires for a non-team channel row.
+   * Covers all terminal failures this flush: transient-exhausted, malformed, 400-payload-
+   * rejected (onDead path), and webhook-revoked (onPermanent path). A terminal failure on
+   * the 'team' channel (daily report delivery) must NOT page on-call — it surfaces via
+   * the system alert only (Constitution IV). Reset once before the first flush() so the
+   * flag accumulates across both flush() calls in a malformed cycle.
+   * Any channel other than 'team' pages on-call.
+   */
+  private nonTeamFailureThisFlush = false;
 
   constructor(
     private readonly db: DB,
@@ -54,6 +70,8 @@ export class XtmPollLoop {
     deps: XtmPollLoopDeps = {},
   ) {
     this.outbox = createOutbox(db, cfg);
+    this.store = new XtmJobStore(db);
+    this.meta = new MetaStore(db);
     this.cycle = new XtmPollCycle(db, cfg, client, {
       readClosedKeys: () => client.readClosedKeys(),
     });
@@ -64,29 +82,34 @@ export class XtmPollLoop {
       );
     this.sheetSender = deps.sheetSender;
     const chatSender = deps.chatSender ?? new GoogleChatSender(cfg.GOOGLE_CHAT_WEBHOOK_SYSTEM);
+    const teamChatSender =
+      deps.teamChatSender ?? new GoogleChatSender(cfg.GOOGLE_CHAT_WEBHOOK_TEAM);
     this.dispatcher = new Dispatcher(
       this.outbox,
-      chatSender,
+      {
+        chat: chatSender,
+        team: teamChatSender,
+        ...(deps.sheetSender ? { sheet: deps.sheetSender } : {}),
+      },
       logger,
       {
-        onDead: () =>
-          raiseAlert(
-            db,
-            this.outbox,
-            'outbox_dead',
-            this.clock.nowIso(),
-            'รายการ outbox เกินเพดาน retry',
-          ),
-        onPermanent: () =>
-          raiseAlert(
-            db,
-            this.outbox,
-            'outbox_dead',
-            this.clock.nowIso(),
-            'ช่องแจ้ง/Sheets ถูก revoke (ถาวร)',
-          ),
+        onDead: (eventId, channel, reason) => {
+          // Branch on CHANNEL (not event-id prefix) so the team-page invariant holds
+          // even if new team-channel event types are added in future.
+          // Team-channel delivery failures NEVER page on-call (Constitution IV); they
+          // surface via this alert only. Today the only team row is the daily report.
+          // Any channel other than 'team' pages on-call.
+          // Fix 5: channel passed by dispatcher — no extra DB lookup needed.
+          this.raiseTerminalAlert(eventId, channel, reason);
+        },
+        onPermanent: (eventId, channel) => {
+          // Fix 1: mirror the onDead channel branch so a revoked team webhook raises
+          // daily_report_dead instead of the generic outbox_dead (which would be wrong
+          // and would also incorrectly omit the team channel from the page gate).
+          // Fix 5: channel passed by dispatcher — no extra DB lookup needed.
+          this.raiseTerminalAlert(eventId, channel, 'webhook rejected (permanent)');
+        },
       },
-      deps.sheetSender,
     );
   }
 
@@ -188,7 +211,7 @@ export class XtmPollLoop {
             this.outbox.enqueue(
               'accept_recon_captured',
               JSON.stringify({
-                text: `🔍 เก็บ DOM เมนู accept จริงแล้ว (${path}) — พร้อม verify selector + คำนวณ acceptAvailable ก่อนเปิด accept`,
+                text: `🔍 Accept-menu DOM captured (${path}) — ready to verify selector + compute acceptAvailable before enabling accept`,
               }),
               this.clock.nowIso(),
               'chat',
@@ -202,6 +225,50 @@ export class XtmPollLoop {
         }
       }
 
+      // Daily 09:00 Bangkok report — once per calendar day, crash-safe via one
+      // SQLite transaction (enqueue outbox row + set meta in same txn so a crash
+      // between them can't double-send or lose the sent date). Non-fatal: a throw
+      // is logged and swallowed so detection is never blocked (Constitution IV).
+      // Meta stays unset on failure so the next cycle retries.
+      if (dueDailyReport(this.clock.nowMs(), this.meta.lastDailyReportDate)) {
+        const held = this.store.listByLifecycle('accepted');
+        const card = buildDailyReportCard(held, this.clock.nowMs(), this.cfg.XTM_ACOLAD_OFFERS_URL);
+        const date = bangkokDate(this.clock.nowMs());
+        try {
+          this.db.transaction(() => {
+            this.outbox.enqueue(`daily:${date}`, JSON.stringify(card), this.clock.nowIso(), 'team');
+            this.meta.set('last_daily_report_date', date);
+          })();
+          this.logger.info(
+            {
+              module: 'xtmPollLoop',
+              action: 'daily_report',
+              outcome: 'enqueued',
+              date,
+              held: held.length,
+            },
+            'daily in-progress report enqueued',
+          );
+        } catch (e) {
+          this.logger.error(
+            {
+              module: 'xtmPollLoop',
+              action: 'daily_report',
+              outcome: 'error',
+              date,
+              err: String(e),
+            },
+            'daily report enqueue failed — will retry next cycle',
+          );
+          // Do NOT re-throw: a non-critical report failure must not tank the detection cycle.
+          // Meta stays unset so the next eligible cycle retries.
+        }
+      }
+
+      // Reset the per-flush terminal-failure flag once, before the first flush(), so it
+      // accumulates across both flush() calls in a malformed cycle (the second flush sends
+      // the layout-alert row). Stale state from a prior cycle must not bleed in.
+      this.nonTeamFailureThisFlush = false;
       const disp = await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
 
       if (snapshot.malformed.length > 0) {
@@ -210,7 +277,7 @@ export class XtmPollLoop {
           this.outbox,
           'layout_changed',
           this.clock.nowIso(),
-          `พบ ${snapshot.malformed.length} แถวที่ parse ไม่ผ่าน (quarantine)`,
+          `${snapshot.malformed.length} row(s) failed parsing (quarantined)`,
         );
         await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
       } else {
@@ -221,12 +288,24 @@ export class XtmPollLoop {
           this.outbox,
           'layout_changed',
           this.clock.nowIso(),
-          'อ่านหน้าได้ปกติ',
+          'page read clean',
         );
       }
 
+      // A dead or permanently-failing 'team' channel row (daily report delivery
+      // failure) must NEVER page on-call — it surfaces only via the onDead/onPermanent
+      // system alert (Constitution IV: reporting outages never block detection or
+      // on-call paging). Only non-team terminal failures trigger the /fail dead-man switch.
+      //
+      // nonTeamFailureThisFlush is set by BOTH onDead (transient-exhausted, malformed,
+      // 400-payload-rejected) and onPermanent (webhook-revoked) when the failing row's
+      // channel is NOT 'team'. This supersedes the former channel-agnostic disp.dead /
+      // disp.permanentFailures terms which leaked team failures into the page gate.
+      //
+      // countDeadExcludingChannel('team') catches the persistent cross-cycle dead backlog
+      // (rows that died in a prior cycle and were never resolved).
       const stuck =
-        disp.dead > 0 || disp.permanentFailures > 0 || this.outbox.countByStatus('dead') > 0;
+        this.nonTeamFailureThisFlush || this.outbox.countDeadExcludingChannel('team') > 0;
       if (stuck) {
         await this.heartbeat.fail();
       } else {
@@ -235,7 +314,7 @@ export class XtmPollLoop {
           this.outbox,
           'outbox_dead',
           this.clock.nowIso(),
-          'แจ้งเตือนส่งได้ตามปกติ',
+          'notifications delivering normally',
         );
         await this.heartbeat.ok();
       }
@@ -261,6 +340,35 @@ export class XtmPollLoop {
     }
   }
 
+  /**
+   * Shared terminal-alert helper for onDead and onPermanent (Fix 1 + Fix 5 + Fix 6).
+   *
+   * Branch on CHANNEL so the team-page invariant holds for both dead and permanent paths:
+   *   team   → raise 'daily_report_dead' with a detail of `${date} — ${reason}`.
+   *            Does NOT set nonTeamFailureThisFlush (Constitution IV: team failures never page).
+   *   others → raise 'outbox_dead' with detail `outbox row dead — ${reason}` and
+   *            set nonTeamFailureThisFlush = true. Any channel other than 'team' pages on-call.
+   */
+  private raiseTerminalAlert(eventId: string, channel: OutboxChannel, reason: string): void {
+    if (channel === 'team') {
+      // Fix 6: detail = "<date> — <reason>" so the card's Detail row is informative.
+      const date = eventId.startsWith('daily:') ? eventId.slice('daily:'.length) : eventId;
+      const detail = `${date} — ${reason}`;
+      raiseAlert(this.db, this.outbox, 'daily_report_dead', this.clock.nowIso(), detail);
+    } else {
+      raiseAlert(
+        this.db,
+        this.outbox,
+        'outbox_dead',
+        this.clock.nowIso(),
+        `outbox row dead — ${reason}`,
+      );
+      // Covers transient-exhausted, malformed, 400-payload-rejected (onDead path), and
+      // webhook-revoked (onPermanent path) failures on non-team channels.
+      this.nonTeamFailureThisFlush = true;
+    }
+  }
+
   private onCycleSuccess(): void {
     this.loginFailures = 0;
     if (this.firstPortalErrorMs !== 0) {
@@ -270,11 +378,11 @@ export class XtmPollLoop {
         this.outbox,
         'portal_down',
         this.clock.nowIso(),
-        `${Math.round(downMs / 60000)} นาที`,
+        `${Math.round(downMs / 60000)} min`,
       );
       this.firstPortalErrorMs = 0;
     }
-    resolveAlert(this.db, this.outbox, 'login_failed', this.clock.nowIso(), 'login สำเร็จ');
+    resolveAlert(this.db, this.outbox, 'login_failed', this.clock.nowIso(), 'login succeeded');
     // layout_changed is resolved/raised in runOnce based on THIS cycle's malformed
     // count — not here — so a persistently-malformed row does not flap recovered↔alert
     // every cycle (onCycleSuccess runs before the malformed check).
@@ -294,7 +402,7 @@ export class XtmPollLoop {
             this.outbox,
             'login_failed',
             at,
-            `login ล้มเหลว ${this.loginFailures} ครั้งติดต่อกัน`,
+            `login failed ${this.loginFailures} consecutive times`,
           );
           await this.dispatcher.flush(at, this.clock.nowMs());
         }
@@ -312,7 +420,9 @@ export class XtmPollLoop {
         // Transient (network/timeout/session): track the portal-down window.
         if (this.firstPortalErrorMs === 0) this.firstPortalErrorMs = this.clock.nowMs();
         if (this.clock.nowMs() - this.firstPortalErrorMs >= PORTAL_DOWN_THRESHOLD_MS) {
-          if (raiseAlert(this.db, this.outbox, 'portal_down', at, 'portal ไม่ตอบสนองต่อเนื่อง')) {
+          if (
+            raiseAlert(this.db, this.outbox, 'portal_down', at, 'portal not responding (sustained)')
+          ) {
             await this.dispatcher.flush(at, this.clock.nowMs());
           }
         }

@@ -14,6 +14,7 @@ const base = {
   SHEETS_TAB_NAME: 'Tasks',
   // shared (001) — still required
   GOOGLE_CHAT_WEBHOOK_SYSTEM: 'https://chat.googleapis.com/v1/spaces/X/messages?key=k&token=t',
+  GOOGLE_CHAT_WEBHOOK_TEAM: 'https://chat.googleapis.com/v1/spaces/TEAM/messages?key=k&token=t',
   HEALTHCHECKS_PING_URL: 'https://hc-ping.com/abc',
 };
 
@@ -87,5 +88,16 @@ describe('loadConfig', () => {
     expect(secrets).toContain('AMPLEXOR');
     expect(secrets).toContain('https://hc-ping.com/abc');
     expect(secrets).not.toContain('');
+  });
+
+  it('requires GOOGLE_CHAT_WEBHOOK_TEAM (missing → throws with var name)', () => {
+    const { GOOGLE_CHAT_WEBHOOK_TEAM: _omit, ...rest } = base;
+    expect(() => loadConfig(rest)).toThrow(/GOOGLE_CHAT_WEBHOOK_TEAM/);
+  });
+
+  it('secretValues includes GOOGLE_CHAT_WEBHOOK_TEAM value (must be redacted in logs)', () => {
+    const cfg = loadConfig({ ...base });
+    const secrets = secretValues(cfg);
+    expect(secrets).toContain('https://chat.googleapis.com/v1/spaces/TEAM/messages?key=k&token=t');
   });
 });

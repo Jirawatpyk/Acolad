@@ -1,6 +1,10 @@
 import { google } from 'googleapis';
 import type { XtmLifecycleStatus } from '../detection/types.js';
 import type { SendOutcome } from './googleChat.js';
+import { formatReadableDate } from './dateFormat.js';
+
+/** Back-compat re-export so existing callers that import `formatSheetDate` still compile. */
+export { formatReadableDate as formatSheetDate } from './dateFormat.js';
 
 export type SheetStatus =
   | 'New'
@@ -60,39 +64,19 @@ export function lifecycleToSheetStatus(s: XtmLifecycleStatus): SheetStatus {
   return map[s];
 }
 
-/**
- * Human-readable Bangkok-local date for the Sheet ("DD/MM/YYYY HH:mm"). The bot
- * stores timestamps as ISO (UTC `...Z` or `+07:00`); the Sheet should show the local
- * wall-clock without the T / Z / offset / millisecond noise. Empty values become '';
- * an unparseable value passes through unchanged (never throws) so an odd raw due
- * string is preserved rather than blanked.
- */
-export function formatSheetDate(value: string | null): string {
-  if (!value) return '';
-  const t = Date.parse(value);
-  if (Number.isNaN(t)) return value;
-  const d = new Date(t + 7 * 3_600_000); // shift to Asia/Bangkok (+07:00), then read UTC parts
-  const p = (n: number): string => String(n).padStart(2, '0');
-  const date = `${p(d.getUTCDate())}/${p(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
-  // A date-only input (no time component) must not gain a spurious "07:00" from the
-  // +07 shift of UTC-midnight — show just the date.
-  const hasTime = value.includes('T') || /\d:\d/.test(value);
-  return hasTime ? `${date} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}` : date;
-}
-
 function rowToValues(r: SheetRow): string[] {
   return [
-    formatSheetDate(r.receivedDate),
+    formatReadableDate(r.receivedDate),
     r.status,
     r.projectName,
     r.fileName,
     r.sourceLang ?? '',
     r.targetLang ?? '',
-    formatSheetDate(r.dueDate),
+    formatReadableDate(r.dueDate),
     r.words === null ? '' : String(r.words),
     r.step ?? '',
     r.role ?? '',
-    formatSheetDate(r.acceptedAt),
+    formatReadableDate(r.acceptedAt),
     r.note ?? '',
     r.jobKey,
   ];

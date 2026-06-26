@@ -51,7 +51,7 @@ async function main(): Promise<void> {
         outbox,
         'cold_start_repeat',
         systemClock.nowIso(),
-        'เริ่มแบบไม่มีฐานสถานะซ้ำใน 7 วัน',
+        'cold start repeated within 7 days — state file may have been lost',
       );
     }
   }
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
   };
   const shutdown = (signal: string): void => {
     logger.info({ module: 'main', action: 'shutdown', signal }, 'graceful shutdown requested');
-    console.log(`[${stamp()}] ได้รับสัญญาณ ${signal} — กำลังปิดอย่างนุ่มนวล...`);
+    console.log(`[${stamp()}] received ${signal} — shutting down gracefully...`);
     if (!running) {
       void forceShutdown(); // second signal → force now
       return;
@@ -109,14 +109,14 @@ async function main(): Promise<void> {
 
   logger.info({ module: 'main', action: 'startup', outcome: 'ok' }, 'acolad-xtm-bot started');
   console.log(
-    `[${stamp()}] acolad-bot (XTM) เริ่มทำงาน — เฝ้า ${cfg.XTM_ACOLAD_OFFERS_URL} | accept=${cfg.ACCEPT_ENABLED ? 'ON' : 'OFF'}`,
+    `[${stamp()}] acolad-bot (XTM) started — monitoring ${cfg.XTM_ACOLAD_OFFERS_URL} | accept=${cfg.ACCEPT_ENABLED ? 'ON' : 'OFF'}`,
   );
-  console.log(`[${stamp()}] log ละเอียดอยู่ที่ ${cfg.LOG_DIR}/  (Ctrl+C เพื่อหยุด)`);
+  console.log(`[${stamp()}] detailed logs at ${cfg.LOG_DIR}/  (Ctrl+C to stop)`);
 
   while (running) {
     const cycleStart = systemClock.nowMs();
     const ok = await loop.runOnce();
-    console.log(`[${stamp()}] รอบตรวจ: ${ok ? 'OK' : 'มีปัญหา (ดู log/Google Chat)'}`);
+    console.log(`[${stamp()}] poll cycle: ${ok ? 'OK' : 'error (see logs / Google Chat)'}`);
 
     const cycleDurationMs = systemClock.nowMs() - cycleStart;
     const j = jitter(5_000, Math.random());
@@ -139,7 +139,7 @@ async function main(): Promise<void> {
   // Normal exit (loop ended cooperatively before the watchdog fired). Same guarded
   // teardown — clears the pending watchdog so it cannot fire a redundant force.
   await cleanup('ok');
-  console.log(`[${stamp()}] acolad-bot หยุดแล้ว`);
+  console.log(`[${stamp()}] acolad-bot stopped`);
 }
 
 main().catch((err) => {

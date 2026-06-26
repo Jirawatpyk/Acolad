@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, type DB } from '../../src/state/db.js';
 import { XtmPollLoop } from '../../src/runtime/xtmPollLoop.js';
+import { XtmJobStore } from '../../src/state/xtmJobStore.js';
 import { LoginFailedError } from '../../src/portal/errors.js';
 import type { XtmPortalClient } from '../../src/portal/xtmClient.js';
 import type { AppConfig } from '../../src/config/index.js';
-import type { XtmRawJob, XtmJobSnapshot } from '../../src/detection/types.js';
+import type { XtmRawJob, XtmJobSnapshot, XtmJobState } from '../../src/detection/types.js';
 import type { ChatSender, SendOutcome } from '../../src/reporting/googleChat.js';
 import type { SheetSender, SheetRow } from '../../src/reporting/sheets.js';
 
@@ -71,6 +72,9 @@ class StubClient implements XtmPortalClient {
 const okChat: ChatSender = {
   async send(): Promise<SendOutcome> {
     return 'ok';
+  },
+  async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+    return { outcome: 'ok', status: 200 };
   },
 };
 class CapturingSheet implements SheetSender {
@@ -190,5 +194,537 @@ describe('XtmPollLoop (runtime driver)', () => {
     const result = await loop.runOnce(); // still locked out
     expect(result).toBe(false);
     expect(before).toBeInstanceOf(LoginFailedError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Daily report integration tests
+// ---------------------------------------------------------------------------
+
+/** Seed an accepted XtmJobState directly into the store (bypassing a full cycle). */
+function seedAcceptedJob(db: DB, over: Partial<XtmJobState> = {}): void {
+  const store = new XtmJobStore(db);
+  const base: XtmJobState = {
+    jobKey: `J-${Math.random().toString(36).slice(2)}`,
+    xtmTaskId: 'T1',
+    projectName: 'Project X',
+    fileName: 'doc.xlf',
+    sourceLang: 'English (USA)',
+    targetLang: 'Malay (Malaysia)',
+    dueDate: '2026-06-30T00:00:00Z',
+    dueRaw: null,
+    words: 1000,
+    step: 'PE 1',
+    role: 'Corrector',
+    eligible: true,
+    lifecycleStatus: 'accepted',
+    acceptStatus: 'accepted',
+    acceptedAt: '2026-06-25T02:00:00Z',
+    status: 'visible',
+    firstSeenAt: '2026-06-24T10:00:00Z',
+    lastSeenAt: '2026-06-25T03:00:00Z',
+    snapshotHash: 'abc',
+    consecutiveMisses: 0,
+    ...over,
+  };
+  store.upsertMany([base]);
+}
+
+// Clock at 10:00 Bangkok (UTC 03:00 on 25 Jun)
+const BKK_10_00 = Date.parse('2026-06-25T03:00:00Z');
+// Clock at 08:00 Bangkok (UTC 01:00 on 25 Jun) — before 09:00 trigger
+const BKK_08_00 = Date.parse('2026-06-25T01:00:00Z');
+
+describe('XtmPollLoop — daily report', () => {
+  it('enqueues exactly one team outbox row at 10:00 Bangkok with 2 accepted jobs', async () => {
+    fresh();
+    // Seed 2 accepted jobs
+    seedAcceptedJob(db, { jobKey: 'J-A1', projectName: 'Alpha', fileName: 'a.xlf' });
+    seedAcceptedJob(db, { jobKey: 'J-A2', projectName: 'Beta', fileName: 'b.xlf' });
+
+    const clockAt10 = { nowMs: () => BKK_10_00, nowIso: () => new Date(BKK_10_00).toISOString() };
+    const client = new StubClient(); // empty Active → no new jobs, just daily trigger
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ XTM_ACOLAD_OFFERS_URL: 'https://xtm.example.com' } as Partial<AppConfig>),
+      noopLogger,
+      clockAt10,
+      { chatSender: okChat, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    await loop.runOnce();
+
+    // Exactly one 'team' outbox row with event_id 'daily:2026-06-25'
+    const rows = db
+      .prepare("SELECT * FROM outbox WHERE event_id = 'daily:2026-06-25' AND channel = 'team'")
+      .all() as { payload_json: string }[];
+    expect(rows).toHaveLength(1);
+
+    // Card title includes (2)
+    const payload = JSON.parse(rows[0]!.payload_json) as { cardsV2: unknown[] };
+    const entry = payload.cardsV2[0] as { card: { header: { title: string } } };
+    expect(entry.card.header.title).toBe('📋 Jobs in Progress (2)');
+  });
+
+  it('does NOT enqueue a second daily row when runOnce is called again on the same Bangkok day', async () => {
+    fresh();
+    seedAcceptedJob(db, { jobKey: 'J-B1' });
+
+    const clockAt10 = { nowMs: () => BKK_10_00, nowIso: () => new Date(BKK_10_00).toISOString() };
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ XTM_ACOLAD_OFFERS_URL: 'https://xtm.example.com' } as Partial<AppConfig>),
+      noopLogger,
+      clockAt10,
+      { chatSender: okChat, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    await loop.runOnce(); // first run — enqueues
+    await loop.runOnce(); // second run same clock — meta gate prevents duplicate
+
+    const rows = db
+      .prepare("SELECT * FROM outbox WHERE event_id = 'daily:2026-06-25' AND channel = 'team'")
+      .all();
+    expect(rows).toHaveLength(1); // still exactly one, not two
+  });
+
+  it('does NOT enqueue a daily row when Bangkok hour < 09 (08:00 Bangkok)', async () => {
+    fresh();
+    seedAcceptedJob(db, { jobKey: 'J-C1' });
+
+    const clockAt8 = { nowMs: () => BKK_08_00, nowIso: () => new Date(BKK_08_00).toISOString() };
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ XTM_ACOLAD_OFFERS_URL: 'https://xtm.example.com' } as Partial<AppConfig>),
+      noopLogger,
+      clockAt8,
+      { chatSender: okChat, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    await loop.runOnce();
+
+    const rows = db
+      .prepare("SELECT * FROM outbox WHERE channel = 'team' AND event_id LIKE 'daily:%'")
+      .all();
+    expect(rows).toHaveLength(0); // nothing enqueued before 09:00
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stuck-gate isolation: team-channel dead rows must NOT page on-call (Finding 1/2)
+// ---------------------------------------------------------------------------
+
+import { Outbox } from '../../src/state/outbox.js';
+
+describe('XtmPollLoop — heartbeat stuck gate excludes team channel', () => {
+  /**
+   * Helper: builds a loop with a sender that always fails transiently, then seeds
+   * a pre-dead outbox row for the given channel so the NEXT runOnce sees it via
+   * countDeadExcludingChannel (past-dead path). This covers the "dead row already
+   * in DB" case; the freshly-dead-this-flush path is covered by the transient-sender
+   * tests below.
+   */
+  function seedDeadRow(
+    outbox: Outbox,
+    eventId: string,
+    channel: 'team' | 'chat',
+    nowIso: string,
+  ): void {
+    // Enqueue then mark dead directly via SQL so we bypass the retry cap
+    outbox.enqueue(eventId, JSON.stringify({ text: 'test' }), nowIso, channel);
+    // Force status=dead via recordFailure exhaustion simulation — just update directly
+    const loopDb = (outbox as unknown as { db: import('../../src/state/db.js').DB }).db;
+    loopDb.prepare("UPDATE outbox SET status = 'dead' WHERE event_id = ?").run(eventId);
+  }
+
+  it('a dead team-channel row does NOT call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient(); // empty snapshot, no jobs
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: okChat,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pre-dead 'team' row directly (simulates daily report delivery failure)
+    const outbox = new Outbox(db, 10, 6);
+    seedDeadRow(outbox, 'daily:2026-06-24', 'team', NOW);
+
+    await loop.runOnce();
+
+    // The team dead row must NOT trigger paging
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+  });
+
+  it('a dead chat-channel row DOES call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: okChat,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pre-dead 'chat' row (simulates a failed job notification)
+    const outbox = new Outbox(db, 10, 6);
+    seedDeadRow(outbox, 'job:some-key:first_seen', 'chat', NOW);
+
+    await loop.runOnce();
+
+    // A dead chat row MUST page on-call
+    expect(heartbeat.fail).toHaveBeenCalled();
+    expect(heartbeat.ok).not.toHaveBeenCalled();
+  });
+
+  it('a freshly-dead team-channel row (exhausts retries this flush) does NOT call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that always returns transient so the row exhausts its retry cap this flush
+    const failingTeamSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'transient';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'transient', status: 503 };
+      },
+    };
+
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ OUTBOX_RETRY_CAP: 1, OUTBOX_DEAD_AFTER_HOURS: 6 }),
+      noopLogger,
+      clock,
+      {
+        chatSender: okChat,
+        teamChatSender: failingTeamSender,
+        sheetSender: new CapturingSheet(),
+        heartbeat,
+      },
+    );
+
+    // Seed a pending 'team' row — it will exhaust retries (cap=1) in this flush
+    const outbox = new Outbox(db, 1, 6);
+    outbox.enqueue('daily:2026-06-19', JSON.stringify({ text: 'daily' }), NOW, 'team');
+
+    await loop.runOnce();
+
+    // Even though the team row just died this flush, it must NOT page on-call
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+  });
+
+  it('a freshly-dead chat-channel row (exhausts retries this flush) DOES call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that always fails — will exhaust retry cap = 1 for chat
+    const failingChatSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'transient';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'transient', status: 503 };
+      },
+    };
+
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ OUTBOX_RETRY_CAP: 1, OUTBOX_DEAD_AFTER_HOURS: 6 }),
+      noopLogger,
+      clock,
+      { chatSender: failingChatSender, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    // Seed a pending 'chat' row — will die this flush
+    const outbox = new Outbox(db, 1, 6);
+    outbox.enqueue('job:some-key:first_seen', JSON.stringify({ text: 'job found' }), NOW, 'chat');
+
+    await loop.runOnce();
+
+    // A freshly-dead chat row MUST page on-call
+    expect(heartbeat.fail).toHaveBeenCalled();
+    expect(heartbeat.ok).not.toHaveBeenCalled();
+  });
+
+  it('a permanent-failure team-channel row does NOT call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that returns permanent (webhook revoked) for the team channel
+    const permanentTeamSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'permanent';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'permanent', status: 403 };
+      },
+    };
+
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: okChat,
+      teamChatSender: permanentTeamSender,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pending 'team' row — will get a permanent failure this flush (but stays pending)
+    const outbox = new Outbox(db, 10, 6);
+    outbox.enqueue('daily:2026-06-19', JSON.stringify({ cardsV2: [{}] }), NOW, 'team');
+
+    await loop.runOnce();
+
+    // A permanent-failure team row must NOT page on-call
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+  });
+
+  it('a permanent-failure chat-channel row DOES call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that returns permanent (webhook revoked) for the chat channel
+    const permanentChatSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'permanent';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'permanent', status: 403 };
+      },
+    };
+
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: permanentChatSender,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pending 'chat' row — will get a permanent failure this flush
+    const outbox = new Outbox(db, 10, 6);
+    outbox.enqueue('job:some-key:first_seen', JSON.stringify({ cardsV2: [{}] }), NOW, 'chat');
+
+    await loop.runOnce();
+
+    // A permanent-failure chat row MUST page on-call
+    expect(heartbeat.fail).toHaveBeenCalled();
+    expect(heartbeat.ok).not.toHaveBeenCalled();
+  });
+
+  it('a malformed/payload-rejected chat-channel drop DOES call heartbeat.fail() (parity with pre-branch behavior)', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that returns 400 payload-rejection for the chat channel — dispatcher drops via markSent + onDead
+    const rejectionChatSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'permanent';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'permanent', status: 400 }; // isPayloadRejection(400) → true → onDead path
+      },
+    };
+
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: rejectionChatSender,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pending 'chat' row with a cardsV2 payload so it passes shape-check and hits the sender
+    const outbox = new Outbox(db, 10, 6);
+    outbox.enqueue('job:some-key:first_seen', JSON.stringify({ cardsV2: [{}] }), NOW, 'chat');
+
+    await loop.runOnce();
+
+    // A dropped (payload-rejected) non-team row MUST page on-call — regression guard
+    expect(heartbeat.fail).toHaveBeenCalled();
+    expect(heartbeat.ok).not.toHaveBeenCalled();
+  });
+
+  it('a malformed/payload-rejected team-channel drop does NOT call heartbeat.fail()', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that returns 400 payload-rejection for the team channel — dispatcher drops via markSent + onDead
+    const rejectionTeamSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'permanent';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'permanent', status: 400 }; // isPayloadRejection(400) → true → onDead path
+      },
+    };
+
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: okChat,
+      teamChatSender: rejectionTeamSender,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    // Seed a pending 'team' row with a cardsV2 payload so it passes shape-check and hits the sender
+    const outbox = new Outbox(db, 10, 6);
+    outbox.enqueue('daily:2026-06-19', JSON.stringify({ cardsV2: [{}] }), NOW, 'team');
+
+    await loop.runOnce();
+
+    // A dropped (payload-rejected) team row must NOT page on-call
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 2: outbox_dead alert detail must contain the reason (not a static string)
+// ---------------------------------------------------------------------------
+
+describe('XtmPollLoop — outbox_dead detail contains reason', () => {
+  it('outbox_dead system alert detail includes "rejected by Chat (400)" when a chat row is 400-rejected', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that returns 400 — isPayloadRejection → onDead with 'rejected by Chat (400)'
+    const rejectionChatSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'permanent';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'permanent', status: 400 };
+      },
+    };
+
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: rejectionChatSender,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    const outbox = new Outbox(db, 10, 6);
+    outbox.enqueue('job:key-x:first_seen', JSON.stringify({ cardsV2: [{}] }), NOW, 'chat');
+
+    await loop.runOnce();
+
+    // The outbox_dead system alert must have the reason in its payload_json (the 'Detail' card row)
+    const alert = db
+      .prepare(
+        "SELECT payload_json FROM system_events WHERE event_type='system_alert' AND dedup_key='outbox_dead'",
+      )
+      .get() as { payload_json: string } | undefined;
+    expect(alert).toBeDefined();
+    expect(alert!.payload_json).toContain('rejected by Chat (400)');
+  });
+
+  it('outbox_dead system alert detail includes "retry limit exceeded" when a chat row exhausts retries', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    const failingChatSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'transient';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'transient', status: 503 };
+      },
+    };
+
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ OUTBOX_RETRY_CAP: 1, OUTBOX_DEAD_AFTER_HOURS: 6 }),
+      noopLogger,
+      clock,
+      { chatSender: failingChatSender, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    const outbox = new Outbox(db, 1, 6);
+    outbox.enqueue('job:key-y:first_seen', JSON.stringify({ text: 'hi' }), NOW, 'chat');
+
+    await loop.runOnce();
+
+    const alert = db
+      .prepare(
+        "SELECT payload_json FROM system_events WHERE event_type='system_alert' AND dedup_key='outbox_dead'",
+      )
+      .get() as { payload_json: string } | undefined;
+    expect(alert).toBeDefined();
+    expect(alert!.payload_json).toContain('retry limit exceeded');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 7: daily_report_dead alert raised when team row dies (retry-exhausted)
+// ---------------------------------------------------------------------------
+
+describe('XtmPollLoop — daily_report_dead alert when team row dies', () => {
+  it('raises daily_report_dead alert with date in detail when a daily:<date> team row exhausts retries', async () => {
+    fresh();
+    const client = new StubClient(); // empty Active
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that always returns transient — will exhaust retry cap in this flush
+    const failingTeamSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'transient';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'transient', status: 503 };
+      },
+    };
+
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ OUTBOX_RETRY_CAP: 1, OUTBOX_DEAD_AFTER_HOURS: 6 }),
+      noopLogger,
+      clock,
+      {
+        chatSender: okChat,
+        teamChatSender: failingTeamSender,
+        sheetSender: new CapturingSheet(),
+        heartbeat,
+      },
+    );
+
+    // Seed a pending 'team' daily row — it will exhaust retries (cap=1) in this flush
+    const outbox = new Outbox(db, 1, 6);
+    outbox.enqueue('daily:2026-06-19', JSON.stringify({ text: 'daily' }), NOW, 'team');
+
+    await loop.runOnce();
+
+    // heartbeat.fail must NOT be called (team failure never pages on-call)
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+
+    // A system_alert with dedup_key='daily_report_dead' must be enqueued
+    const alert = db
+      .prepare(
+        "SELECT payload_json FROM system_events WHERE event_type='system_alert' AND dedup_key='daily_report_dead'",
+      )
+      .get() as { payload_json: string } | undefined;
+    expect(alert).toBeDefined();
+
+    // The alert detail must contain the date from the event_id ('daily:2026-06-19' → '2026-06-19')
+    expect(alert!.payload_json).toContain('2026-06-19');
   });
 });

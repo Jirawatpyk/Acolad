@@ -1,5 +1,6 @@
-import type { Outbox, OutboxRow } from '../state/outbox.js';
+import type { Outbox, OutboxRow, OutboxChannel } from '../state/outbox.js';
 import type { ChatSender, ChatPayload, SendOutcome } from './googleChat.js';
+import { isPayloadRejection } from './googleChat.js';
 import type { SheetSender, SheetRow } from './sheets.js';
 import type { Logger } from '../monitoring/logger.js';
 
@@ -10,27 +11,66 @@ export interface DispatchSummary {
   permanentFailures: number;
 }
 
+/** Closed union of all terminal-drop reasons the dispatcher can emit. */
+export type DeadReason = 'retry limit exceeded' | 'malformed payload' | 'rejected by Chat (400)';
+
 export interface DispatcherHooks {
-  /** Called when a row exhausts retries (FR-018: raise system alert + /fail ping). */
-  onDead?: (eventId: string) => void;
-  /** Called when the channel returns a permanent error (webhook revoked). */
-  onPermanent?: (eventId: string) => void;
+  /**
+   * Called when a row is terminally dropped (retries exhausted, malformed, or
+   * 400 payload-rejected). Passes the row's channel and a human-readable reason
+   * so callers can branch without an extra DB lookup (Fix 5).
+   *
+   * Reasons:
+   *   'retry limit exceeded'     — transient exhausted retry cap/age
+   *   'malformed payload'        — invalid JSON / missing sender / unknown shape
+   *   'rejected by Chat (400)'   — Google Chat rejected the payload (400)
+   */
+  onDead?: (eventId: string, channel: OutboxChannel, reason: DeadReason) => void;
+  /**
+   * Called when the channel returns a permanent error (webhook revoked: 401/403/404).
+   * Passes the row's channel so callers can branch without an extra DB lookup (Fix 5).
+   */
+  onPermanent?: (eventId: string, channel: OutboxChannel) => void;
+}
+
+/** Map of senders keyed by channel. Only `chat` is required; `team` and `sheet` are optional. */
+export interface DispatcherSenders {
+  chat: ChatSender;
+  team?: ChatSender;
+  sheet?: SheetSender;
 }
 
 /**
- * Flushes due outbox rows to the chat channel. One message per row (no batching —
- * SC-008). Marks a row sent immediately after a 2xx to keep the at-least-once
- * window minimal (data-model.md). A failure never blocks detection (Constitution IV).
+ * Flushes due outbox rows to the appropriate channel sender. One message per row
+ * (no batching — SC-008). Marks a row sent immediately after a 2xx to keep the
+ * at-least-once window minimal (data-model.md). A failure never blocks detection
+ * (Constitution IV).
+ *
+ * Routing:
+ *   'sheets' → senders.sheet
+ *   'team'   → senders.team
+ *   'chat'   → senders.chat
+ * If the target sender is absent → treated as malformed (dead + onDead, queue not wedged).
+ *
+ * Payload discrimination for chat/team:
+ *   { cardsV2: unknown[] } → send as cardsV2 card
+ *   { text: string }       → send as plain text
+ *   anything else          → malformed
+ *
+ * A 400 response means the payload itself was rejected (oversized/malformed card) —
+ * dead + onDead, NOT recordPermanentFailure (which is for revoked webhooks).
  */
 export class Dispatcher {
+  private readonly senders: DispatcherSenders;
+
   constructor(
     private readonly outbox: Outbox,
-    private readonly sender: ChatSender,
+    senders: DispatcherSenders,
     private readonly logger: Logger,
     private readonly hooks: DispatcherHooks = {},
-    /** Target for the 'sheets' channel; rows of that channel are dropped if absent. */
-    private readonly sheetSender?: SheetSender,
-  ) {}
+  ) {
+    this.senders = senders;
+  }
 
   async flush(nowIso: string, nowMs: number): Promise<DispatchSummary> {
     const summary: DispatchSummary = {
@@ -43,8 +83,8 @@ export class Dispatcher {
     for (const row of due) {
       const sent = await this.sendRow(row);
       // Guard the implicit contract (Constitution VI): a single malformed row
-      // (invalid JSON or missing payload) must not wedge the whole queue or send
-      // an empty message — drop it with an error log + dead alert.
+      // (invalid JSON or missing/unknown payload shape) must not wedge the whole
+      // queue or send an empty message — drop it with an error log + dead alert.
       if (sent === 'malformed') {
         summary.dead++;
         this.outbox.markSent(row.outbox_id, nowIso); // drop so the queue can't wedge
@@ -58,10 +98,10 @@ export class Dispatcher {
           },
           'dropped malformed outbox payload',
         );
-        this.hooks.onDead?.(row.event_id);
+        this.hooks.onDead?.(row.event_id, row.channel, 'malformed payload');
         continue;
       }
-      const { outcome, latencyMs } = sent;
+      const { outcome, latencyMs, payloadRejected } = sent;
 
       if (outcome === 'ok') {
         this.outbox.markSent(row.outbox_id, nowIso);
@@ -74,22 +114,41 @@ export class Dispatcher {
       }
 
       if (outcome === 'permanent') {
-        // Webhook revoked/removed: defer slowly, do NOT count toward dead (FR-018)
-        // so queued events flush once the channel is fixed. Out-of-band signal is
-        // the heartbeat /fail raised by the caller.
-        summary.permanentFailures++;
-        this.outbox.recordPermanentFailure(row, nowMs);
-        this.logger.error(
-          {
-            module: 'dispatcher',
-            action: 'send',
-            outcome: 'permanent',
-            latencyMs,
-            eventId: row.event_id,
-          },
-          'notification channel permanently failing',
-        );
-        this.hooks.onPermanent?.(row.event_id);
+        if (payloadRejected) {
+          // 400: the card payload itself is bad — no point retrying with the same body.
+          // Dead + onDead, same as malformed, but with a distinct log line.
+          summary.dead++;
+          this.outbox.markSent(row.outbox_id, nowIso); // drop
+          this.logger.error(
+            {
+              module: 'dispatcher',
+              action: 'send',
+              outcome: 'dead',
+              latencyMs,
+              eventId: row.event_id,
+              channel: row.channel,
+            },
+            'card rejected (payload) — dropped',
+          );
+          this.hooks.onDead?.(row.event_id, row.channel, 'rejected by Chat (400)');
+        } else {
+          // Webhook revoked/removed: defer slowly, do NOT count toward dead (FR-018)
+          // so queued events flush once the channel is fixed. Out-of-band signal is
+          // the heartbeat /fail raised by the caller.
+          summary.permanentFailures++;
+          this.outbox.recordPermanentFailure(row, nowMs);
+          this.logger.error(
+            {
+              module: 'dispatcher',
+              action: 'send',
+              outcome: 'permanent',
+              latencyMs,
+              eventId: row.event_id,
+            },
+            'notification channel permanently failing',
+          );
+          this.hooks.onPermanent?.(row.event_id, row.channel);
+        }
         continue;
       }
 
@@ -107,7 +166,7 @@ export class Dispatcher {
           },
           'notification exhausted retries',
         );
-        this.hooks.onDead?.(row.event_id);
+        this.hooks.onDead?.(row.event_id, row.channel, 'retry limit exceeded');
       } else {
         summary.transientFailures++;
         this.logger.warn(
@@ -122,14 +181,25 @@ export class Dispatcher {
   /** Route one row to its channel sender; returns 'malformed' or the send result. */
   private async sendRow(
     row: OutboxRow,
-  ): Promise<'malformed' | { outcome: SendOutcome; latencyMs: number }> {
+  ): Promise<'malformed' | { outcome: SendOutcome; latencyMs: number; payloadRejected: boolean }> {
     const start = Date.now();
+
     if (row.channel === 'sheets') {
-      if (!this.sheetSender) return 'malformed';
+      if (!this.senders.sheet) return 'malformed';
       let sheetRow: SheetRow | undefined;
       try {
         sheetRow = (JSON.parse(row.payload_json) as { row: SheetRow }).row;
-      } catch {
+      } catch (e) {
+        this.logger.warn(
+          {
+            module: 'dispatcher',
+            action: 'parse_sheets',
+            channel: row.channel,
+            eventId: row.event_id,
+            err: String(e),
+          },
+          'sheets payload JSON parse failed — treating as malformed',
+        );
         sheetRow = undefined;
       }
       if (!sheetRow || typeof sheetRow.jobKey !== 'string' || sheetRow.jobKey === '') {
@@ -137,26 +207,72 @@ export class Dispatcher {
       }
       let outcome: SendOutcome;
       try {
-        outcome = await this.sheetSender.send(sheetRow);
-      } catch {
+        outcome = await this.senders.sheet.send(sheetRow);
+      } catch (e) {
+        this.logger.warn(
+          {
+            module: 'dispatcher',
+            action: 'send_sheets',
+            channel: row.channel,
+            eventId: row.event_id,
+            err: String(e),
+          },
+          'sheets sender threw — treating as transient',
+        );
         outcome = 'transient';
       }
-      return { outcome, latencyMs: Date.now() - start };
+      return { outcome, latencyMs: Date.now() - start, payloadRejected: false };
     }
-    // 'chat'
-    let text: string | undefined;
+
+    // 'chat' or 'team'
+    const sender: ChatSender | undefined =
+      row.channel === 'team' ? this.senders.team : this.senders.chat;
+
+    // No sender configured for this channel → malformed/dead so queue can't wedge.
+    if (!sender) return 'malformed';
+
+    // Discriminate payload shape.
+    let payload: ChatPayload | undefined;
     try {
-      text = (JSON.parse(row.payload_json) as ChatPayload).text;
-    } catch {
-      text = undefined;
+      const parsed = JSON.parse(row.payload_json) as Record<string, unknown>;
+      if (Array.isArray(parsed['cardsV2']) && parsed['cardsV2'].length > 0) {
+        payload = { cardsV2: parsed['cardsV2'] };
+      } else if (typeof parsed['text'] === 'string' && parsed['text'] !== '') {
+        payload = { text: parsed['text'] };
+      }
+    } catch (e) {
+      this.logger.warn(
+        {
+          module: 'dispatcher',
+          action: 'parse_chat',
+          channel: row.channel,
+          eventId: row.event_id,
+          err: String(e),
+        },
+        'chat payload JSON parse failed — treating as malformed',
+      );
+      payload = undefined;
     }
-    if (typeof text !== 'string' || text === '') return 'malformed';
+    if (!payload) return 'malformed';
+
     let outcome: SendOutcome;
+    let status: number;
     try {
-      outcome = await this.sender.send(text);
-    } catch {
+      ({ outcome, status } = await sender.sendDetailed(payload));
+    } catch (e) {
+      this.logger.warn(
+        {
+          module: 'dispatcher',
+          action: 'send_chat',
+          channel: row.channel,
+          eventId: row.event_id,
+          err: String(e),
+        },
+        'chat sender threw — treating as transient',
+      );
       outcome = 'transient';
+      status = 0;
     }
-    return { outcome, latencyMs: Date.now() - start };
+    return { outcome, latencyMs: Date.now() - start, payloadRejected: isPayloadRejection(status) };
   }
 }

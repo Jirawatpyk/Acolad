@@ -1,55 +1,85 @@
-import { formatBangkok } from './notifier.js';
+import { buildCard } from './chatCard.js';
+import { formatReadableDate } from './dateFormat.js';
+import { sanitizeCardId, wordsValue } from './cardText.js';
 import type { XtmJobState } from '../detection/types.js';
 
-const dash = (v: string | number | null | undefined): string =>
-  v !== null && v !== undefined && v !== '' ? String(v) : '—';
-
-const langs = (job: XtmJobState): string => `${dash(job.sourceLang)} → ${dash(job.targetLang)}`;
-const due = (job: XtmJobState): string => dash(job.dueDate ?? job.dueRaw);
+const langPair = (job: XtmJobState): string =>
+  `${job.sourceLang ?? '—'} → ${job.targetLang ?? '—'}`;
+const dueForJob = (job: XtmJobState): string | null => job.dueDate ?? job.dueRaw ?? null;
 
 /**
- * 🆕 New detected job (contracts/notifications.md). Sent for every detected job
- * (any language). `statusNote` is computed by the orchestration so it reflects
- * the real action (eligible+accepting / eligible+accept-disabled / not Malay).
+ * 🆕 New detected job (English cardsV2). `statusNote` is computed by the
+ * orchestration so it reflects the real action (eligible+accepting /
+ * eligible+accept-disabled / not Malay). `xtmUrl` becomes the button link.
  */
-export function renderXtmNewJob(job: XtmJobState, capturedAt: string, statusNote: string): string {
-  return [
-    '🆕 งานใหม่บน XTM',
-    `โปรเจกต์: ${dash(job.projectName)}`,
-    `ไฟล์: ${dash(job.fileName)}`,
-    `ภาษา: ${langs(job)}`,
-    `ครบกำหนด: ${due(job)} | คำ: ${dash(job.words)} | ขั้น: ${dash(job.step)} (${dash(job.role)})`,
-    `สถานะ: ${statusNote}`,
-    `เวลา: ${formatBangkok(capturedAt)}`,
-  ].join('\n');
+export function renderXtmNewJob(
+  job: XtmJobState,
+  capturedAt: string,
+  statusNote: string,
+  xtmUrl: string,
+): { cardsV2: unknown[] } {
+  return buildCard({
+    cardId: sanitizeCardId(`new-${job.jobKey}`),
+    headerTitle: '🆕 New Job · XTM',
+    rows: [
+      { label: 'Project', value: job.projectName ?? null },
+      { label: 'File', value: job.fileName ?? null },
+      { label: 'Language', value: langPair(job) },
+      { label: 'Due', value: formatReadableDate(dueForJob(job)) || null },
+      { label: 'Words', value: wordsValue(job.words) },
+      { label: 'Step', value: job.step ? `${job.step} (${job.role ?? '—'})` : null },
+      { label: 'Status', value: statusNote },
+      { label: 'Detected', value: formatReadableDate(capturedAt) || null },
+    ],
+    buttonText: 'Open in XTM',
+    buttonUrl: xtmUrl,
+  });
 }
 
-/** 🔁 A job that disappeared and came back (relisted) — keeps the original first-seen. */
+/**
+ * 🔁 A job that disappeared and came back (relisted) — keeps the original
+ * first-seen. `xtmUrl` becomes the button link.
+ */
 export function renderXtmRelisted(
   job: XtmJobState,
   firstSeenAt: string | undefined,
   capturedAt: string,
-): string {
-  const since = firstSeenAt ? ` (เคยเห็นเมื่อ ${formatBangkok(firstSeenAt)})` : '';
-  return [
-    `🔁 งานกลับมาอีกครั้ง${since}`,
-    `โปรเจกต์: ${dash(job.projectName)}`,
-    `ไฟล์: ${dash(job.fileName)}`,
-    `ภาษา: ${langs(job)}`,
-    `ครบกำหนด: ${due(job)} | คำ: ${dash(job.words)} | ขั้น: ${dash(job.step)} (${dash(job.role)})`,
-    `เวลา: ${formatBangkok(capturedAt)}`,
-  ].join('\n');
+  xtmUrl: string,
+): { cardsV2: unknown[] } {
+  return buildCard({
+    cardId: sanitizeCardId(`relisted-${job.jobKey}`),
+    headerTitle: '🔁 Job Relisted · XTM',
+    ...(firstSeenAt ? { headerSubtitle: `First seen ${formatReadableDate(firstSeenAt)}` } : {}),
+    rows: [
+      { label: 'Project', value: job.projectName ?? null },
+      { label: 'File', value: job.fileName ?? null },
+      { label: 'Language', value: langPair(job) },
+      { label: 'Due', value: formatReadableDate(dueForJob(job)) || null },
+      { label: 'Words', value: wordsValue(job.words) },
+      { label: 'Step', value: job.step ? `${job.step} (${job.role ?? '—'})` : null },
+      { label: 'Detected', value: formatReadableDate(capturedAt) || null },
+    ],
+    buttonText: 'Open in XTM',
+    buttonUrl: xtmUrl,
+  });
 }
 
 /** ✅ Accept succeeded (one message per job_key, never batched). */
-export function renderXtmAccepted(job: XtmJobState): string {
-  return [
-    '✅ รับงานแล้ว (XTM)',
-    `โปรเจกต์: ${dash(job.projectName)}`,
-    `ไฟล์: ${dash(job.fileName)} | ${langs(job)}`,
-    `ครบกำหนด: ${due(job)} | คำ: ${dash(job.words)}`,
-    `รับเมื่อ: ${job.acceptedAt ? formatBangkok(job.acceptedAt) : '—'}`,
-  ].join('\n');
+export function renderXtmAccepted(job: XtmJobState, xtmUrl: string): { cardsV2: unknown[] } {
+  return buildCard({
+    cardId: sanitizeCardId(`accepted-${job.jobKey}`),
+    headerTitle: '✅ Job Accepted · XTM',
+    rows: [
+      { label: 'Project', value: job.projectName ?? null },
+      { label: 'File', value: job.fileName ?? null },
+      { label: 'Language', value: langPair(job) },
+      { label: 'Due', value: formatReadableDate(dueForJob(job)) || null },
+      { label: 'Words', value: wordsValue(job.words) },
+      { label: 'Accepted', value: formatReadableDate(job.acceptedAt ?? null) || null },
+    ],
+    buttonText: 'Open in XTM',
+    buttonUrl: xtmUrl,
+  });
 }
 
 /**
@@ -61,36 +91,58 @@ export function renderXtmAcceptFailed(
   outcome: 'failed' | 'missing',
   reason: string | null,
   at: string,
-): string {
+  xtmUrl: string,
+): { cardsV2: unknown[] } {
   const cause =
     outcome === 'missing'
-      ? 'โดนแย่ง/ถูกรับไปแล้วก่อนกดทัน'
-      : `กดแล้วยืนยันไม่สำเร็จ — ${dash(reason)}`;
-  const needHuman = outcome === 'failed' ? 'ใช่ — เข้าไปดูใน XTM' : 'ไม่จำเป็น (งานหลุดไปแล้ว)';
-  return [
-    '⚠️ กดรับไม่สำเร็จ (XTM)',
-    `โปรเจกต์: ${dash(job.projectName)} | ไฟล์: ${dash(job.fileName)}`,
-    langs(job),
-    `สาเหตุ: ${cause}`,
-    `ต้องตรวจสอบ: ${needHuman}`,
-    `เวลา: ${formatBangkok(at)}`,
-  ].join('\n');
+      ? 'snatched before we could accept'
+      : `clicked but could not confirm — ${reason ?? '—'}`;
+  const action = outcome === 'failed' ? 'Yes — check XTM' : 'No (job already gone)';
+  const headerTitle = outcome === 'failed' ? '⚠️ Accept Failed · XTM' : '⚠️ Job Snatched · XTM';
+  return buildCard({
+    cardId: sanitizeCardId(`acceptfailed-${job.jobKey}`),
+    headerTitle,
+    rows: [
+      { label: 'Project', value: job.projectName ?? null },
+      { label: 'File', value: job.fileName ?? null },
+      { label: 'Language', value: langPair(job) },
+      { label: 'Cause', value: cause },
+      { label: 'Action', value: action },
+      { label: 'Time', value: formatReadableDate(at) || null },
+    ],
+    buttonText: 'Open in XTM',
+    buttonUrl: xtmUrl,
+  });
 }
 
-const COLD_START_MAX_ROWS = 20;
-
 /** 📋 One-time summary of pre-existing jobs at startup (FR-005), with Malay count. */
-export function renderXtmColdStartSummary(jobs: XtmJobState[], _occurredAt: string): string {
+export function renderXtmColdStartSummary(
+  jobs: XtmJobState[],
+  cycleId: string,
+  xtmUrl: string,
+): { cardsV2: unknown[] } {
   if (jobs.length === 0) {
-    return '📋 เริ่มระบบเฝ้า XTM — ยังไม่มีงานค้างใน Active ระบบเฝ้าต่อ 24/7';
+    return buildCard({
+      cardId: sanitizeCardId(`coldstart-${cycleId}`),
+      headerTitle: '📋 XTM Monitor Started',
+      headerSubtitle: 'No open jobs in Active — monitoring 24/7',
+      rows: [],
+      buttonText: 'Open in XTM',
+      buttonUrl: xtmUrl,
+    });
   }
-  const eligible = jobs.filter((j) => j.eligible).length;
-  const shown = jobs.slice(0, COLD_START_MAX_ROWS);
-  const rows = shown
-    .map((j) => `• ${dash(j.projectName)} / ${dash(j.fileName)} | ${langs(j)} | ส่ง ${due(j)}`)
-    .join('\n');
-  const more =
-    jobs.length > COLD_START_MAX_ROWS ? `\n…และอีก ${jobs.length - COLD_START_MAX_ROWS} งาน` : '';
-  // `eligible` is language-match only (acceptability needs the per-row menu); label it as such.
-  return `📋 เริ่มระบบเฝ้า XTM — พบงานค้าง ${jobs.length} รายการ (ตรวจพบเป็นมาเลย์ ${eligible})\n${rows}${more}`;
+  const eligibleCount = jobs.filter((j) => j.eligible).length;
+  // Pass ALL jobs as rows — buildCard caps at 20 and appends "…and N more" itself.
+  const rows = jobs.map((j) => ({
+    label: `${j.projectName ?? '—'} / ${j.fileName ?? '—'}`,
+    value: `${langPair(j)} · due ${formatReadableDate(dueForJob(j)) || '—'}`,
+  }));
+  return buildCard({
+    cardId: sanitizeCardId(`coldstart-${cycleId}`),
+    headerTitle: '📋 XTM Monitor Started',
+    headerSubtitle: `${jobs.length} open job(s) — Malay-eligible: ${eligibleCount}`,
+    rows,
+    buttonText: 'Open in XTM',
+    buttonUrl: xtmUrl,
+  });
 }

@@ -1,7 +1,17 @@
 import type { DB } from '../state/db.js';
 import { SystemEventStore } from '../state/systemEvents.js';
 import { Outbox } from '../state/outbox.js';
-import { renderSystemAlert, renderSystemRecovered, type SystemAlertFields } from './notifier.js';
+import { buildCard } from './chatCard.js';
+import { sanitizeCardId } from './cardText.js';
+
+export interface SystemAlertFields {
+  severity: 'warn' | 'critical';
+  title: string;
+  cause: string;
+  impact: string;
+  action: string;
+  occurredAt: string;
+}
 
 export type TriggerKind =
   | 'login_failed'
@@ -12,7 +22,8 @@ export type TriggerKind =
   | 'outbox_dead'
   | 'cold_start_repeat'
   | 'db_corrupt'
-  | 'accept_failed';
+  | 'accept_failed'
+  | 'daily_report_dead';
 
 interface TriggerSpec {
   severity: 'warn' | 'critical';
@@ -27,62 +38,63 @@ interface TriggerSpec {
 const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
   login_failed: {
     severity: 'critical',
-    title: 'เข้าสู่ระบบไม่สำเร็จ',
-    impact: 'หยุดเฝ้างานชั่วคราว (lockout)',
+    title: 'Login failed',
+    impact: 'Monitoring paused (lockout)',
     action:
-      'ลอง login ด้วยมือ; ถ้ารหัสผ่านเปลี่ยน แก้ XTM_ACOLAD_Password ใน .env แล้ว pm2 restart acolad-bot',
+      'Try logging in manually; if the password changed, update XTM_ACOLAD_Password in .env then run npm run deploy',
     hasRecovered: true,
   },
   captcha: {
     severity: 'critical',
-    title: 'พบ CAPTCHA/การยืนยันตัวตน',
-    impact: 'หยุดเฝ้างานจนกว่าคนจะผ่านขั้นยืนยัน',
+    title: 'CAPTCHA / identity check detected',
+    impact: 'Monitoring paused until a human clears the verification',
     action:
-      'login ด้วยมือผ่าน CAPTCHA แล้ว restart บอท; ถ้าบังคับ 2FA ถาวร ให้ทบทวน Assumption ใน spec',
+      'Log in manually past the CAPTCHA then npm run deploy; if 2FA becomes permanent, revisit the spec assumption',
     hasRecovered: true,
   },
   layout_changed: {
     severity: 'critical',
-    title: 'หน้ารายการงานเปลี่ยนรูปแบบจนอ่านไม่ได้',
-    impact: 'หยุดอ่านหน้ารายการงาน',
+    title: 'Job list layout changed — cannot be read',
+    impact: 'Stopped reading the job list',
     action:
-      'เปิด state/evidence ล่าสุดเทียบหน้าใหม่ อัปเดต src/portal/selectors.ts รัน npm test ผ่าน แล้ว restart',
+      'Compare the latest state/evidence to the new page, update src/portal/selectors.ts, get npm test green, then npm run deploy',
     hasRecovered: true,
   },
   pagination: {
     severity: 'warn',
-    title: 'พบตัวบ่งชี้หลายหน้า (pagination)',
-    impact: 'ขอบเขตการตรวจจับอาจไม่ครบ',
-    action: 'ตรวจหน้าจริง ทบทวน Assumption "หน้าเดียว" และขยายการอ่านถ้าจำเป็น',
+    title: 'Pagination indicator detected',
+    impact: 'Detection coverage may be incomplete',
+    action:
+      'Check the live page, revisit the "single page" assumption, and extend the reader if needed',
     hasRecovered: false,
   },
   portal_down: {
     severity: 'warn',
-    title: 'portal เข้าถึงไม่ได้ต่อเนื่องเกิน 10 นาที',
-    impact: 'การตรวจถูกถ่วงด้วย backoff',
+    title: 'Portal unreachable for over 10 minutes',
+    impact: 'Polling is throttled with backoff',
     action:
-      'ลองเปิด portal จากเครื่องอื่น; ถ้าล่มจริงไม่ต้องทำอะไร ระบบ retry เองและจะส่ง SYSTEM_RECOVERED เมื่อกลับมา',
+      'Try opening the portal from another machine; if it is genuinely down, do nothing — the bot retries and sends SYSTEM_RECOVERED when it returns',
     hasRecovered: true,
   },
   outbox_dead: {
     severity: 'critical',
-    title: 'มีข้อความแจ้งเตือนค้างส่งไม่สำเร็จ',
-    impact: 'การแจ้งเตือนบางรายการไม่ถึงทีม',
-    action: 'ตรวจ webhook URL/สิทธิ์ Chat space แล้วสั่ง npm run outbox:requeue',
+    title: 'Notifications stuck — delivery failed',
+    impact: 'Some notifications did not reach the team',
+    action: 'Check the webhook URL / Chat space permissions, then run npm run outbox:requeue',
     hasRecovered: true,
   },
   cold_start_repeat: {
     severity: 'warn',
-    title: 'ฐานสถานะอาจสูญหายผิดปกติ (cold start ซ้ำใน 7 วัน)',
-    impact: 'อาจมีปัญหาดิสก์/ไฟล์ฐานข้อมูล',
-    action: 'ตรวจดิสก์และสาเหตุที่ไฟล์ฐานสถานะหาย ดูสำเนา .corrupt-* ถ้ามี',
+    title: 'State store may be lost (cold start repeated within 7 days)',
+    impact: 'Possible disk / database-file problem',
+    action: 'Check the disk and why the state file disappeared; inspect any .corrupt-* copies',
     hasRecovered: false,
   },
   db_corrupt: {
     severity: 'critical',
-    title: 'ฐานสถานะเสียหาย ถูกรีเซ็ตเป็น cold start',
-    impact: 'ประวัติงานเดิมถูกเก็บเป็นสำเนาและเริ่มฐานใหม่',
-    action: 'เก็บสำเนา .corrupt-* ไว้วิเคราะห์ และตรวจสุขภาพดิสก์',
+    title: 'State store corrupt — reset to cold start',
+    impact: 'Prior job history was archived and a fresh store started',
+    action: 'Keep the .corrupt-* copy for analysis and check disk health',
     hasRecovered: false,
   },
   // Raised with a per-job dedup key (`accept_failed:<jobKey>`) and never auto-resolved
@@ -91,13 +103,39 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
   // Distinct jobs still each alert. Revisit if per-incident re-alerting is ever needed.
   accept_failed: {
     severity: 'critical',
-    title: 'กดรับงานไม่สำเร็จ (ยืนยันไม่ได้)',
-    impact: 'งานมาเลย์ที่ควรได้อาจไม่ถูกรับ — ต้องตรวจด้วยคน',
+    title: 'Job accept failed (could not confirm)',
+    impact: 'A Malay job that should have been accepted may not be — needs a human check',
     action:
-      'เปิด state/evidence ล่าสุด + เข้า XTM ดูว่างานถูกรับไหม; ถ้าเมนู accept เปลี่ยนรูปแบบ อัปเดต src/portal/selectors.ts',
+      'Open the latest state/evidence and check XTM whether the job was accepted; if the accept menu changed, update src/portal/selectors.ts',
+    hasRecovered: false,
+  },
+  daily_report_dead: {
+    severity: 'warn',
+    title: 'Daily report delivery failed',
+    impact: "The team's daily in-progress report did not reach the team space",
+    action:
+      'Check the team webhook (GOOGLE_CHAT_WEBHOOK_TEAM) URL/permissions, then run npm run outbox:requeue',
     hasRecovered: false,
   },
 };
+
+/** Build a cardsV2 alert payload for the given fields and dedup key. */
+function buildAlertCard(
+  spec: TriggerSpec,
+  fields: SystemAlertFields,
+  dedupKey: string,
+): { cardsV2: unknown[] } {
+  const emoji = spec.severity === 'critical' ? '🔴' : '⚠️';
+  return buildCard({
+    cardId: sanitizeCardId(`alert-${dedupKey}`),
+    headerTitle: `${emoji} ${spec.title}`,
+    rows: [
+      { label: 'Impact', value: fields.impact },
+      { label: 'Action', value: fields.action },
+      { label: 'Detail', value: fields.cause },
+    ],
+  });
+}
 
 /**
  * Raise a system alert through the outbox (never sent directly — Constitution IV).
@@ -126,11 +164,13 @@ export function raiseAlert(
       action: extra.action ?? spec.action,
       occurredAt,
     };
-    const payload = JSON.stringify({ text: renderSystemAlert(fields) });
+    const resolvedDedup = dedupKey ?? kind;
+    const card = buildAlertCard(spec, fields, resolvedDedup);
+    const payload = JSON.stringify(card);
     const eventId = system.create({
       eventType: 'system_alert',
       severity: spec.severity,
-      dedupKey: dedupKey ?? kind,
+      dedupKey: resolvedDedup,
       payloadJson: payload,
       occurredAt,
     });
@@ -153,16 +193,21 @@ export function resolveAlert(
     const resolvedId = system.resolve(kind, occurredAt);
     if (!resolvedId) return false;
     if (!spec.hasRecovered) return false;
-    const text = renderSystemRecovered(spec.title, downDuration, occurredAt);
+    const card = buildCard({
+      cardId: sanitizeCardId(`recovered-${kind}-${occurredAt}`),
+      headerTitle: `✅ Recovered · ${spec.title}`,
+      rows: [{ label: 'Down for', value: downDuration }],
+    });
+    const payload = JSON.stringify(card);
     const sysId = system.create({
       eventType: 'system_recovered',
       severity: 'info',
       dedupKey: `${kind}:recovered:${occurredAt}`,
-      payloadJson: JSON.stringify({ text }),
+      payloadJson: payload,
       occurredAt,
     });
     if (!sysId) return false;
-    return outbox.enqueue(sysId, JSON.stringify({ text }), occurredAt);
+    return outbox.enqueue(sysId, payload, occurredAt);
   })();
 }
 

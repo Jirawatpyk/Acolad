@@ -21,6 +21,7 @@ const cfg = (over: Partial<AppConfig> = {}): AppConfig =>
     ACCEPT_MAX_PER_CYCLE: 0,
     OUTBOX_RETRY_CAP: 10,
     OUTBOX_DEAD_AFTER_HOURS: 6,
+    XTM_ACOLAD_OFFERS_URL: 'https://xtm.example/inbox',
     ...over,
   }) as AppConfig;
 
@@ -324,14 +325,26 @@ describe('XtmPollCycle (US1 — detect, accept, record)', () => {
   });
 });
 
-function outboxPayloads(
-  channel: 'chat' | 'sheets',
-): Array<{ row?: { status: string }; text?: string }> {
+function outboxPayloads(channel: 'chat' | 'sheets'): Array<{
+  row?: { status: string };
+  cardsV2?: Array<{ cardId: string; card: { header: { title: string } } }>;
+}> {
   return (
     db.prepare('SELECT payload_json FROM outbox WHERE channel = ?').all(channel) as {
       payload_json: string;
     }[]
-  ).map((r) => JSON.parse(r.payload_json) as { row?: { status: string }; text?: string });
+  ).map(
+    (r) =>
+      JSON.parse(r.payload_json) as {
+        row?: { status: string };
+        cardsV2?: Array<{ cardId: string; card: { header: { title: string } } }>;
+      },
+  );
+}
+
+/** Returns true if any chat payload card header title contains the given substring. */
+function chatHasTitle(sub: string): boolean {
+  return outboxPayloads('chat').some((c) => c.cardsV2?.[0]?.card.header.title.includes(sub));
 }
 
 describe('XtmPollCycle Closed/Removed (FR-014, T042)', () => {
@@ -368,7 +381,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     const sheets = outboxPayloads('sheets');
     expect(sheets).toHaveLength(1);
     expect(sheets[0]?.row?.status).toBe('Accepted');
-    expect(outboxPayloads('chat').some((c) => c.text?.includes('✅'))).toBe(true);
+    expect(chatHasTitle('✅')).toBe(true);
   });
 
   it('enqueues a Skipped sheets row + a 🆕 chat for a non-Malay job', async () => {
@@ -376,7 +389,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     new MetaStore(db).markBaselineDone();
     await new XtmPollCycle(db, cfg(), new StubAcceptor()).run(snap([xraw({ targetLang: 'Thai' })]));
     expect(outboxPayloads('sheets')[0]?.row?.status).toBe('Skipped');
-    expect(outboxPayloads('chat').some((c) => c.text?.includes('🆕'))).toBe(true);
+    expect(chatHasTitle('🆕')).toBe(true);
   });
 
   it('posts ONE cold-start summary (not per-job chat) during baseline, logs all to Sheets', async () => {
@@ -386,7 +399,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     );
     const chat = outboxPayloads('chat');
     expect(chat).toHaveLength(1);
-    expect(chat[0]?.text).toContain('📋');
+    expect(chat[0]?.cardsV2?.[0]?.card.header.title).toContain('📋');
     expect(outboxPayloads('sheets')).toHaveLength(2);
   });
 
@@ -397,10 +410,10 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), acc).run(snap([xraw()], 'c1'));
     await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: true }), acc).run(snap([xraw()], 'c2'));
     expect(outboxPayloads('sheets').at(-1)?.row?.status).toBe('Accepted'); // not silently accepted
-    expect(outboxPayloads('chat').some((c) => c.text?.includes('✅'))).toBe(true);
+    expect(chatHasTitle('✅')).toBe(true);
   });
 
-  it('a no-event robustness accept that FAILS raises an alert + ⚠️ chat (never silent)', async () => {
+  it('a no-event robustness accept that FAILS raises an alert + ⚠️ Accept Failed chat (never silent)', async () => {
     fresh();
     new MetaStore(db).markBaselineDone();
     const acc = new StubAcceptor();
@@ -413,7 +426,7 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
       .all(`accept_failed:${key}`);
     expect(alerts.length).toBeGreaterThanOrEqual(1); // failed accept with no appearance event is NOT silent
     expect(outboxPayloads('sheets').at(-1)?.row?.status).toBe('Accept failed');
-    expect(outboxPayloads('chat').some((c) => c.text?.includes('⚠️'))).toBe(true);
+    expect(chatHasTitle('Accept Failed')).toBe(true); // distinct from 'Job Snatched' (both carry ⚠️)
   });
 
   it('enqueues a New sheets row when auto-accept is disabled', async () => {
@@ -433,7 +446,60 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     await cycle.run(snap([], 'c2')); // absent (flicker)
     await cycle.run(snap([], 'c3')); // absent twice → missing
     await cycle.run(snap([xraw({ targetLang: 'Thai' })], 'c4')); // returns → relisted
-    expect(outboxPayloads('chat').some((c) => c.text?.includes('🔁'))).toBe(true);
+    expect(chatHasTitle('🔁')).toBe(true);
+  });
+
+  it('accepted job enqueues BOTH a chat row AND a team row with the same card (Task 9)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone(); // past baseline → per-job chat fires
+    await new XtmPollCycle(db, cfg(), new StubAcceptor()).run(snap([xraw()]));
+
+    const rows = db
+      .prepare(
+        "SELECT event_id, channel, payload_json FROM outbox WHERE channel IN ('chat','team')",
+      )
+      .all() as { event_id: string; channel: string; payload_json: string }[];
+
+    const chatRow = rows.find((r) => r.channel === 'chat');
+    const teamRow = rows.find((r) => r.channel === 'team');
+
+    expect(chatRow, 'chat row must exist for accepted job').toBeDefined();
+    expect(teamRow, 'team row must exist for accepted job').toBeDefined();
+
+    // event_ids must be distinct (outbox dedup is (event_id, channel) unique)
+    expect(chatRow!.event_id).not.toBe(teamRow!.event_id);
+
+    // both carry the ✅ accepted card — payloads are byte-equal
+    expect(teamRow!.payload_json).toBe(chatRow!.payload_json);
+
+    // channels prefixed correctly
+    expect(chatRow!.event_id).toMatch(/^chat:/);
+    expect(teamRow!.event_id).toMatch(/^team:/);
+  });
+
+  it('non-accepted outcomes produce NO team row (only chat)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    // new job with accept disabled → lifecycleStatus = 'new', no accept outcome
+    await new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), new StubAcceptor()).run(
+      snap([xraw()]),
+    );
+    const teamCount = (
+      db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE channel = 'team'").get() as { n: number }
+    ).n;
+    expect(teamCount).toBe(0);
+  });
+
+  it('accept_failed outcome produces NO team row', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const acc = new StubAcceptor();
+    acc.outcome = 'failed';
+    await new XtmPollCycle(db, cfg(), acc).run(snap([xraw()]));
+    const teamCount = (
+      db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE channel = 'team'").get() as { n: number }
+    ).n;
+    expect(teamCount).toBe(0);
   });
 });
 

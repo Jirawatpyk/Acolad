@@ -100,6 +100,22 @@ describe('Outbox', () => {
     expect(ob.requeueDead(NOW)).toBe(1);
     expect(ob.due(NOW)).toHaveLength(1);
   });
+
+  it('countDeadExcludingChannel excludes the named channel', () => {
+    const ob = new Outbox(db, 1, 6);
+    // dead 'chat' row
+    ob.enqueue('e-chat', '{}', NOW, 'chat');
+    ob.recordFailure(ob.due(NOW)[0]!, Date.parse(NOW));
+    // dead 'team' row
+    ob.enqueue('e-team', '{}', NOW, 'team');
+    ob.recordFailure(ob.due(NOW)[0]!, Date.parse(NOW));
+    // Exclude 'team': only the 'chat' dead row should count
+    expect(ob.countDeadExcludingChannel('team')).toBe(1);
+    // Exclude 'chat': only the 'team' dead row should count
+    expect(ob.countDeadExcludingChannel('chat')).toBe(1);
+    // Exclude neither channel explicitly (non-existent channel)
+    expect(ob.countDeadExcludingChannel('sheets')).toBe(2);
+  });
 });
 
 describe('SystemEventStore', () => {
@@ -192,6 +208,17 @@ describe('MetaStore', () => {
     expect(meta.baselineDone).toBe(true);
     meta.recordSuccessfulPoll(NOW);
     expect(meta.get('last_successful_poll_at')).toBe(NOW);
+  });
+
+  it('lastDailyReportDate returns null when never set', () => {
+    const meta = new MetaStore(db);
+    expect(meta.lastDailyReportDate).toBeNull();
+  });
+
+  it('lastDailyReportDate returns the value written via set', () => {
+    const meta = new MetaStore(db);
+    meta.set('last_daily_report_date', '2026-06-25');
+    expect(meta.lastDailyReportDate).toBe('2026-06-25');
   });
 });
 

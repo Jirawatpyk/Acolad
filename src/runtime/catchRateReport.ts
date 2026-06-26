@@ -51,9 +51,9 @@ async function main(): Promise<void> {
   });
   const all = (res.data.values ?? []) as string[][];
   const cr = computeCatchRate(all.slice(1), cfg.ACCEPT_LANGUAGES); // slice off the header
-  const rate = cr.ratePct === null ? 'n/a (ยังไม่มีงานที่ตัดสินผล)' : `${cr.ratePct.toFixed(1)}%`;
+  const rate = cr.ratePct === null ? 'n/a (no decided jobs yet)' : `${cr.ratePct.toFixed(1)}%`;
   console.log(
-    `SC-001 catch rate (มาเลย์): ${rate} — accepted ${cr.accepted} / (accepted ${cr.accepted} + missing ${cr.missing} + accept_failed ${cr.failed})`,
+    `SC-001 catch rate (Malay): ${rate} — accepted ${cr.accepted} / (accepted ${cr.accepted} + missing ${cr.missing} + accept_failed ${cr.failed})`,
   );
 }
 

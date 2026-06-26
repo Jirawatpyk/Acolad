@@ -49,7 +49,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_system_active_alert
 CREATE TABLE IF NOT EXISTS outbox (
   outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL,
-  channel TEXT NOT NULL CHECK (channel IN ('chat','sheets')),
+  channel TEXT NOT NULL CHECK (channel IN ('chat','sheets','team')),
   payload_json TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dead')),
   attempts INTEGER NOT NULL DEFAULT 0,
@@ -160,23 +160,29 @@ function ensureJobColumns(db: DB): void {
 }
 
 /**
- * Widen the outbox channel CHECK to include 'sheets'. SQLite cannot ALTER a
- * CHECK in place, so an existing v1 outbox (chat-only) is rebuilt preserving
+ * Widen the outbox channel CHECK to include 'team'. SQLite cannot ALTER a
+ * CHECK in place, so an existing outbox (chat/sheets-only) is rebuilt preserving
  * its rows. A fresh db already has the v2 CHECK (from DDL) and is skipped. The
- * unique index is recreated AFTER dropping the old table so its name never
- * clashes with the renamed copy.
+ * guard (`SELECT sql … includes("'team'")`) is a cheap read that runs INSIDE
+ * migrate()'s enclosing transaction; atomicity of the rebuild is guaranteed by
+ * that enclosing transaction — no inner transaction is needed here.
+ *
+ * `DROP TABLE IF EXISTS outbox_old` runs first for idempotency: if a previous
+ * migration crashed between RENAME and DROP (leaving a stale outbox_old), the
+ * next open cleans it up before re-running the rebuild.
  */
 function ensureOutboxChannel(db: DB): void {
   const row = db
     .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='outbox'")
     .get() as { sql: string } | undefined;
-  if (!row || row.sql.includes("'sheets'")) return;
+  if (!row || row.sql.includes("'team'")) return;
+  db.exec('DROP TABLE IF EXISTS outbox_old');
   db.exec('ALTER TABLE outbox RENAME TO outbox_old');
   db.exec(`
 CREATE TABLE outbox (
   outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL,
-  channel TEXT NOT NULL CHECK (channel IN ('chat','sheets')),
+  channel TEXT NOT NULL CHECK (channel IN ('chat','sheets','team')),
   payload_json TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dead')),
   attempts INTEGER NOT NULL DEFAULT 0,

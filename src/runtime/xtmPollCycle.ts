@@ -102,7 +102,7 @@ export class XtmPollCycle {
         this.outbox,
         'accept_failed',
         snapshot.capturedAt,
-        `${s.projectName} / ${s.fileName}: ค้างสถานะ accepting (รอบก่อนหยุดกลางคัน)`,
+        `${s.projectName} / ${s.fileName}: stuck in 'accepting' (prior cycle stopped mid-way)`,
         {},
         `accept_failed:${s.jobKey}`,
       );
@@ -347,20 +347,20 @@ export class XtmPollCycle {
       );
       // During baseline a single cold-start summary replaces per-job Chat (FR-005).
       if (!baseline) {
-        const text = this.chatForEvent(
+        const card = this.chatForEvent(
           ev?.eventType,
           ev?.firstSeenAt,
           s,
           outcome,
           snapshot.capturedAt,
         );
-        if (text) {
-          this.outbox.enqueue(
-            `chat:${base}`,
-            JSON.stringify({ text }),
-            snapshot.capturedAt,
-            'chat',
-          );
+        if (card) {
+          this.outbox.enqueue(`chat:${base}`, JSON.stringify(card), snapshot.capturedAt, 'chat');
+          // Also notify the team channel for accepted jobs (Task 9).
+          // Reuses the same card object — no rebuild. Fires ONLY on 'accepted'.
+          if (outcome?.outcome === 'accepted') {
+            this.outbox.enqueue(`team:${base}`, JSON.stringify(card), snapshot.capturedAt, 'team');
+          }
         }
       }
     };
@@ -383,10 +383,14 @@ export class XtmPollCycle {
       );
     }
     if (baseline) {
-      const text = renderXtmColdStartSummary([...result.nextStates.values()], snapshot.capturedAt);
+      const card = renderXtmColdStartSummary(
+        [...result.nextStates.values()],
+        snapshot.pollCycleId,
+        this.cfg.XTM_ACOLAD_OFFERS_URL,
+      );
       this.outbox.enqueue(
         `coldstart:${snapshot.pollCycleId}`,
-        JSON.stringify({ text }),
+        JSON.stringify(card),
         snapshot.capturedAt,
         'chat',
       );
@@ -415,22 +419,24 @@ export class XtmPollCycle {
     };
   }
 
-  /** The Chat message for an appearance, or undefined for sheet-only events. */
+  /** The Chat card for an appearance, or undefined for sheet-only events. */
   private chatForEvent(
     eventType: AppearanceEventType | undefined,
     firstSeenAt: string | undefined,
     s: XtmJobState,
     outcome: AcceptResult | undefined,
     at: string,
-  ): string | undefined {
+  ): { cardsV2: unknown[] } | undefined {
+    const xtmUrl = this.cfg.XTM_ACOLAD_OFFERS_URL;
     if (outcome) {
       // An accept attempt happened → report its outcome (acceptance outcome → Chat).
-      if (outcome.outcome === 'accepted') return renderXtmAccepted(s);
+      if (outcome.outcome === 'accepted') return renderXtmAccepted(s, xtmUrl);
       return renderXtmAcceptFailed(
         s,
         outcome.outcome,
         outcome.outcome === 'failed' ? outcome.reason : null,
         at,
+        xtmUrl,
       );
     }
     // No accept outcome and no appearance event (robustness-pass job that wasn't
@@ -439,15 +445,15 @@ export class XtmPollCycle {
     // A job the bot never accepted leaving Active is sheet-only (contracts §sheet-only).
     if (eventType === 'missing') return undefined;
     // A job that disappeared and returned is announced as relisted, not new (FR-019).
-    if (eventType === 'relisted') return renderXtmRelisted(s, firstSeenAt, at);
+    if (eventType === 'relisted') return renderXtmRelisted(s, firstSeenAt, at, xtmUrl);
     let note: string;
     if (!s.eligible) {
-      note = 'ไม่ใช่มาเลย์ — บันทึกไว้เฉย ๆ';
+      note = 'Not Malay — logged only';
     } else if (this.cfg.ACCEPT_ENABLED) {
-      note = 'เข้าเกณฑ์มาเลย์ (MS) — กำลังกดรับ';
+      note = 'Malay (MS) — accepting';
     } else {
-      note = 'เข้าเกณฑ์มาเลย์ (MS) — auto-accept ปิดอยู่';
+      note = 'Malay (MS) — auto-accept off';
     }
-    return renderXtmNewJob(s, at, note);
+    return renderXtmNewJob(s, at, note, xtmUrl);
   }
 }
