@@ -127,14 +127,30 @@ describe('auto-yield config', () => {
     expect(loadConfig(validEnv()).XTM_YIELD_ENABLED).toBe(true);
   });
 
-  it('rejects a window smaller than 3x the poll interval (fail-fast)', () => {
+  it('rejects a window smaller than 3x the poll interval when yield is ENABLED (fail-fast)', () => {
     expect(() =>
-      loadConfig(validEnv({ POLL_INTERVAL_MS: '20000', XTM_YIELD_WINDOW_MS: '40000' })),
+      loadConfig(
+        validEnv({
+          XTM_YIELD_ENABLED: '1',
+          POLL_INTERVAL_MS: '20000',
+          XTM_YIELD_WINDOW_MS: '40000',
+        }),
+      ),
     ).toThrow(/XTM_YIELD_WINDOW_MS/);
   });
 
   it('accepts a window exactly 3x the poll interval', () => {
     const cfg = loadConfig(validEnv({ POLL_INTERVAL_MS: '20000', XTM_YIELD_WINDOW_MS: '60000' }));
     expect(cfg.XTM_YIELD_WINDOW_MS).toBe(60_000);
+  });
+
+  it('does NOT reject a sub-3x window when yield is DISABLED — kill-switch is never blocked (F7)', () => {
+    // The refine must be gated on XTM_YIELD_ENABLED so an operator can always disable the
+    // feature without first having to fix an unrelated window value.
+    const cfg = loadConfig(
+      validEnv({ XTM_YIELD_ENABLED: '0', POLL_INTERVAL_MS: '20000', XTM_YIELD_WINDOW_MS: '40000' }),
+    );
+    expect(cfg.XTM_YIELD_ENABLED).toBe(false);
+    expect(cfg.XTM_YIELD_WINDOW_MS).toBe(40_000);
   });
 });

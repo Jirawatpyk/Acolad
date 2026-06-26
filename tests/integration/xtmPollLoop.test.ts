@@ -866,4 +866,178 @@ describe('auto-yield', () => {
     expect(await loop.runOnce()).toBe(true);
     expect(receivedOpts).toBeUndefined(); // no policy passed when disabled
   });
+
+  // F4: a probe that SUCCEEDS during a stuck episode must still page on-call.
+  it('F4: a successful probe during a stuck episode still pages (heartbeat.fail), no early resume', async () => {
+    fresh();
+    const setup = new MetaStore(db);
+    setup.setYieldEpisodeStartedMs(clock.nowMs() - 61 * 60_000); // 61 min ago → past the 60-min cap
+    setup.setYieldUntilMs(0); // cooldown elapsed → probe allowed
+    setup.setLastAuthSuccessMs(clock.nowMs() - 5_000);
+    const client = new StubClient();
+    client.fetchJobSnapshot = async () => snap([]); // the probe read SUCCEEDS
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, yCfg(), noopLogger, clock, {
+      chatSender: okChat,
+      heartbeat,
+    });
+
+    const ok = await loop.runOnce();
+
+    expect(ok).toBe(false); // stuck → unhealthy even though the read succeeded (console consistency)
+    expect(heartbeat.fail).toHaveBeenCalledTimes(1);
+    expect(heartbeat.ok).not.toHaveBeenCalled();
+    // a single clean probe must NOT resume (needs RESUME_STABLE_CYCLES) → episode still open
+    expect(new MetaStore(db).yieldEpisodeStartedMs).toBeGreaterThan(0);
+  });
+
+  // F5: a yield that crosses the cap mid-probe must raise a yield_stuck card (not just fail silently).
+  it('F5: a yield crossing the cap mid-probe raises yield_stuck + fails heartbeat', async () => {
+    fresh();
+    const setup = new MetaStore(db);
+    // Episode started 59m50s ago — NOT stuck at gate time, so the gate raises NO yield_stuck.
+    setup.setYieldEpisodeStartedMs(clock.nowMs() - (60 * 60_000 - 10_000));
+    setup.setYieldUntilMs(0); // not in cooldown → probe
+    setup.setLastAuthSuccessMs(clock.nowMs() - 5_000);
+    const client = new StubClient();
+    client.fetchJobSnapshot = async () => {
+      now += 60_000; // the probe fetch takes long enough to cross the 60-min cap
+      throw new SessionYieldError('kicked_by_other');
+    };
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, yCfg(), noopLogger, clock, {
+      chatSender: okChat,
+      heartbeat,
+    });
+
+    const ok = await loop.runOnce();
+
+    expect(ok).toBe(false); // re-yield while stuck is unhealthy
+    expect(heartbeat.fail).toHaveBeenCalledTimes(1);
+    expect(heartbeat.ok).not.toHaveBeenCalled();
+    // handleYield (not the gate) must have raised the yield_stuck card for the crossed cap
+    const stuck = db
+      .prepare(
+        "SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key='yield_stuck'",
+      )
+      .all();
+    expect(stuck.length).toBe(1);
+  });
+
+  // F3: an unexpected throw inside handleYield must be caught — never escape runOnce.
+  it('F3: an unexpected throw inside handleYield is caught (heartbeat.fail, runOnce does not reject)', async () => {
+    fresh();
+    const client = new StubClient();
+    client.fetchJobSnapshot = async () => {
+      throw new SessionYieldError('kicked_by_other');
+    };
+    // heartbeat.ok throws on the yield happy-path; the F3 catch must convert it to fail + false.
+    const heartbeat = {
+      ok: vi.fn(async () => {
+        throw new Error('healthcheck endpoint unreachable');
+      }),
+      fail: vi.fn(async () => {}),
+    };
+    const loop = new XtmPollLoop(db, client, yCfg(), noopLogger, clock, {
+      chatSender: okChat,
+      heartbeat,
+    });
+
+    const ok = await loop.runOnce(); // must NOT throw out of runOnce
+    expect(ok).toBe(false); // handler error → unhealthy
+    expect(heartbeat.fail).toHaveBeenCalled(); // F3 fail path ran
+  });
+
+  // F6: an errored cycle mid-probe must reset the resume counter (no early resume).
+  it('F6: an errored cycle resets the resume counter so resume needs fresh clean cycles', async () => {
+    fresh();
+    const setup = new MetaStore(db);
+    setup.setYieldEpisodeStartedMs(clock.nowMs() - 5_000); // active, not stuck
+    setup.setYieldUntilMs(0); // cooldown elapsed → probe allowed
+    setup.setLastAuthSuccessMs(clock.nowMs() - 5_000);
+    const client = new StubClient(); // default empty snapshot, no fetchError
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, yCfg(), noopLogger, clock, {
+      chatSender: okChat,
+      heartbeat,
+    });
+
+    await loop.runOnce(); // clean probe #1 → resume counter = 1
+    expect(new MetaStore(db).yieldEpisodeStartedMs).toBeGreaterThan(0);
+
+    client.fetchError = new Error('network blip'); // errored cycle → F6 resets counter to 0
+    await loop.runOnce();
+    client.fetchError = undefined;
+
+    await loop.runOnce(); // one clean probe → counter back to 1 only (NOT yet 2) → still paused
+    expect(new MetaStore(db).yieldEpisodeStartedMs).toBeGreaterThan(0);
+
+    await loop.runOnce(); // second clean probe → counter = 2 → resume
+    expect(new MetaStore(db).yieldEpisodeStartedMs).toBe(0);
+  });
+
+  // F11: a yield must clear the login-failure counter so a post-yield failure does not lock out early.
+  it('F11: a yield resets loginFailures so a post-yield login failure does not lock out early', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, yCfg({ LOGIN_MAX_RETRY: 2 }), noopLogger, clock, {
+      chatSender: okChat,
+      heartbeat,
+    });
+
+    client.fetchError = new LoginFailedError('bad creds'); // login failure #1 (1 < 2 → no lockout)
+    await loop.runOnce();
+
+    client.fetchError = undefined;
+    client.fetchJobSnapshot = async () => {
+      throw new SessionYieldError('kicked_by_other'); // yield → F11 must reset the counter to 0
+    };
+    await loop.runOnce();
+
+    now += 600_001; // elapse the cooldown so the next cycle actually probes
+    client.fetchJobSnapshot = async () => {
+      throw new LoginFailedError('bad creds again'); // post-yield failure → counts as #1, not #2
+    };
+    await loop.runOnce();
+
+    // With F11 the counter restarted at 0 → only failure #1 → NO lockout alert raised.
+    const lockout = db
+      .prepare(
+        "SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key='login_failed'",
+      )
+      .all();
+    expect(lockout.length).toBe(0);
+  });
+
+  // F12: last_auth_success_ms is only read by yield logic — do not write it when yield is off.
+  it('F12: does NOT persist last_auth_success_ms when yield is disabled', async () => {
+    fresh();
+    const client = new StubClient();
+    client.snapshot = snap([xraw()]);
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, cfg({ XTM_YIELD_ENABLED: false }), noopLogger, clock, {
+      chatSender: okChat,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    await loop.runOnce();
+    expect(new MetaStore(db).lastAuthSuccessMs).toBe(0); // never written when disabled
+  });
+
+  it('F12: DOES persist last_auth_success_ms when yield is enabled', async () => {
+    fresh();
+    const client = new StubClient();
+    client.snapshot = snap([xraw()]);
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, yCfg(), noopLogger, clock, {
+      chatSender: okChat,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    await loop.runOnce();
+    expect(new MetaStore(db).lastAuthSuccessMs).toBeGreaterThan(0); // written when enabled (yield reads it)
+  });
 });

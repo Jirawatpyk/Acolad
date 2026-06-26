@@ -23,10 +23,10 @@ import {
   PaginationDetectedError,
   CaptchaDetectedError,
   SessionYieldError,
+  classifyLogout,
   type LogoutKind,
 } from './errors.js';
 import type { AcceptTarget, AcceptResult } from './errors.js';
-import { classifyLogout } from '../runtime/yieldPolicy.js';
 
 /**
  * The single surface the orchestrator uses to talk to XTM (contracts/
@@ -102,7 +102,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     const page = await this.browser.page();
     await this.navigateToInbox(page);
     if (await this.ops.isLoggedOut(page)) {
-      const kind = classifyLogout(page.url());
+      const kind = this.classifyLoggedOut(page.url());
       if (!decideRelogin(kind)) throw new SessionYieldError(kind);
       await this.login(page);
       await this.navigateToInbox(page);
@@ -125,7 +125,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
         }
       }
       if (err instanceof SessionExpiredError || loggedOut) {
-        const kind = classifyLogout(page.url());
+        const kind = this.classifyLoggedOut(page.url());
         if (!decideRelogin(kind)) throw new SessionYieldError(kind);
         await this.login(page);
         await this.navigateToInbox(page);
@@ -133,6 +133,29 @@ export class PlaywrightXtmClient implements XtmPortalClient {
       }
       throw err;
     }
+  }
+
+  /**
+   * Classify the logout URL and, on an UNRECOGNISED type, emit a LOUD warn so a portal
+   * logout-URL change is diagnosable (F10, Constitution VI: fail loud). Control flow is
+   * unchanged — an 'unknown' still flows through the same decideRelogin policy. Only the
+   * URL PATH is logged (the query string can carry tokens — never log it, FR-012).
+   */
+  private classifyLoggedOut(url: string): LogoutKind {
+    const kind = classifyLogout(url);
+    if (kind === 'unknown') {
+      let path = url;
+      try {
+        path = new URL(url).pathname;
+      } catch {
+        path = url.split('?')[0] ?? url; // relative/empty URL → strip query defensively
+      }
+      this.logger?.warn(
+        { module: 'xtmClient', action: 'classifyLogout', outcome: 'unknown', path },
+        'landed logged-out with an unrecognised logout type — the portal logout URL may have changed',
+      );
+    }
+    return kind;
   }
 
   /** Default readActiveOnce: resolve the Active frame, then read it (overridable via ops). */

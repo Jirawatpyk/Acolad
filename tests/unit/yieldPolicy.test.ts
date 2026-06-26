@@ -1,57 +1,36 @@
 import { describe, it, expect } from 'vitest';
-import {
-  classifyLogout,
-  shouldYieldOnLogout,
-  inCooldown,
-  yieldStuck,
-} from '../../src/runtime/yieldPolicy.js';
-
-describe('classifyLogout', () => {
-  it('detects a competing login from the logout.jsp type param', () => {
-    expect(
-      classifyLogout(
-        'https://xtm.acolad.com/project-manager-gui/logout.jsp?type=LOGGED_OFF_BY_ANOTHER_USER',
-      ),
-    ).toBe('kicked_by_other');
-  });
-  it('detects a genuine session expiry', () => {
-    expect(
-      classifyLogout('https://xtm.acolad.com/project-manager-gui/logout.jsp?type=SESSION_EXPIRED'),
-    ).toBe('expired');
-  });
-  it('is case-insensitive on the type value', () => {
-    expect(classifyLogout('https://x/logout.jsp?type=logged_off_by_another_user')).toBe(
-      'kicked_by_other',
-    );
-  });
-  it('returns unknown for an unrecognised or missing type', () => {
-    expect(classifyLogout('https://xtm.acolad.com/project-manager-gui/login.jsp')).toBe('unknown');
-    expect(classifyLogout('')).toBe('unknown');
-  });
-  it('does not match type= in a path segment (no query boundary)', () => {
-    expect(classifyLogout('https://x/path/sometype=LOGGED_OFF_BY_ANOTHER_USER')).toBe('unknown');
-  });
-});
+import { shouldYieldOnLogout, inCooldown, yieldStuck } from '../../src/runtime/yieldPolicy.js';
 
 describe('shouldYieldOnLogout', () => {
-  const base = { lastAuthSuccessMs: 1_000_000, nowMs: 1_000_000 + 5_000, windowMs: 600_000 };
-  it('always yields when kicked by another user (deterministic)', () => {
-    expect(shouldYieldOnLogout({ ...base, kind: 'kicked_by_other' })).toBe(true);
+  // "recent" = authenticated 5s ago (< 600s window); "stale" = 1000s ago (> window).
+  const recent = { lastAuthSuccessMs: 1_000_000, nowMs: 1_000_000 + 5_000, windowMs: 600_000 };
+  const stale = { lastAuthSuccessMs: 1_000_000, nowMs: 2_000_000, windowMs: 600_000 };
+
+  it('always yields when kicked by another user (deterministic), regardless of recency', () => {
+    expect(shouldYieldOnLogout({ ...recent, kind: 'kicked_by_other' })).toBe(true);
+    expect(shouldYieldOnLogout({ ...stale, kind: 'kicked_by_other' })).toBe(true);
   });
-  it('yields on expiry only when authenticated within the window', () => {
-    expect(shouldYieldOnLogout({ ...base, kind: 'expired' })).toBe(true); // 5s ago < 600s
+
+  it('NEVER yields on a genuine SESSION_EXPIRED — re-login instead (recent)', () => {
+    // F1: lastAuthSuccessMs is refreshed every cycle, so it is always "recent". A genuine
+    // expiry (no competing human) must re-login, not yield — otherwise every real expiry
+    // becomes a 10-min false gap + a false "human in use" alert.
+    expect(shouldYieldOnLogout({ ...recent, kind: 'expired' })).toBe(false);
   });
-  it('does NOT yield on expiry when the last success is older than the window', () => {
-    expect(
-      shouldYieldOnLogout({
-        kind: 'expired',
-        lastAuthSuccessMs: 1_000_000,
-        nowMs: 2_000_000,
-        windowMs: 600_000,
-      }),
-    ).toBe(false);
+
+  it('NEVER yields on a genuine SESSION_EXPIRED — re-login instead (stale)', () => {
+    expect(shouldYieldOnLogout({ ...stale, kind: 'expired' })).toBe(false);
   });
-  it('does NOT yield on a cold start (no prior success)', () => {
+
+  it('yields on an UNKNOWN logout only when authenticated within the window (recent)', () => {
+    expect(shouldYieldOnLogout({ ...recent, kind: 'unknown' })).toBe(true);
+  });
+
+  it('does NOT yield on an UNKNOWN logout when the last success is older than the window (stale)', () => {
+    expect(shouldYieldOnLogout({ ...stale, kind: 'unknown' })).toBe(false);
+  });
+
+  it('does NOT yield on a cold start (no prior success) for an unknown logout', () => {
     expect(
       shouldYieldOnLogout({
         kind: 'unknown',

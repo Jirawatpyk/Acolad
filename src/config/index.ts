@@ -87,7 +87,10 @@ const schema = z
     XTM_YIELD_WINDOW_MS: z.coerce.number().int().positive().default(600_000),
     XTM_YIELD_MAX_MINUTES: z.coerce.number().int().positive().default(60),
   })
-  .refine((c) => c.XTM_YIELD_WINDOW_MS >= 3 * c.POLL_INTERVAL_MS, {
+  // Only enforce the window floor when yield is ENABLED — otherwise a stale/small window
+  // value would block the kill-switch (an operator must always be able to disable the
+  // feature without first fixing an unrelated value). F7.
+  .refine((c) => !c.XTM_YIELD_ENABLED || c.XTM_YIELD_WINDOW_MS >= 3 * c.POLL_INTERVAL_MS, {
     path: ['XTM_YIELD_WINDOW_MS'],
     message:
       'XTM_YIELD_WINDOW_MS must be >= 3 x POLL_INTERVAL_MS (yield would otherwise be a no-op)',
