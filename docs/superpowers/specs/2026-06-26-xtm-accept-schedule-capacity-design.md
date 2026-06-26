@@ -24,9 +24,14 @@ This yields the team's requirements as consequences of one model:
 2. **Deadline on a non-working day** (weekend or Thai holiday) → **not accepted**
    (the deadline can't be met on a day nobody works).
 3. **Daily word capacity** — stop accepting once a cumulative **word** budget for
-   the day is reached (default 1000 words/day, a hard cap).
-4. **Throughput** (default 100 words/hour) converts a job's word count into the
-   working time it needs.
+   the day is reached (default 1000 words/day, a hard cap). This is the single
+   business knob; it is config-adjustable for future increases.
+4. **Throughput is derived from capacity** — `dailyCapacity ÷ working-hours-per-day`
+   — so raising the capacity automatically scales the rate (no second knob to keep
+   in sync). With the defaults: `1000 ÷ 9h ≈ 111 words/hour`. An explicit
+   `XTM_THROUGHPUT_WORDS_PER_HOUR` may override the derived value. Throughput
+   converts a job's word count into the working time it needs, and keeps the model
+   self-consistent: a `capacity`-word job needs exactly one full working day.
 
 **Non-goals (unchanged behavior):** Detection and Google Chat notification run
 24/7 exactly as today. Gating applies **only to the accept click**. A blocked
@@ -84,7 +89,7 @@ evaluateAcceptSchedule(input):
 
   # (5) Must be FINISHABLE within available working hours before the deadline
   availMin    = workingMinutesBetween(nowMs, dueAtMs, calendar)   # 09:00–18:00 on workdays, minus holidays
-  requiredMin = ceil(words / throughputWordsPerHour * 60)
+  requiredMin = ceil(words / throughputWordsPerHour * 60)         # throughput resolved per §2.2 (derived | override)
   if availMin >= requiredMin               → ALLOW
   else                                     → BLOCK "cannot finish in time (need ~Rh work, ~Ah left before deadline)"
 ```
@@ -125,22 +130,39 @@ workingMinutesBetween(startMs, endMs, cal, capMinutes?):
   same clock the cycle already uses for latency). `dueAtMs = Date.parse(s.dueDate)`
   (null when `s.dueDate` is null or unparseable).
 
+**Throughput resolution** (`resolveThroughput`, pure) — the single business knob
+is the daily capacity; throughput follows it:
+
+```
+resolveThroughput({ explicit, maxWordsPerDay, hoursStartMin, hoursEndMin }):
+  if explicit is set (XTM_THROUGHPUT_WORDS_PER_HOUR) → return explicit
+  workingHoursPerDay = (hoursEndMin - hoursStartMin) / 60     # 9 with defaults
+  return maxWordsPerDay / workingHoursPerDay                  # 1000 / 9 ≈ 111.1
+```
+
+So raising `XTM_ACCEPT_MAX_WORDS_PER_DAY` automatically scales the rate — bigger
+capacity → bigger jobs become finishable — with no second value to keep in sync.
+The model stays self-consistent: a `capacity`-word job needs exactly
+`workingHoursPerDay` of work (one full working day). Resolved once per cycle by
+the caller and passed into the gate as `throughputWordsPerHour`.
+
 `isNonWorkingDay(dateStr, weekday, workdays, holidays)` = `weekday ∉ workdays OR
 holidays.has(dateStr)`.
 
-### 2.3 Worked truth table (XTM_SCHEDULE_ENABLED=1, hours 09:00–18:00, Mon–Fri, cap 1000, throughput 100)
+### 2.3 Worked truth table (XTM_SCHEDULE_ENABLED=1, hours 09:00–18:00, Mon–Fri, cap 1000, throughput derived ≈ 111.1/h)
 
-`requiredMin = words / 100 × 60` (e.g. 300 words → 180 min = 3 working hours).
+`requiredMin = ceil(words / 111.1 × 60) ≈ words × 0.54` (e.g. 300 words ≈ 162 min;
+equivalently `words × workingMinutesPerDay / capacity = words × 540 / 1000`).
 
-| now (Bangkok) | dueDate | words | acceptedToday | avail working time | verdict | reason |
+| now (Bangkok) | dueDate | words | acceptedToday | avail vs required | verdict | reason |
 |---|---|---|---|---|---|---|
-| Mon 10:00 | Wed 18:00 | 800 | 0 | ~25h | ALLOW | finishable |
-| Mon 15:00 | Mon 18:00 | 300 | 0 | 3h (180m) | ALLOW | 180 ≥ 180 (พอดี) |
-| Mon 15:00 | Mon 18:00 | 500 | 0 | 3h (180m) | BLOCK | cannot finish (need 300m, have 180m) |
-| Sun 14:00 | Fri 18:00 | 600 | 0 | ~45h (Mon–Fri) | ALLOW | finishable |
-| Sun 14:00 | Mon 12:00 | 5000 | 0 | Mon 09–12 = 3h | BLOCK | cannot finish (need 3000m, have 180m) |
-| Fri 17:00 | Mon 10:00 | 200 | 0 | Fri17–18 + Mon09–10 = 2h (120m) | ALLOW | 120 ≥ 120 (พอดี) |
-| Fri 17:00 | Mon 10:00 | 800 | 0 | 2h (120m) | BLOCK | cannot finish (need 480m, have 120m) |
+| Mon 10:00 | Wed 18:00 | 800 | 0 | ~1500m ≥ 432m | ALLOW | finishable |
+| Mon 15:00 | Mon 18:00 | 300 | 0 | 180m ≥ 162m | ALLOW | finishable |
+| Mon 15:00 | Mon 18:00 | 500 | 0 | 180m < 270m | BLOCK | cannot finish (need 270m, have 180m) |
+| Sun 14:00 | Fri 18:00 | 600 | 0 | ~2700m ≥ 324m | ALLOW | finishable |
+| Sun 14:00 | Mon 12:00 | 5000 | 0 | 180m < 2700m | BLOCK | cannot finish (need 2700m, have 180m) |
+| Fri 17:00 | Mon 10:00 | 200 | 0 | 120m ≥ 108m | ALLOW | finishable (Fri17–18 + Mon09–10) |
+| Fri 17:00 | Mon 10:00 | 800 | 0 | 120m < 432m | BLOCK | cannot finish (need 432m, have 120m) |
 | any | Sat / Sun / holiday | 100 | 0 | — | BLOCK | deadline on non-working day |
 | Mon 10:00 | (null) | 300 | 0 | — | BLOCK | deadline unknown |
 | Mon 10:00 | Wed 18:00 | (null) | 0 | — | BLOCK | word count unknown |
@@ -155,7 +177,7 @@ New module `src/schedule/` — pure, isolated, independently testable.
 | File | Responsibility | Pure? |
 |---|---|---|
 | `src/schedule/bangkokCalendar.ts` | `bangkokCalendar(epochMs) → { date:'YYYY-MM-DD', weekday:1..7 (ISO, Mon=1), minutesOfDay:0..1439 }`; `bangkokDateString(epochMs)`; `bangkokYear(epochMs)`; `bangkokEpochMs(date, minutes)`. Uses the fixed +07:00 offset (read UTC parts of `ms + 7*3_600_000`, same trick as `reporting/dateFormat.ts`); ISO weekday = `((getUTCDay()+6)%7)+1`. | ✅ |
-| `src/schedule/parseSchedule.ts` | `parseHHMM('09:00') → 540` (minutes); `parseWorkdays('1-5') → Set<number>` (ranges and comma lists; ISO 1..7). Used by config validation. | ✅ |
+| `src/schedule/parseSchedule.ts` | `parseHHMM('09:00') → 540` (minutes); `parseWorkdays('1-5') → Set<number>` (ranges and comma lists; ISO 1..7); `resolveThroughput({ explicit, maxWordsPerDay, hoursStartMin, hoursEndMin }) → number` (§2.2 — explicit override else `capacity ÷ working-hours-per-day`). Used by config validation + the cycle. | ✅ |
 | `src/schedule/workingHours.ts` | `workingMinutesBetween(startMs, endMs, cal, capMinutes?) → number` (§2.2) and `isNonWorkingDay(dateStr, weekday, workdays, holidays) → boolean`. The calendar integration core. | ✅ |
 | `src/schedule/thaiHolidayOverrides.ts` | Static override data `{ [year]: { [date]: name } }`. Seeded with 2026 cabinet-declared / special days. Hand-maintained, git-reviewed. | ✅ (data) |
 | `src/schedule/thaiHolidays.ts` | `getThaiHolidays(year) → { holidays: Map<'YYYY-MM-DD', name>, dataMissing: boolean }` = `date-holidays`('TH') public holidays ∪ override entries (override adds/wins). `dataMissing = true` when the library yields nothing AND there is no override. Per-year memoized; library errors caught → treated as empty. | ผสม |
@@ -191,7 +213,7 @@ interface AcceptScheduleInput {
   hoursStartMin: number;        // parsed minutes, e.g. 540
   hoursEndMin: number;          // parsed minutes, e.g. 1080
   workdays: Set<number>;        // ISO 1..7
-  throughputWordsPerHour: number;
+  throughputWordsPerHour: number; // resolved by caller: explicit override OR derived from capacity (resolveThroughput)
   holidays: Map<string, string>; // date 'YYYY-MM-DD' → holiday name (covers the now..deadline span)
 }
 type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: string };
@@ -212,8 +234,8 @@ type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: string };
 | `XTM_ACCEPT_HOURS_START` | `09:00` | `HH:MM` 24h. Validated `^([01]\d\|2[0-3]):[0-5]\d$`. Daily working-window start. |
 | `XTM_ACCEPT_HOURS_END` | `18:00` | `HH:MM`. Working-window end (exclusive). |
 | `XTM_ACCEPT_WORKDAYS` | `1-5` | ISO weekdays (Mon=1..Sun=7). Ranges (`1-5`) and lists (`1,2,3`). |
-| `XTM_ACCEPT_MAX_WORDS_PER_DAY` | `1000` | Cumulative **words** of confirmed accepts per Bangkok day. `0` = unlimited. |
-| `XTM_THROUGHPUT_WORDS_PER_HOUR` | `100` | Team throughput: words finished per working hour. Must be > 0. Converts words → required working minutes. |
+| `XTM_ACCEPT_MAX_WORDS_PER_DAY` | `1000` | **The primary knob.** Cumulative **words** of confirmed accepts per Bangkok day; also the basis for derived throughput. `0` = unlimited *volume* cap (then throughput must be set explicitly — see refine). |
+| `XTM_THROUGHPUT_WORDS_PER_HOUR` | *(unset → derived)* | OPTIONAL override. Empty/unset → derived `maxWordsPerDay ÷ working-hours-per-day` (≈ 111 with defaults). Set to a positive number to pin the rate independent of capacity. |
 
 Holidays come from the library + override file (no env var for the list).
 
@@ -221,7 +243,9 @@ Holidays come from the library + override file (no env var for the list).
 yield-flag precedent so an operator can always disable the feature without first
 fixing an unrelated value:
 - `parseHHMM(start) < parseHHMM(end)` — else error on `XTM_ACCEPT_HOURS_END`.
-- `XTM_THROUGHPUT_WORDS_PER_HOUR > 0` (zod `.positive()`).
+- A throughput must be **resolvable**: `XTM_THROUGHPUT_WORDS_PER_HOUR` is set
+  (and > 0), **or** `XTM_ACCEPT_MAX_WORDS_PER_DAY > 0` (so it can be derived) —
+  else error naming both vars. When the override is set it must be > 0.
 - `HH:MM` format + workdays parse validated at the field level (fail-fast at
   startup, naming the offending var).
 
@@ -271,7 +295,9 @@ Write tests first, watch them fail, then implement (Constitution).
   mapping (Sun→7); `minutesOfDay` at 00:00 / 23:59; `bangkokEpochMs` round-trip;
   year rollover.
 - **parseSchedule** — `parseHHMM` valid/invalid; `parseWorkdays` ranges, lists,
-  single, out-of-range rejected.
+  single, out-of-range rejected; `resolveThroughput` derives `1000 ÷ 9 ≈ 111.1`,
+  an explicit override wins, and a different capacity/window rescales the derived
+  value.
 - **workingHours** — `workingMinutesBetween`: same-day partial window (15:00→18:00
   = 180); start/end outside the window clamps; an overnight gap (Mon 17:00 → Tue
   10:00 = 60+60); a weekend gap (Fri 17:00 → Mon 10:00 = 120); a holiday in the
@@ -292,9 +318,10 @@ Write tests first, watch them fail, then implement (Constitution).
   `'none'`, counter unchanged; an accepted job: counter += words; cap reached
   mid-cycle blocks the next candidate; `XTM_SCHEDULE_ENABLED=0` path is
   byte-for-byte the pre-feature behavior.
-- **config** — defaults (throughput 100); kill-switch literals; refine rejects
-  `start>=end` and `throughput<=0` only when enabled; HH:MM/workday parse failures
-  named.
+- **config** — defaults (capacity 1000, throughput unset → derived); kill-switch
+  literals; refine rejects `start>=end`, an explicit `throughput<=0`, and
+  `capacity=0` with no explicit throughput — all only when enabled; HH:MM/workday
+  parse failures named.
 
 ---
 
