@@ -10,7 +10,7 @@ export default defineConfig({
     hookTimeout: 60_000,
     coverage: {
       provider: 'v8',
-      include: ['src/detection/**', 'src/state/**', 'src/reporting/**'],
+      include: ['src/detection/**', 'src/state/**', 'src/reporting/**', 'src/schedule/**'],
       exclude: ['**/types.ts'],
       thresholds: {
         lines: 80,
