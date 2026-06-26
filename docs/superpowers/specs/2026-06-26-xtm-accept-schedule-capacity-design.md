@@ -1,7 +1,7 @@
 # XTM Accept: Working-Hours Feasibility + Daily Word Capacity — Design
 
-**Status:** design v2 (brainstormed 2026-06-26 — model revised to working-hours feasibility)
-**Feature area:** auto-accept gating (`src/detection/`, `src/state/`, new `src/schedule/`, `src/runtime/xtmPollCycle.ts`, `src/config/`)
+**Status:** design v3 (brainstormed 2026-06-26; revised after 3-specialist review — reliability/qa/architecture)
+**Feature area:** auto-accept gating (`src/detection/`, `src/state/`, new `src/schedule/`, `src/runtime/xtmPollCycle.ts`, `src/config/`, `src/reporting/`)
 **Builds on:** the live 002 auto-accept pipeline (detect → decide → accept → record) and the auto-yield precedent (config flag + injected clock + meta accessors).
 
 ---
@@ -15,28 +15,21 @@ volume. One coherent rule:
 > **Accept a job only if the team can FINISH it within its available working
 > hours before the deadline — and the day's word budget is not yet spent.**
 
-This yields the team's requirements as consequences of one model:
+Consequences of the one model:
 
-1. **Work-hours window** (09:00–18:00) and **no weekends / no Thai holidays** —
-   these define *when work happens*. Non-working time simply contributes **zero**
-   working hours to the feasibility calculation, so a job that can't be finished
-   in the available working time is not accepted.
-2. **Deadline on a non-working day** (weekend or Thai holiday) → **not accepted**
-   (the deadline can't be met on a day nobody works).
-3. **Daily word capacity** — stop accepting once a cumulative **word** budget for
-   the day is reached (default 1000 words/day, a hard cap). This is the single
-   business knob; it is config-adjustable for future increases.
-4. **Throughput is derived from capacity** — `dailyCapacity ÷ working-hours-per-day`
-   — so raising the capacity automatically scales the rate (no second knob to keep
-   in sync). With the defaults: `1000 ÷ 9h ≈ 111 words/hour`. An explicit
-   `XTM_THROUGHPUT_WORDS_PER_HOUR` may override the derived value. Throughput
-   converts a job's word count into the working time it needs, and keeps the model
-   self-consistent: a `capacity`-word job needs exactly one full working day.
+1. **Work-hours window** (09:00–18:00) and **no weekends / no Thai holidays**
+   define *when work happens*; non-working time contributes **zero** working
+   hours to feasibility.
+2. **Deadline on a non-working day** (weekend or Thai holiday) → **not accepted**.
+3. **Daily word capacity** — the single business knob; stop accepting once the
+   cumulative **word** budget for the day is reached (default 1000, hard cap).
+4. **Throughput is derived from capacity** (`capacity ÷ working-hours-per-day`),
+   so raising capacity auto-scales the rate.
 
 **Non-goals (unchanged behavior):** Detection and Google Chat notification run
-24/7 exactly as today. Gating applies **only to the accept click**. A blocked
-job is **notify-only**: logged to the Sheet + a Chat card stating *why* it was
-not accepted, so a human can grab it manually.
+24/7. Gating applies **only to the accept click**. A blocked job is
+**notify-only**: logged to the Sheet (**Status `Rejected`** + reason in Note) and
+a Chat card, so a human can grab it manually.
 
 ---
 
@@ -46,33 +39,26 @@ For each eligible Malay job the cycle would otherwise auto-accept, a **schedule
 gate** decides `accept` vs `block`:
 
 - **accept** → the existing bulk-accept path runs unchanged.
-- **block** → the job is **not** clicked, but **is logged to the Google Sheet
-  exactly as today**, with **Status = `Rejected`** and the reason in the **Note**
-  column. Internally `lifecycleStatus = 'rejected'` (a new status → Sheet
-  `Rejected`), distinct from `'skipped'` (non-Malay) and `'new'`. A Chat card is
-  also sent with the reason.
+- **block** → the job is **not** clicked, but **is logged to the Sheet** with
+  **Status = `Rejected`** and the reason in the **Note** column
+  (`lifecycleStatus = 'rejected'`, a new status, distinct from `'skipped'` =
+  non-Malay and `'new'`). A Chat card is also sent with the reason.
 
-The `Rejected` row is written when the block is decided (the first-seen blocking
-event reports Sheet + Chat once). `accept_status` stays `'none'`, so the
-robustness pass re-evaluates the job each cycle while it remains in Active:
-- a **capacity** reject can become acceptable after the daily reset;
-- a **feasibility** reject only gets tighter as time passes (less working time
-  before the deadline), so it stays rejected;
-- a **deadline-on-non-working-day** reject never becomes acceptable.
+`accept_status` stays `'none'`, so the robustness pass re-evaluates each cycle
+while the job remains in Active: a **capacity** reject can clear after the daily
+reset; a **feasibility** reject only tightens with time; a
+**deadline-on-non-working-day** reject never clears. A later allow transitions the
+Sheet `Rejected → Accepted`. The gate runs **after** the existing
+`decideAccept()` returns `accept`; non-eligible / capped / auto-accept-disabled
+jobs are handled exactly as today and never reach the gate.
 
-If a re-evaluation later allows it, the Sheet row transitions `Rejected →
-Accepted`. If the job leaves Active first, the existing missing/closed/removed
-handling applies. The gate runs **after** the existing `decideAccept()` returns
-`accept`; non-eligible / capped / auto-accept-disabled jobs are handled exactly
-as today and never reach the gate.
-
-### 2.1 Decision flow (per job that `decideAccept()` says to accept)
+### 2.1 Per-job verdict (pure `evaluateAcceptSchedule`)
 
 ```
 evaluateAcceptSchedule(input):
-  if !XTM_SCHEDULE_ENABLED                 → ALLOW   (byte-for-byte today's behavior)
+  if !ACCEPT_SCHEDULE_ENABLED              → ALLOW   (byte-for-byte today's behavior)
 
-  # (1) Daily word capacity — HARD volume cap
+  # (1) Daily word capacity — HARD volume cap (group total, see §2.4)
   if maxWordsPerDay > 0 and acceptedWordsToday >= maxWordsPerDay
                                            → BLOCK "daily word cap reached (N/1000)"
 
@@ -82,77 +68,78 @@ evaluateAcceptSchedule(input):
   # (3) Word count must be known (needed to judge feasibility)
   if words is null                         → BLOCK "word count unknown"
 
-  # (4) Deadline must NOT fall on a non-working day (weekend OR Thai holiday)
+  # (4) Holiday calendar must be CONFIRMED for the span (see §6 C3 / fail-closed)
+  if not holidaysCuratedForSpan            → BLOCK "holiday calendar not confirmed for <year>"
+
+  # (5) Deadline must NOT fall on a non-working day (weekend OR Thai holiday)
   dl = bangkokCalendar(dueAtMs)
   if isNonWorkingDay(dl.date, dl.weekday, workdays, holidays)
                                            → BLOCK "deadline on non-working day (<weekend|holiday name>)"
 
-  # (5) Must be FINISHABLE within available working hours before the deadline
-  availMin    = workingMinutesBetween(nowMs, dueAtMs, calendar)   # 09:00–18:00 on workdays, minus holidays
-  requiredMin = ceil(words / throughputWordsPerHour * 60)         # throughput resolved per §2.2 (derived | override)
+  # (6) Must be FINISHABLE within available working hours before the deadline
+  if dueAtMs <= nowMs                       → BLOCK "deadline already passed"
+  availMin    = workingMinutesBetween(nowMs, dueAtMs, calendar)
+  requiredMin = ceil(words / throughputWordsPerHour * 60)   # throughput resolved per §2.2
   if availMin >= requiredMin               → ALLOW
-  else                                     → BLOCK "cannot finish in time (need ~Rh work, ~Ah left before deadline)"
+  else                                     → BLOCK "cannot finish in time (need ~Rh, ~Ah left before deadline)"
 ```
 
-**Effective behavior:** A job is accepted iff its deadline is known, the deadline
-is **not** on a non-working day, the team **can finish it** in the working hours
-available before that deadline (`availableWorkingHours × throughput ≥ words`), and
-the **daily word budget** is not spent. This holds the same in-hours and
-off-hours — feasibility is a single general gate, not an off-hours special case.
+`words === 0` → `requiredMin = 0` → trivially finishable → **ALLOW** (a real
+0-word task is deliverable instantly; intentional, pinned by test). `words ===
+null` (unknown) is the rejected case, step 3.
 
 ### 2.2 Working-hours feasibility (`workingMinutesBetween`)
 
-The heart of the feature. Pure: sums the minutes of overlap between the interval
-`[nowMs, dueAtMs]` and each day's **working window** `[09:00, 18:00)` (Bangkok),
-counting **only working days** (Mon–Fri by `workdays`, excluding Thai holidays).
+Pure: sums the minutes of overlap between `[nowMs, dueAtMs]` and each day's
+working window `[09:00, 18:00)` (Bangkok), counting only working days (by
+`workdays`, excluding Thai holidays).
 
 ```
 workingMinutesBetween(startMs, endMs, cal, capMinutes?):
   if endMs <= startMs: return 0
-  total = 0
-  for each Bangkok calendar date D from date(startMs) to date(endMs):   # day-by-day
+  total = 0; days = 0
+  for each Bangkok date D from date(startMs) to date(endMs) INCLUSIVE:   # day-by-day
+    if ++days > 400: break                       # hard safety cap (bounded iteration)
     if isNonWorkingDay(D, weekday(D), cal.workdays, cal.holidays): continue
-    winStart = epochMs(D, cal.hoursStartMin)      # D 09:00 +07:00
-    winEnd   = epochMs(D, cal.hoursEndMin)        # D 18:00 +07:00
+    winStart = bangkokEpochMs(D, cal.hoursStartMin)   # D 09:00 +07:00
+    winEnd   = bangkokEpochMs(D, cal.hoursEndMin)     # D 18:00 +07:00
     overlap  = max(0, min(endMs, winEnd) - max(startMs, winStart))
     total   += overlap / 60000
-    if capMinutes !== undefined and total >= capMinutes: return total   # early-exit
+    if capMinutes !== undefined and total >= capMinutes: return total    # early-exit
   return total
 ```
 
-- **Bangkok is a fixed +07:00 offset (no DST)** → `epochMs(date, minutes)` is
+- **Bangkok = fixed +07:00 (no DST)** → `bangkokEpochMs(date, minutes)` =
   `Date.parse(`${date}T${HH}:${MM}:00+07:00`)`. Deterministic, no `Date.now()`.
-- **Early-exit** via `capMinutes = requiredMin` bounds iteration: a feasible job
-  stops as soon as it has enough; an infeasible near-deadline job iterates only a
-  few days. A hard safety cap (e.g. 400 days) backstops a pathological far
-  deadline.
+- The end date is iterated **inclusive** (the `Mon 15:00 → Mon 18:00 = 180` case
+  depends on it). The 400-day cap lives **in code**, not just prose.
 - `nowMs = Date.parse(snapshot.capturedAt)` (snapshot-driven, deterministic, the
-  same clock the cycle already uses for latency). `dueAtMs = Date.parse(s.dueDate)`
-  (null when `s.dueDate` is null or unparseable).
+  same clock the cycle already uses for latency). `dueAtMs = Date.parse(s.dueDate)`;
+  `s.dueDate` is produced by `normalizeXtmDue` and **always carries a time**
+  (`YYYY-MM-DDTHH:MM+07:00`) — verified, so there is no date-only→07:00 pitfall in
+  the gate. (If XTM ever emits a time-less deadline, that is a `normalizeXtmDue`
+  concern, out of scope here; flag during implementation if real samples differ.)
 
-**Throughput resolution** (`resolveThroughput`, pure) — the single business knob
-is the daily capacity; throughput follows it:
+**Throughput resolution** (`resolveThroughput`, pure) — capacity is the single
+knob; throughput follows it:
 
 ```
-resolveThroughput({ explicit, maxWordsPerDay, hoursStartMin, hoursEndMin }):
-  if explicit is set (XTM_THROUGHPUT_WORDS_PER_HOUR) → return explicit
+resolveThroughput(explicit, maxWordsPerDay, hoursStartMin, hoursEndMin):
+  if explicit is set (ACCEPT_THROUGHPUT_WORDS_PER_HOUR) → return explicit
   workingHoursPerDay = (hoursEndMin - hoursStartMin) / 60     # 9 with defaults
   return maxWordsPerDay / workingHoursPerDay                  # 1000 / 9 ≈ 111.1
 ```
 
-So raising `XTM_ACCEPT_MAX_WORDS_PER_DAY` automatically scales the rate — bigger
-capacity → bigger jobs become finishable — with no second value to keep in sync.
-The model stays self-consistent: a `capacity`-word job needs exactly
-`workingHoursPerDay` of work (one full working day). Resolved once per cycle by
-the caller and passed into the gate as `throughputWordsPerHour`.
+Computed **once in `loadConfig`** as a derived field on `AppConfig` (§3/§4), not
+per-cycle — single source of truth, type-safe `number`. A `capacity`-word job
+needs exactly one full working day.
 
 `isNonWorkingDay(dateStr, weekday, workdays, holidays)` = `weekday ∉ workdays OR
 holidays.has(dateStr)`.
 
-### 2.3 Worked truth table (XTM_SCHEDULE_ENABLED=1, hours 09:00–18:00, Mon–Fri, cap 1000, throughput derived ≈ 111.1/h)
+### 2.3 Worked truth table (ENABLED, hours 09:00–18:00, Mon–Fri, cap 1000, throughput derived ≈ 111.1/h)
 
-`requiredMin = ceil(words / 111.1 × 60) ≈ words × 0.54` (e.g. 300 words ≈ 162 min;
-equivalently `words × workingMinutesPerDay / capacity = words × 540 / 1000`).
+`requiredMin = ceil(words / 111.1 × 60) ≈ words × 0.54` (e.g. 300 words ≈ 162 min).
 
 | now (Bangkok) | dueDate | words | acceptedToday | avail vs required | verdict | reason |
 |---|---|---|---|---|---|---|
@@ -168,6 +155,35 @@ equivalently `words × workingMinutesPerDay / capacity = words × 540 / 1000`).
 | Mon 10:00 | Wed 18:00 | (null) | 0 | — | BLOCK | word count unknown |
 | Mon 10:00 | Wed 18:00 | 300 | 1000 | — | BLOCK | daily word cap reached (1000/1000) |
 
+### 2.4 Bulk-group all-or-nothing (Critical — C1)
+
+The portal's bulk action **"Accept all tasks for this language in this group"**
+claims the **whole language-group in one click** (the reason `ACCEPT_MAX_PER_CYCLE`
+must be `0` — see `acceptDecision.ts`). A **per-job** gate therefore creates a
+data-corruption hazard: if a small sibling is ALLOWed and a larger sibling is
+BLOCKed (infeasible, or the capacity boundary falls mid-group), accepting the
+small one **grabs the blocked sibling on the portal too**, yet the bot records it
+`Rejected` → the team sees "Rejected", never delivers a job they actually own →
+**irreversible SLA breach.**
+
+**Rule:** the gate is decided at the granularity of a **bulk-accept unit** — the
+set of sibling tasks one bulk click grabs (the **same grouping key the
+`XtmAcceptor` uses**; the implementer MUST read `src/portal/xtmAccept.ts` and
+align on it, e.g. project/group + target language):
+
+1. Collect every would-accept candidate (jobs where `decideAccept()` → `accept`),
+   from both the first-seen and robustness passes.
+2. Group candidates by the bulk-accept key.
+3. For each group: run the per-job verdict (§2.1) on **every** member, and check
+   the group's **combined** words against the remaining daily capacity.
+4. **Accept the group only if every member ALLOWs and the group total fits
+   capacity.** Otherwise **Reject the entire group** — mark every member
+   `lifecycleStatus = 'rejected'` with the binding reason (the first/worst failing
+   member's reason, e.g. "group blocked: cannot finish '<file>' in time").
+
+This preserves the bulk invariant safely and makes capacity a per-group check
+(no mid-group split). A genuinely solo job is just a group of one.
+
 ---
 
 ## 3. Module Map
@@ -176,99 +192,102 @@ New module `src/schedule/` — pure, isolated, independently testable.
 
 | File | Responsibility | Pure? |
 |---|---|---|
-| `src/schedule/bangkokCalendar.ts` | `bangkokCalendar(epochMs) → { date:'YYYY-MM-DD', weekday:1..7 (ISO, Mon=1), minutesOfDay:0..1439 }`; `bangkokDateString(epochMs)`; `bangkokYear(epochMs)`; `bangkokEpochMs(date, minutes)`. Uses the fixed +07:00 offset (read UTC parts of `ms + 7*3_600_000`, same trick as `reporting/dateFormat.ts`); ISO weekday = `((getUTCDay()+6)%7)+1`. | ✅ |
-| `src/schedule/parseSchedule.ts` | `parseHHMM('09:00') → 540` (minutes); `parseWorkdays('1-5') → Set<number>` (ranges and comma lists; ISO 1..7); `resolveThroughput({ explicit, maxWordsPerDay, hoursStartMin, hoursEndMin }) → number` (§2.2 — explicit override else `capacity ÷ working-hours-per-day`). Used by config validation + the cycle. | ✅ |
-| `src/schedule/workingHours.ts` | `workingMinutesBetween(startMs, endMs, cal, capMinutes?) → number` (§2.2) and `isNonWorkingDay(dateStr, weekday, workdays, holidays) → boolean`. The calendar integration core. | ✅ |
-| `src/schedule/thaiHolidayOverrides.ts` | Static override data `{ [year]: { [date]: name } }`. Seeded with 2026 cabinet-declared / special days. Hand-maintained, git-reviewed. | ✅ (data) |
-| `src/schedule/thaiHolidays.ts` | `getThaiHolidays(year) → { holidays: Map<'YYYY-MM-DD', name>, dataMissing: boolean }` = `date-holidays`('TH') public holidays ∪ override entries (override adds/wins). `dataMissing = true` when the library yields nothing AND there is no override. Per-year memoized; library errors caught → treated as empty. | ผสม |
-| `src/schedule/acceptSchedule.ts` | `evaluateAcceptSchedule(input) → { allow:true } \| { allow:false, reason }` implementing §2.1. Composes `bangkokCalendar` + `workingHours`; takes the year's `holidays` map as input. | ✅ |
+| `src/schedule/bangkokCalendar.ts` | **Canonical** Bangkok time helpers: `bangkokCalendar(epochMs) → { date, weekday:1..7, minutesOfDay }`; `bangkokDateString`, `bangkokYear`, `bangkokEpochMs(date, minutes)`. Fixed +07:00 (read UTC parts of `ms + 7*3_600_000`); ISO weekday `((getUTCDay()+6)%7)+1`. **`dailyReport.bangkokDate` and the meta word-counter date keying delegate here** (one source for "Bangkok date"). | ✅ |
+| `src/schedule/parseSchedule.ts` | `parseHHMM('09:00') → 540`; `parseWorkdays('1-5') → Set<number>` (ranges/lists, ISO 1..7, **rejects empty**); `resolveThroughput(...)` (§2.2). | ✅ |
+| `src/schedule/workingHours.ts` | `workingMinutesBetween(start, end, cal, capMinutes?)` (§2.2, 400-day cap, inclusive end) and `isNonWorkingDay(...)`. | ✅ |
+| `src/schedule/thaiHolidayOverrides.ts` | `OVERRIDE_CURATED_YEARS: Set<number>` + override data `{ [year]: { [date]: name } }`. Seeded + curated for 2026–2027 (cabinet-declared / substitution days). Hand-maintained, git-reviewed. | ✅ (data) |
+| `src/schedule/thaiHolidays.ts` | `getThaiHolidays(year) → { holidays: Map<date,name>, curated: boolean }` = `date-holidays`('TH') public holidays ∪ override entries (override adds/wins); `curated = year ∈ OVERRIDE_CURATED_YEARS`. Per-year memoized; lib errors caught → lib treated as empty (override still applies). The holiday source is **injected** (seam) so merge/curated/throw are tested deterministically. | ผสม |
+| `src/schedule/acceptSchedule.ts` | `evaluateAcceptSchedule(input) → { allow:true } \| { allow:false, reason }` (§2.1). Composes `bangkokCalendar` + `workingHours`; takes the resolved `holidays` + `holidaysCuratedForSpan` as input. | ✅ |
 
 Changed files:
 
 | File | Change |
 |---|---|
 | `src/detection/types.ts` | Add `'rejected'` to `XtmLifecycleStatus`. |
-| `src/reporting/sheets.ts` | Add `'Rejected'` to `SheetStatus`; map `rejected → 'Rejected'` in `lifecycleToSheetStatus`. |
-| `src/state/meta.ts` | Daily word counter: `acceptedWordsToday(dateStr)`, `addAcceptedWords(dateStr, n)` (reset-on-date-change, one txn). Keys `accepted_words_date`, `accepted_words_count`. |
-| `src/config/index.ts` | New env vars + zod validation + `.refine` (see §4). |
-| `src/runtime/xtmPollCycle.ts` | Resolve the year's holidays + read `acceptedWordsToday` once per cycle; apply the gate at both accept sites (first-seen + robustness); track optimistic in-cycle words; on confirmed accept `addAcceptedWords`; on block set `lifecycleStatus='rejected'` + reason note (Sheet row written like today); new summary counter `scheduleBlocked`; raise `holiday_data_missing` alert (deduped) when `dataMissing`. |
-| `src/reporting/xtmNotifier.ts` | `renderXtmNewJob` note variants: "accepting", rejected "Rejected — <reason>", existing "auto-accept off" / "Not Malay" preserved. |
-| `src/reporting/systemAlerts.ts` | New `TriggerKind` `holiday_data_missing` (severity warn, `hasRecovered:true`). |
-| `package.json` | add dependency `date-holidays`. |
+| **`src/state/db.ts`** | **(C2)** Widen/drop the `lifecycle_status` CHECK (db.ts:127-130 lists only 7 statuses; the column already exists in prod, so an `ADD COLUMN` is skipped). Add a **table-rebuild migration** for `jobs` inside `migrate()`'s tx (rename → recreate with the widened/dropped CHECK → copy all ~14 columns → drop old), mirroring `ensureOutboxChannel`. Without it, persisting `'rejected'` throws `SQLITE_CONSTRAINT_CHECK` and crashes the cycle. |
+| `src/reporting/sheets.ts` | Add `'Rejected'` to `SheetStatus`; map `rejected → 'Rejected'` in the exhaustive `lifecycleToSheetStatus` Record (tsc enforces the addition). |
+| `src/state/meta.ts` | Daily word counter: `acceptedWordsToday(dateStr)`, `addAcceptedWords(dateStr, n)` (reset-on-date-change, one txn). Keys `accepted_words_date`, `accepted_words_count`. Date keying via `bangkokDateString` (canonical). |
+| `src/config/index.ts` | New `ACCEPT_SCHEDULE_*` env vars; field-level transforms (hours→minutes, workdays→Set); **derived fields** on `AppConfig` (`throughputWordsPerHour`, parsed hours/workdays); `.refine` (§4). |
+| `src/runtime/xtmPollCycle.ts` | **(C4)** One `evaluateCandidate()` helper composing `decideAccept` + the schedule verdict, called from **both** accept sites (no drift, no silent robustness-pass reject). Group candidates per bulk-accept unit and apply §2.4 all-or-nothing. Resolve the year(s)' holidays + `acceptedWordsToday` once per cycle; **(I1)** `addAcceptedWords` **inside the same txn as `recordAcceptOutcome`** (only `outcome==='accepted'`); set `lifecycleStatus='rejected'` + thread the reason via a `rejectNotes` map; new `summary.scheduleBlocked`; raise/resolve `holiday_override_stale` (deduped, guarded behind ENABLED). |
+| `src/runtime/xtmPollCycle.ts > chatForEvent` | **(I3)** Add a `rejected` branch → note `"Rejected — <reason>"` from `rejectNotes` (today it would wrongly say "Malay (MS) — accepting"). **`renderXtmNewJob` already takes `statusNote` — `xtmNotifier.ts` likely needs NO change.** Field re-sync (`detailsChanges`) for a `rejected` job must **preserve the reason note and re-run the gate** (a new dueDate/words may flip it to Accepted) instead of writing `note=null`. |
+| `src/reporting/systemAlerts.ts` | New `TriggerKind` `holiday_override_stale` (severity warn, `hasRecovered:true` — needs a resolve call site in the cycle). |
+| `.env.example` | Document the new `ACCEPT_SCHEDULE_*` vars. |
+| `package.json` | Add dependency `date-holidays` (CJS — see §6 interop note). |
+| `specs/.../contracts/config.md`, `contracts/sheets.md` | Add the new vars + the `Rejected` status (code cites these as source-of-truth). |
 
-`evaluateAcceptSchedule` stays **pure** and decoupled from the DB/outbox: the
-cycle resolves holidays and the running word count and passes them in. The
-`holiday_data_missing` alert is raised by the cycle (which owns the outbox).
+`evaluateAcceptSchedule` stays **pure**; the cycle resolves holidays/curation and
+the running word count and passes them in. Alerts are raised by the cycle.
 
 ### 3.1 `AcceptScheduleInput` (interface)
 
 ```ts
 interface AcceptScheduleInput {
-  enabled: boolean;             // XTM_SCHEDULE_ENABLED
-  nowMs: number;                // Date.parse(snapshot.capturedAt) — snapshot-driven, deterministic
-  dueAtMs: number | null;       // caller: s.dueDate ? Date.parse(s.dueDate) : null (NaN → null)
-  words: number | null;         // s.words
-  acceptedWordsToday: number;   // persisted today + optimistic in-cycle running total
-  maxWordsPerDay: number;       // 0 = unlimited
-  hoursStartMin: number;        // parsed minutes, e.g. 540
-  hoursEndMin: number;          // parsed minutes, e.g. 1080
-  workdays: Set<number>;        // ISO 1..7
-  throughputWordsPerHour: number; // resolved by caller: explicit override OR derived from capacity (resolveThroughput)
-  holidays: Map<string, string>; // date 'YYYY-MM-DD' → holiday name (covers the now..deadline span)
+  enabled: boolean;                 // ACCEPT_SCHEDULE_ENABLED
+  nowMs: number;                    // Date.parse(snapshot.capturedAt)
+  dueAtMs: number | null;           // s.dueDate ? Date.parse(s.dueDate) : null (NaN → null)
+  words: number | null;             // s.words
+  acceptedWordsToday: number;       // persisted today + optimistic in-cycle running total
+  maxWordsPerDay: number;           // 0 = unlimited
+  hoursStartMin: number; hoursEndMin: number;  // resolved minutes
+  workdays: Set<number>;            // ISO 1..7
+  throughputWordsPerHour: number;   // resolved (derived from capacity OR explicit override)
+  holidays: Map<string, string>;    // every date the now..deadline span can touch
+  holidaysCuratedForSpan: boolean;  // every year the span touches is in OVERRIDE_CURATED_YEARS (C3)
 }
 type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: string };
 ```
 
-> The `holidays` map must cover every date the feasibility scan can touch
-> (now → deadline), which can cross a year boundary. The cycle resolves
-> `getThaiHolidays(bangkokYear(nowMs))` merged with the next year when the
-> deadline falls in it.
+> The cycle resolves `holidays` for **every year the now→deadline span touches**
+> (can cross a year boundary; the 400-day cap bounds it to ≤ 2 years) and sets
+> `holidaysCuratedForSpan` accordingly.
 
 ---
 
-## 4. Config (new env vars; safe defaults in `.env.example`)
+## 4. Config (new env vars, `ACCEPT_SCHEDULE_*` family; safe defaults in `.env.example`)
 
 | Var | Default | Notes |
 |---|---|---|
-| `XTM_SCHEDULE_ENABLED` | **ON** | Master switch. `0`/`false`/`off`/`no` → disabled (identical to the yield kill-switch parsing). Disabled = today's behavior exactly. |
-| `XTM_ACCEPT_HOURS_START` | `09:00` | `HH:MM` 24h. Validated `^([01]\d\|2[0-3]):[0-5]\d$`. Daily working-window start. |
-| `XTM_ACCEPT_HOURS_END` | `18:00` | `HH:MM`. Working-window end (exclusive). |
-| `XTM_ACCEPT_WORKDAYS` | `1-5` | ISO weekdays (Mon=1..Sun=7). Ranges (`1-5`) and lists (`1,2,3`). |
-| `XTM_ACCEPT_MAX_WORDS_PER_DAY` | `1000` | **The primary knob.** Cumulative **words** of confirmed accepts per Bangkok day; also the basis for derived throughput. `0` = unlimited *volume* cap (then throughput must be set explicitly — see refine). |
-| `XTM_THROUGHPUT_WORDS_PER_HOUR` | *(unset → derived)* | OPTIONAL override. Empty/unset → derived `maxWordsPerDay ÷ working-hours-per-day` (≈ 111 with defaults). Set to a positive number to pin the rate independent of capacity. |
+| `ACCEPT_SCHEDULE_ENABLED` | **ON** | Master switch. `0`/`false`/`off`/`no` → disabled (yield-flag parsing). Disabled = today's behavior exactly. |
+| `ACCEPT_HOURS_START` | `09:00` | `HH:MM`. Transformed to minutes. Working-window start. |
+| `ACCEPT_HOURS_END` | `18:00` | `HH:MM`. Working-window end (exclusive). |
+| `ACCEPT_WORKDAYS` | `1-5` | ISO weekdays (Mon=1..Sun=7); ranges + lists; transformed to a **non-empty** `Set`. |
+| `ACCEPT_MAX_WORDS_PER_DAY` | `1000` | **The primary knob.** Cumulative **words** of confirmed accepts per Bangkok day; also the basis for derived throughput. `0` = unlimited *volume* cap (then throughput must be explicit — see refine). Distinct from the existing per-job `ACCEPT_MAX_WORDS`. |
+| `ACCEPT_THROUGHPUT_WORDS_PER_HOUR` | *(unset → derived)* | OPTIONAL override. Empty/unset → derived `maxWordsPerDay ÷ working-hours-per-day` (≈ 111). |
+
+**Config shape (I2):** parse with field-level transforms + an optional-numeric
+guard, then expose **derived fields** so the cycle never recomputes:
+- `ACCEPT_THROUGHPUT_WORDS_PER_HOUR`: `z.preprocess(v => v === '' || v === undefined ? undefined : v, z.coerce.number().positive().optional())` — distinguishes "unset" from `0` (`Number('') === 0` trap).
+- Top-level `.transform` adds `throughputWordsPerHour`, `hoursStartMin`, `hoursEndMin`, `workdays` to the parsed object (one source of truth on `z.infer`).
+
+**zod `.refine` (only when `ACCEPT_SCHEDULE_ENABLED`)** — mirrors the yield-flag
+precedent so the kill-switch always works:
+- `hoursStartMin < hoursEndMin` — else error on `ACCEPT_HOURS_END`.
+- Throughput resolvable: `ACCEPT_THROUGHPUT_WORDS_PER_HOUR` set (`> 0`) **or**
+  `ACCEPT_MAX_WORDS_PER_DAY > 0` — else error naming both.
+- `ACCEPT_WORKDAYS` parses to a non-empty set; `HH:MM` format valid — field-level,
+  fail-fast naming the var.
 
 Holidays come from the library + override file (no env var for the list).
-
-**zod `.refine` (only enforced when `XTM_SCHEDULE_ENABLED`)** — mirrors the
-yield-flag precedent so an operator can always disable the feature without first
-fixing an unrelated value:
-- `parseHHMM(start) < parseHHMM(end)` — else error on `XTM_ACCEPT_HOURS_END`.
-- A throughput must be **resolvable**: `XTM_THROUGHPUT_WORDS_PER_HOUR` is set
-  (and > 0), **or** `XTM_ACCEPT_MAX_WORDS_PER_DAY > 0` (so it can be derived) —
-  else error naming both vars. When the override is set it must be > 0.
-- `HH:MM` format + workdays parse validated at the field level (fail-fast at
-  startup, naming the offending var).
 
 ---
 
 ## 5. Capacity Counting Semantics
 
-- The persisted daily counter (`meta`) is incremented by `job.words` **only on a
-  confirmed accept** (`outcome === 'accepted'`), keyed to the **Bangkok** date;
-  it resets when the date rolls (a read/write for a new date starts from 0).
+- The persisted counter (`meta`) increments by the **group's accepted words** —
+  **inside the same transaction as `recordAcceptOutcome`** (I1), only for
+  `outcome === 'accepted'`, keyed to the **Bangkok** date; it resets when the date
+  rolls. A crash between commit and counting would otherwise under-count
+  permanently and over-accept.
 - Within one cycle, an **optimistic** running total of queued-candidate words is
-  added to `acceptedWordsToday` for the gate, so multiple accepts in the same
-  cycle respect the cap. A candidate that later fails/misses simply over-counted
-  optimistically that cycle — strictly more conservative, never a silent
-  over-accept.
-- Block condition is `acceptedWordsToday >= cap`. Because the portal's bulk
-  action grabs the whole language group in one click, a single accept can
-  **overshoot** the cap by one group — accepted and documented, the same
-  constraint already noted for `ACCEPT_MAX_PER_CYCLE` (see `acceptDecision.ts`).
-  The cap is a soft *pre-gate*, not a mid-group stop.
-- A `words === null` job is **rejected** by the feasibility gate (§2.1 step 3),
-  so it is never accepted while the schedule is enabled and never reaches the
-  counter. (With the schedule disabled it follows today's behavior.)
+  added to `acceptedWordsToday` for the gate, so multiple groups in one cycle
+  respect the cap; an over-counted candidate that later fails/misses is strictly
+  conservative, never a silent over-accept.
+- Block condition: `acceptedWordsToday >= cap` (group total checked per §2.4).
+  Bulk grabs the whole group, so a single accepted group may **overshoot** the cap
+  by its size — accepted and documented (same class as `ACCEPT_MAX_PER_CYCLE`); the
+  cap is a soft per-group pre-gate.
+- `words === null` is **rejected** by the gate (§2.1 step 3) and never reaches the
+  counter while enabled.
 
 ---
 
@@ -276,74 +295,86 @@ fixing an unrelated value:
 
 | Condition | Handling |
 |---|---|
-| Holiday year missing (`dataMissing`) | Cycle raises `holiday_data_missing` system alert (deduped) → **fail-open**: the missing year's holidays are treated as ordinary working days (feasibility may over-count and the deadline-on-holiday check won't fire for them) until the override/library is updated. Avoids the bot going dark because next year's holidays weren't added. |
-| `date-holidays` throws / unavailable | Caught in `getThaiHolidays` → treated as empty; `dataMissing` reflects whether an override exists. Never crashes the cycle (Constitution IV). |
-| Bad `HH:MM`, `start >= end`, `throughput <= 0`, bad workdays | **fail-fast at startup** via zod, message names the var. |
-| `dueDate` null/unparseable | BLOCK "deadline unknown" (notify-only). Never throws. |
-| `words` null | BLOCK "word count unknown" (notify-only). |
-| Deadline far in the future | `workingMinutesBetween` early-exits at `requiredMin`; a 400-day hard cap backstops a pathological deadline so iteration is always bounded. |
-| Clock/parse anomaly on `capturedAt` | `nowMs = Date.parse(capturedAt)`; if NaN the cycle already fails its normal path before the gate. |
+| **(C2)** `'rejected'` vs the `lifecycle_status` CHECK | Table-rebuild migration in `db.ts` widens/drops the CHECK before any `'rejected'` write. A startup smoke (existing) plus a migration test guard it. |
+| **(C3)** Holiday calendar not confirmed for a span's year | Signal = **override curation**, not lib-emptiness: `curated = year ∈ OVERRIDE_CURATED_YEARS`. **Uniform fail-closed:** if ANY year the now→deadline span touches is uncurated → `holidaysCuratedForSpan=false` → the gate **BLOCKs** (§2.1 step 4, `"holiday calendar not confirmed for <year>"`) + the cycle raises `holiday_override_stale` (loud, deduped). If the **current** year is uncurated this pauses auto-accept entirely until curated — but detect+notify keep running 24/7 (nothing is missed; humans accept manually), and accept is irreversible so safe-by-default wins. Resolve the alert when curation is restored. Replaces the fragile `dataMissing` (which `date-holidays` makes always-false). |
+| `date-holidays` (CJS) on Node22 NodeNext | Import as `import Holidays from 'date-holidays'` (default), pin the version, verify interop at build; a throw is caught → override-only for that call. |
+| Bad `HH:MM`, `start >= end`, explicit `throughput <= 0`, `capacity=0` w/o throughput, empty `workdays` | **fail-fast at startup** via zod/refine, naming the var. |
+| `dueDate` null / `words` null | BLOCK "deadline unknown" / "word count unknown" (notify-only). |
+| `dueAtMs <= nowMs` (past/now) | BLOCK "deadline already passed" (distinct, clearer than "cannot finish"). |
+| Deadline far in the future | `workingMinutesBetween` early-exits at `requiredMin`; the **400-day cap (in code)** bounds iteration. |
+| Holiday resolution / `holiday_override_stale` while **disabled** | Guarded behind `ACCEPT_SCHEDULE_ENABLED` — a disabled feature never resolves holidays or pages. |
+| Clock/parse anomaly on `capturedAt` | `nowMs = Date.parse(capturedAt)`; NaN fails the cycle's normal path before the gate. |
 
 ---
 
-## 7. Testing (TDD; coverage gate ≥ 80% for detection/state; `src/schedule` new)
+## 7. Testing (TDD; coverage gate ≥ 80% for **detection / state / reporting / src/schedule**)
 
-Write tests first, watch them fail, then implement (Constitution).
+Write tests first, watch them fail, then implement. **Add `src/schedule/` to the
+coverage gate** (riskiest logic). **(C5) TZ trap:** the project's CI runs UTC;
+every date test below MUST use TZ-explicit `+07:00` epoch inputs (never
+`new Date(y,m,d,...)` local) and include one `TZ=UTC npx vitest run` repro — this
+applies to `bangkokCalendar`, `workingMinutesBetween`, the **truth-table weekday
+labels**, and the **meta midnight reset**, not just `bangkokCalendar`.
 
-- **bangkokCalendar** — UTC inputs crossing the Bangkok midnight boundary (the
-  CI-runs-UTC trap: TZ-explicit ISO inputs, reproduce with `TZ=UTC`); ISO weekday
-  mapping (Sun→7); `minutesOfDay` at 00:00 / 23:59; `bangkokEpochMs` round-trip;
-  year rollover.
-- **parseSchedule** — `parseHHMM` valid/invalid; `parseWorkdays` ranges, lists,
-  single, out-of-range rejected; `resolveThroughput` derives `1000 ÷ 9 ≈ 111.1`,
-  an explicit override wins, and a different capacity/window rescales the derived
-  value.
-- **workingHours** — `workingMinutesBetween`: same-day partial window (15:00→18:00
-  = 180); start/end outside the window clamps; an overnight gap (Mon 17:00 → Tue
-  10:00 = 60+60); a weekend gap (Fri 17:00 → Mon 10:00 = 120); a holiday in the
-  span is skipped; a multi-day full span; `end <= start` → 0; deadline before the
-  window start that day; `capMinutes` early-exit returns ≥ cap. `isNonWorkingDay`:
-  weekend true, holiday true, normal weekday false.
-- **thaiHolidays** — library hit for a known 2026 standard holiday; override merge
-  (override-only date appears; override name wins); `dataMissing` true for a
-  far-future year with no override; library-throw caught.
-- **acceptSchedule** — the full §2.3 truth table: capacity reached; deadline
-  unknown; word count unknown; deadline on weekend/holiday; finishable vs not
-  (boundary "พอดี" cases 180≥180, 120≥120); disabled → always allow.
-- **meta** — counter increments; reset on new Bangkok date; persistence across a
-  fresh `MetaStore` (restart) for the same date.
-- **xtmPollCycle integration** (stubbed acceptor) — a blocked eligible job: not
-  accepted, `lifecycleStatus='rejected'` → Sheet row enqueued with Status
-  `Rejected` + reason in Note, Chat card carries the reason, `accept_status` stays
-  `'none'`, counter unchanged; an accepted job: counter += words; cap reached
-  mid-cycle blocks the next candidate; `XTM_SCHEDULE_ENABLED=0` path is
-  byte-for-byte the pre-feature behavior.
-- **config** — defaults (capacity 1000, throughput unset → derived); kill-switch
-  literals; refine rejects `start>=end`, an explicit `throughput<=0`, and
-  `capacity=0` with no explicit throughput — all only when enabled; HH:MM/workday
-  parse failures named.
+- **bangkokCalendar** — UTC inputs crossing Bangkok midnight; ISO weekday (Sun→7);
+  `minutesOfDay` 00:00/23:59; `bangkokEpochMs` round-trip; year rollover.
+- **parseSchedule** — `parseHHMM` valid/invalid; `parseWorkdays` ranges/lists/single,
+  out-of-range + **empty rejected**; `resolveThroughput` derives `1000/9 ≈ 111.1`,
+  explicit override wins, different capacity/window rescales.
+- **workingHours** — `workingMinutesBetween`: same-day partial (15:00→18:00=180),
+  both-ends-interior (10:30→16:30=360), clamp when now<09:00 / now>18:00→next day,
+  overnight gap (Mon17:00→Tue10:00=120), weekend gap (Fri17:00→Mon10:00=120), a
+  holiday skipped mid-span flips ALLOW→BLOCK, full multi-day span, `end<=start→0`,
+  deadline exactly 18:00 / exactly 09:00 (that day=0), `capMinutes` early-exit,
+  **400-day cap + far infeasible deadline → bounded iteration → BLOCK**.
+  `isNonWorkingDay`: weekend/holiday true, weekday false.
+- **acceptSchedule** — full §2.3 table; **boundary pinned to a round throughput
+  (100/h)** so ceil is exact: `availMin == requiredMin → ALLOW` vs `requiredMin-1
+  → BLOCK` (e.g. 300 words → 180m, avail 180 ALLOW / 179 BLOCK; `334 vs 333` ceil
+  edge); capacity at-cap / one-under / unlimited / over-cap; deadline past/now;
+  `words=0` → ALLOW; uncurated deadline-year → BLOCK; disabled + `dueDate=null` →
+  ALLOW (discriminating).
+- **thaiHolidays** — injected source: merge, override-wins, `curated` true/false,
+  lib-throw → override-only; a substitution-immune smoke (`2026-01-01`).
+- **meta** — increment; **reset across Bangkok-midnight (TZ-explicit epoch)**;
+  persistence across a fresh `MetaStore` same date.
+- **sheets** — `rejected → 'Rejected'`. **xtmNotifier/chatForEvent** — rejected note
+  `"Rejected — <reason>"` (reporting is under the gate).
+- **config** — default `ACCEPT_SCHEDULE_ENABLED` ON (assert); derived throughput;
+  refine rejects `start>=end`, explicit `throughput<=0`, `capacity=0`-without-throughput,
+  empty workdays — only when enabled; `''` throughput → derived (not 0).
+- **xtmPollCycle integration** (stub acceptor; **set the flag true + real
+  dueDate/words** — existing `xraw()` defaults `dueDate:null` and would be blocked):
+  - blocked job → Sheet `Rejected` + reason in Note + Chat **once**; **re-run the
+    cycle twice on the same still-present blocked job → no duplicate Sheet/Chat**;
+    `accept_status` stays `'none'`; counter unchanged.
+  - **(C1)** a bulk group with one infeasible/over-cap member → the **whole group**
+    Rejected (no member left accepted-on-portal-but-Rejected).
+  - **(C4)** a robustness-pass block IS reported (not silent).
+  - accepted group → counter += group words (in txn); a `failed`/`missing` accept →
+    counter unchanged; cap reached mid-cycle blocks the next group.
+  - `Rejected → Accepted` after a daily reset.
+  - `holiday_override_stale` raised + deduped + resolved.
+  - `ACCEPT_SCHEDULE_ENABLED=0` → byte-for-byte pre-feature (discriminating input).
+- **db migration** — an existing v2 DB with the old CHECK accepts a `'rejected'`
+  write after `migrate()`.
 
 ---
 
 ## 8. Rollout
 
-- Ships **default ON** (the requested behavior). `XTM_SCHEDULE_ENABLED=0` is the
-  one-line rollback.
-- `ACCEPT_MAX_PER_CYCLE` stays `0` (untouched — the bulk-accept invariant).
-- After deploy: watch a cycle log for `scheduleBlocked` counts; confirm an
-  in-hours, finishable Malay job still accepts; confirm a too-tight or
-  non-working-day-deadline job is `Rejected` with reason on the Sheet; confirm the
-  daily word counter resets at Bangkok midnight.
-- Verify the 2026 Thai holiday override list before relying on holiday handling.
+- Ships **default ON**. `ACCEPT_SCHEDULE_ENABLED=0` is the one-line rollback.
+- `ACCEPT_MAX_PER_CYCLE` stays `0`.
+- After deploy: confirm an in-hours finishable Malay job still accepts; a too-tight
+  or non-working-day-deadline job is `Rejected` with reason on the Sheet; the daily
+  word counter resets at Bangkok midnight; `scheduleBlocked` counts look sane.
+- **Curate `OVERRIDE_CURATED_YEARS` + the 2026–2027 Thai holiday lists before
+  deploy**, and add a yearly checklist to curate the next year before December.
 
 ---
 
 ## 9. Open / Deferred (YAGNI)
 
-- Per-weekday different hours — deferred (single window for all workdays).
-- "Available working time" assumes one shared throughput; per-job or per-step
-  throughput is out of scope.
-- Showing "accepted X/1000 words today" in the 09:00 daily report — optional, not
-  in this scope.
-- Counting partial credit for a deadline that lands mid-working-window on a
-  non-working day is moot — such deadlines are rejected outright (§2.1 step 4).
+- Per-weekday different hours — deferred (single window).
+- Per-job/per-step throughput — out of scope (one shared rate).
+- "accepted X/1000 words today" in the 09:00 daily report — optional, later.
