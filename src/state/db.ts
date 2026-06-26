@@ -126,7 +126,7 @@ const JOB_V2_COLUMNS: { name: string; ddl: string }[] = [
   { name: 'eligible', ddl: 'eligible INTEGER NOT NULL DEFAULT 0' },
   {
     name: 'lifecycle_status',
-    ddl: "lifecycle_status TEXT CHECK (lifecycle_status IN ('new','accepted','skipped','missing','accept_failed','closed','removed'))",
+    ddl: "lifecycle_status TEXT CHECK (lifecycle_status IN ('new','accepted','skipped','missing','accept_failed','closed','removed','rejected'))",
   },
   {
     name: 'accept_status',
@@ -141,6 +141,7 @@ function migrate(db: DB): void {
   const tx = db.transaction(() => {
     ensureJobColumns(db);
     ensureOutboxChannel(db);
+    widenLifecycleCheck(db);
     db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
       'schema_version',
       String(SCHEMA_VERSION),
@@ -157,6 +158,78 @@ function ensureJobColumns(db: DB): void {
   for (const col of JOB_V2_COLUMNS) {
     if (!existing.has(col.name)) db.exec(`ALTER TABLE jobs ADD COLUMN ${col.ddl}`);
   }
+}
+
+/**
+ * Widen the jobs lifecycle_status CHECK to include 'rejected'. SQLite cannot
+ * ALTER a CHECK in place, so an existing jobs table (without 'rejected') is
+ * rebuilt preserving all rows and columns. A fresh db already has the widened
+ * CHECK (from JOB_V2_COLUMNS via ensureJobColumns) and is skipped.
+ *
+ * Guard: check whether `sqlite_master.sql` for `jobs` contains `'rejected'`;
+ * if yes, skip. After the rebuild it will contain it, so a second open is
+ * a no-op (idempotent).
+ *
+ * `DROP TABLE IF EXISTS jobs_old` runs first for idempotency: if a previous
+ * migration crashed between RENAME and DROP, the next open cleans up the stale
+ * jobs_old before re-running the rebuild.
+ *
+ * Must be called AFTER ensureJobColumns so that jobs_old already carries all
+ * v2 columns — the explicit SELECT copies every column by name.
+ */
+function widenLifecycleCheck(db: DB): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'")
+    .get() as { sql: string } | undefined;
+  if (!row || row.sql.includes("'rejected'")) return;
+  db.exec('DROP TABLE IF EXISTS jobs_old');
+  db.exec('ALTER TABLE jobs RENAME TO jobs_old');
+  db.exec(`
+CREATE TABLE jobs (
+  job_key TEXT PRIMARY KEY,
+  portal_job_id TEXT,
+  title TEXT NOT NULL,
+  language_pair TEXT,
+  deadline TEXT,
+  deadline_raw TEXT,
+  fee TEXT,
+  url TEXT,
+  status TEXT NOT NULL CHECK (status IN ('visible','missing')),
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  snapshot_hash TEXT NOT NULL,
+  consecutive_misses INTEGER NOT NULL DEFAULT 0,
+  xtm_task_id TEXT,
+  project_name TEXT NOT NULL DEFAULT '',
+  file_name TEXT NOT NULL DEFAULT '',
+  source_lang TEXT,
+  target_lang TEXT,
+  due_date TEXT,
+  due_raw TEXT,
+  words INTEGER,
+  step TEXT,
+  role TEXT,
+  eligible INTEGER NOT NULL DEFAULT 0,
+  lifecycle_status TEXT CHECK (lifecycle_status IN ('new','accepted','skipped','missing','accept_failed','closed','removed','rejected')),
+  accept_status TEXT NOT NULL DEFAULT 'none' CHECK (accept_status IN ('none','accepting','accepted','failed')),
+  accepted_at TEXT,
+  sheet_synced_status TEXT
+)`);
+  db.exec(
+    `INSERT INTO jobs (
+       job_key, portal_job_id, title, language_pair, deadline, deadline_raw, fee, url,
+       status, first_seen_at, last_seen_at, snapshot_hash, consecutive_misses,
+       xtm_task_id, project_name, file_name, source_lang, target_lang, due_date, due_raw,
+       words, step, role, eligible, lifecycle_status, accept_status, accepted_at, sheet_synced_status
+     )
+     SELECT
+       job_key, portal_job_id, title, language_pair, deadline, deadline_raw, fee, url,
+       status, first_seen_at, last_seen_at, snapshot_hash, consecutive_misses,
+       xtm_task_id, project_name, file_name, source_lang, target_lang, due_date, due_raw,
+       words, step, role, eligible, lifecycle_status, accept_status, accepted_at, sheet_synced_status
+     FROM jobs_old`,
+  );
+  db.exec('DROP TABLE jobs_old');
 }
 
 /**
