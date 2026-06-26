@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { PlaywrightXtmClient, type XtmOps } from '../../src/portal/xtmClient.js';
 import {
   SessionExpiredError,
+  SessionYieldError,
   LayoutChangedError,
   PaginationDetectedError,
   CaptchaDetectedError,
@@ -37,14 +38,46 @@ const snapshot = (id: string): XtmJobSnapshot => ({
 });
 
 /** A browser/page/rate stub good enough for navigate + login bookkeeping. */
-function fakes() {
-  const page = { goto: vi.fn(async () => {}) };
+function fakes(pageUrl = '') {
+  const page = {
+    goto: vi.fn(async () => {}),
+    // url() required because fetchJobSnapshot now calls it on every logged-out / session-expired path.
+    url: () => pageUrl,
+  };
   const browser = {
     page: vi.fn(async () => page),
     persistSession: vi.fn(async () => {}),
   } as unknown as BrowserSession;
   const rate = { record: vi.fn(() => {}) } as unknown as RateLimiter;
   return { browser, rate };
+}
+
+/**
+ * Helper for relogin-policy tests: builds a PlaywrightXtmClient with a fake page
+ * whose `url()` returns the given `pageUrl`, and wires up the provided ops stubs.
+ * Mirrors the existing harness but makes `page.url()` scriptable.
+ */
+function makeClientWith(opts: {
+  isLoggedOut: () => Promise<boolean>;
+  login: () => Promise<void>;
+  readActiveOnce: () => Promise<XtmJobSnapshot>;
+  pageUrl: string;
+}): PlaywrightXtmClient {
+  const page = {
+    goto: vi.fn(async () => {}),
+    url: () => opts.pageUrl,
+  };
+  const browser = {
+    page: vi.fn(async () => page),
+    persistSession: vi.fn(async () => {}),
+  } as unknown as BrowserSession;
+  const rate = { record: vi.fn(() => {}) } as unknown as RateLimiter;
+  const xtmOps: XtmOps = {
+    isLoggedOut: vi.fn(async () => opts.isLoggedOut()),
+    login: vi.fn(async () => opts.login()),
+    readActiveOnce: vi.fn(async (_p, _id) => opts.readActiveOnce()),
+  };
+  return new PlaywrightXtmClient(browser, cfg, rate, clock, xtmOps);
 }
 
 describe('PlaywrightXtmClient.fetchJobSnapshot — session recovery (FR-021 / T049 mode 2)', () => {
@@ -131,4 +164,50 @@ describe('PlaywrightXtmClient.fetchJobSnapshot — session recovery (FR-021 / T0
       expect(ops.login).not.toHaveBeenCalled(); // not demoted to a silent re-login
     },
   );
+});
+
+describe('fetchJobSnapshot relogin policy', () => {
+  it('throws SessionYieldError (no login) when policy declines relogin on a logged-out page', async () => {
+    let loginCalls = 0;
+    // Stub ops: report logged-out, and the page.url() resolves to a kicked logout.
+    const client = makeClientWith({
+      isLoggedOut: async () => true,
+      login: async () => {
+        loginCalls++;
+      },
+      readActiveOnce: async () => ({
+        jobs: [],
+        malformed: [],
+        capturedAt: 'x',
+        pollCycleId: 'p',
+        emptyListConfirmed: false,
+      }),
+      pageUrl: 'https://xtm/logout.jsp?type=LOGGED_OFF_BY_ANOTHER_USER',
+    });
+    await expect(
+      client.fetchJobSnapshot('p', { decideRelogin: () => false }),
+    ).rejects.toBeInstanceOf(SessionYieldError);
+    expect(loginCalls).toBe(0); // never logged in → never kicked the human
+  });
+
+  it('logs in normally when policy allows relogin (default behavior)', async () => {
+    let loginCalls = 0;
+    const client = makeClientWith({
+      isLoggedOut: async () => true,
+      login: async () => {
+        loginCalls++;
+      },
+      readActiveOnce: async () => ({
+        jobs: [],
+        malformed: [],
+        capturedAt: 'x',
+        pollCycleId: 'p',
+        emptyListConfirmed: false,
+      }),
+      pageUrl: 'https://xtm/logout.jsp?type=SESSION_EXPIRED',
+    });
+    const snap = await client.fetchJobSnapshot('p'); // no opts → always relogin
+    expect(loginCalls).toBe(1);
+    expect(snap.jobs).toEqual([]);
+  });
 });
