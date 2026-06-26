@@ -195,8 +195,8 @@ New module `src/schedule/` — pure, isolated, independently testable.
 | `src/schedule/bangkokCalendar.ts` | **Canonical** Bangkok time helpers: `bangkokCalendar(epochMs) → { date, weekday:1..7, minutesOfDay }`; `bangkokDateString`, `bangkokYear`, `bangkokEpochMs(date, minutes)`. Fixed +07:00 (read UTC parts of `ms + 7*3_600_000`); ISO weekday `((getUTCDay()+6)%7)+1`. **`dailyReport.bangkokDate` and the meta word-counter date keying delegate here** (one source for "Bangkok date"). | ✅ |
 | `src/schedule/parseSchedule.ts` | `parseHHMM('09:00') → 540`; `parseWorkdays('1-5') → Set<number>` (ranges/lists, ISO 1..7, **rejects empty**); `resolveThroughput(...)` (§2.2). | ✅ |
 | `src/schedule/workingHours.ts` | `workingMinutesBetween(start, end, cal, capMinutes?)` (§2.2, 400-day cap, inclusive end) and `isNonWorkingDay(...)`. | ✅ |
-| `src/schedule/thaiHolidayOverrides.ts` | `OVERRIDE_CURATED_YEARS: Set<number>` + override data `{ [year]: { [date]: name } }`. Seeded + curated for 2026–2027 (cabinet-declared / substitution days). Hand-maintained, git-reviewed. | ✅ (data) |
-| `src/schedule/thaiHolidays.ts` | `getThaiHolidays(year) → { holidays: Map<date,name>, curated: boolean }` = `date-holidays`('TH') public holidays ∪ override entries (override adds/wins); `curated = year ∈ OVERRIDE_CURATED_YEARS`. Per-year memoized; lib errors caught → lib treated as empty (override still applies). The holiday source is **injected** (seam) so merge/curated/throw are tested deterministically. | ผสม |
+| `src/schedule/thaiHolidaysData.ts` | The **team's observed holidays** per year `{ [year]: { [date]: name } }` + `CURATED_YEARS: Set<number>`. Seeded with the standard Thai นักขัตฤกษ์ public holidays the team is off for 2026–2027. **The team does NOT observe cabinet-declared special / substitution days (วันหยุดพิเศษ/ชดเชย ครม.)** — those are intentionally excluded (the team works them). Hand-maintained, git-reviewed. | ✅ (data) |
+| `src/schedule/thaiHolidays.ts` | `getThaiHolidays(year) → { holidays: Map<date,name>, curated: boolean }` = a **pure lookup** from `thaiHolidaysData.ts`; `curated = year ∈ CURATED_YEARS`. **No external library** — a generic Thai-holiday library would include cabinet/substitution days the team works and wrongly reject those jobs; the team's own curated list is the correct source. | ✅ |
 | `src/schedule/acceptSchedule.ts` | `evaluateAcceptSchedule(input) → { allow:true } \| { allow:false, reason }` (§2.1). Composes `bangkokCalendar` + `workingHours`; takes the resolved `holidays` + `holidaysCuratedForSpan` as input. | ✅ |
 
 Changed files:
@@ -208,11 +208,12 @@ Changed files:
 | `src/reporting/sheets.ts` | Add `'Rejected'` to `SheetStatus`; map `rejected → 'Rejected'` in the exhaustive `lifecycleToSheetStatus` Record (tsc enforces the addition). |
 | `src/state/meta.ts` | Daily word counter: `acceptedWordsToday(dateStr)`, `addAcceptedWords(dateStr, n)` (reset-on-date-change, one txn). Keys `accepted_words_date`, `accepted_words_count`. Date keying via `bangkokDateString` (canonical). |
 | `src/config/index.ts` | New `ACCEPT_SCHEDULE_*` env vars; field-level transforms (hours→minutes, workdays→Set); **derived fields** on `AppConfig` (`throughputWordsPerHour`, parsed hours/workdays); `.refine` (§4). |
-| `src/runtime/xtmPollCycle.ts` | **(C4)** One `evaluateCandidate()` helper composing `decideAccept` + the schedule verdict, called from **both** accept sites (no drift, no silent robustness-pass reject). Group candidates per bulk-accept unit and apply §2.4 all-or-nothing. Resolve the year(s)' holidays + `acceptedWordsToday` once per cycle; **(I1)** `addAcceptedWords` **inside the same txn as `recordAcceptOutcome`** (only `outcome==='accepted'`); set `lifecycleStatus='rejected'` + thread the reason via a `rejectNotes` map; new `summary.scheduleBlocked`; raise/resolve `holiday_override_stale` (deduped, guarded behind ENABLED). |
+| `src/runtime/xtmPollCycle.ts` | **(C4)** One `evaluateCandidate()` helper composing `decideAccept` + the schedule verdict, called from **both** accept sites (no drift, no silent robustness-pass reject). Group candidates per bulk-accept unit and apply §2.4 all-or-nothing. Resolve the year(s)' holidays + `acceptedWordsToday` once per cycle; **(I1)** `addAcceptedWords` **inside the same txn as `recordAcceptOutcome`** (only `outcome==='accepted'`); set `lifecycleStatus='rejected'` + thread the reason via a `rejectNotes` map; new `summary.scheduleBlocked`; raise/resolve `holiday_calendar_stale` (deduped, guarded behind ENABLED). |
 | `src/runtime/xtmPollCycle.ts > chatForEvent` | **(I3)** Add a `rejected` branch → note `"Rejected — <reason>"` from `rejectNotes` (today it would wrongly say "Malay (MS) — accepting"). **`renderXtmNewJob` already takes `statusNote` — `xtmNotifier.ts` likely needs NO change.** Field re-sync (`detailsChanges`) for a `rejected` job must **preserve the reason note and re-run the gate** (a new dueDate/words may flip it to Accepted) instead of writing `note=null`. |
-| `src/reporting/systemAlerts.ts` | New `TriggerKind` `holiday_override_stale` (severity warn, `hasRecovered:true` — needs a resolve call site in the cycle). |
+| `src/reporting/systemAlerts.ts` | New `TriggerKind` `holiday_calendar_stale` (severity warn, `hasRecovered:true` — needs a resolve call site in the cycle). |
+| `src/reporting/dailyReport.ts` | `buildDailyReportCard` gains the day's capacity usage line (§5.1): new params `acceptedWordsToday: number` + `maxWordsPerDay: number`; the cycle (`xtmPollLoop`) reads `meta.acceptedWordsToday(bangkokDate(now))` + `cfg.ACCEPT_MAX_WORDS_PER_DAY` and passes them. |
 | `.env.example` | Document the new `ACCEPT_SCHEDULE_*` vars. |
-| `package.json` | Add dependency `date-holidays` (CJS — see §6 interop note). |
+| `package.json` | **No new runtime dependency** — the holiday list is a checked-in data file, not a library. |
 | `specs/.../contracts/config.md`, `contracts/sheets.md` | Add the new vars + the `Rejected` status (code cites these as source-of-truth). |
 
 `evaluateAcceptSchedule` stays **pure**; the cycle resolves holidays/curation and
@@ -232,7 +233,7 @@ interface AcceptScheduleInput {
   workdays: Set<number>;            // ISO 1..7
   throughputWordsPerHour: number;   // resolved (derived from capacity OR explicit override)
   holidays: Map<string, string>;    // every date the now..deadline span can touch
-  holidaysCuratedForSpan: boolean;  // every year the span touches is in OVERRIDE_CURATED_YEARS (C3)
+  holidaysCuratedForSpan: boolean;  // every year the span touches is in CURATED_YEARS (C3)
 }
 type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: string };
 ```
@@ -267,7 +268,8 @@ precedent so the kill-switch always works:
 - `ACCEPT_WORKDAYS` parses to a non-empty set; `HH:MM` format valid — field-level,
   fail-fast naming the var.
 
-Holidays come from the library + override file (no env var for the list).
+Holidays come from the checked-in `thaiHolidaysData.ts` data file (the team's
+observed นักขัตฤกษ์ list; no env var, no library).
 
 ---
 
@@ -289,6 +291,20 @@ Holidays come from the library + override file (no env var for the list).
 - `words === null` is **rejected** by the gate (§2.1 step 3) and never reaches the
   counter while enabled.
 
+### 5.1 Daily report capacity line
+
+The 09:00 Bangkok daily report (`buildDailyReportCard`) shows a usage line for the
+budget. Per the 2026-06-26 decision it reports **today's running total** (a direct
+read of the live counter for the report's Bangkok date — no extra history/snapshot
+storage):
+
+- `Auto-accepted today: X / Y words` where `X = meta.acceptedWordsToday(today)` and
+  `Y = ACCEPT_MAX_WORDS_PER_DAY`; when `Y = 0` (unlimited) render `X words (no cap)`.
+- Rendered as a header/first row of the existing card (keeps the "Jobs in Progress"
+  list intact). At 09:00 `X` is typically small (the counter reset at midnight and
+  work hours start at 09:00); this is expected — it is a live gauge, not a prior-day
+  summary.
+
 ---
 
 ## 6. Failure Modes (fail-loud, Constitution IV/V)
@@ -296,13 +312,12 @@ Holidays come from the library + override file (no env var for the list).
 | Condition | Handling |
 |---|---|
 | **(C2)** `'rejected'` vs the `lifecycle_status` CHECK | Table-rebuild migration in `db.ts` widens/drops the CHECK before any `'rejected'` write. A startup smoke (existing) plus a migration test guard it. |
-| **(C3)** Holiday calendar not confirmed for a span's year | Signal = **override curation**, not lib-emptiness: `curated = year ∈ OVERRIDE_CURATED_YEARS`. **Uniform fail-closed:** if ANY year the now→deadline span touches is uncurated → `holidaysCuratedForSpan=false` → the gate **BLOCKs** (§2.1 step 4, `"holiday calendar not confirmed for <year>"`) + the cycle raises `holiday_override_stale` (loud, deduped). If the **current** year is uncurated this pauses auto-accept entirely until curated — but detect+notify keep running 24/7 (nothing is missed; humans accept manually), and accept is irreversible so safe-by-default wins. Resolve the alert when curation is restored. Replaces the fragile `dataMissing` (which `date-holidays` makes always-false). |
-| `date-holidays` (CJS) on Node22 NodeNext | Import as `import Holidays from 'date-holidays'` (default), pin the version, verify interop at build; a throw is caught → override-only for that call. |
+| **(C3)** Holiday calendar not confirmed for a span's year | Signal = **whether the year is in the curated data file**: `curated = year ∈ CURATED_YEARS`. **Uniform fail-closed:** if ANY year the now→deadline span touches is uncurated → `holidaysCuratedForSpan=false` → the gate **BLOCKs** (§2.1 step 4, `"holiday calendar not confirmed for <year>"`) + the cycle raises `holiday_calendar_stale` (loud, deduped). If the **current** year is uncurated this pauses auto-accept entirely until the year's holidays are added — but detect+notify keep running 24/7 (nothing is missed; humans accept manually), and accept is irreversible so safe-by-default wins. Resolve the alert once the year is curated. |
 | Bad `HH:MM`, `start >= end`, explicit `throughput <= 0`, `capacity=0` w/o throughput, empty `workdays` | **fail-fast at startup** via zod/refine, naming the var. |
 | `dueDate` null / `words` null | BLOCK "deadline unknown" / "word count unknown" (notify-only). |
 | `dueAtMs <= nowMs` (past/now) | BLOCK "deadline already passed" (distinct, clearer than "cannot finish"). |
 | Deadline far in the future | `workingMinutesBetween` early-exits at `requiredMin`; the **400-day cap (in code)** bounds iteration. |
-| Holiday resolution / `holiday_override_stale` while **disabled** | Guarded behind `ACCEPT_SCHEDULE_ENABLED` — a disabled feature never resolves holidays or pages. |
+| Holiday resolution / `holiday_calendar_stale` while **disabled** | Guarded behind `ACCEPT_SCHEDULE_ENABLED` — a disabled feature never resolves holidays or pages. |
 | Clock/parse anomaly on `capturedAt` | `nowMs = Date.parse(capturedAt)`; NaN fails the cycle's normal path before the gate. |
 
 ---
@@ -334,12 +349,16 @@ labels**, and the **meta midnight reset**, not just `bangkokCalendar`.
   edge); capacity at-cap / one-under / unlimited / over-cap; deadline past/now;
   `words=0` → ALLOW; uncurated deadline-year → BLOCK; disabled + `dueDate=null` →
   ALLOW (discriminating).
-- **thaiHolidays** — injected source: merge, override-wins, `curated` true/false,
-  lib-throw → override-only; a substitution-immune smoke (`2026-01-01`).
+- **thaiHolidays** — pure lookup from the data file: a date present/absent;
+  `curated` true (2026) / false (a far uncurated year); a known seeded นักขัตฤกษ์
+  date (`2026-01-01`) hits.
 - **meta** — increment; **reset across Bangkok-midnight (TZ-explicit epoch)**;
   persistence across a fresh `MetaStore` same date.
 - **sheets** — `rejected → 'Rejected'`. **xtmNotifier/chatForEvent** — rejected note
   `"Rejected — <reason>"` (reporting is under the gate).
+- **dailyReport** — `buildDailyReportCard` renders `Auto-accepted today: X / Y words`
+  for a given counter+cap; `Y=0` → `X words (no cap)`; the line appears alongside the
+  existing "Jobs in Progress" list.
 - **config** — default `ACCEPT_SCHEDULE_ENABLED` ON (assert); derived throughput;
   refine rejects `start>=end`, explicit `throughput<=0`, `capacity=0`-without-throughput,
   empty workdays — only when enabled; `''` throughput → derived (not 0).
@@ -354,7 +373,7 @@ labels**, and the **meta midnight reset**, not just `bangkokCalendar`.
   - accepted group → counter += group words (in txn); a `failed`/`missing` accept →
     counter unchanged; cap reached mid-cycle blocks the next group.
   - `Rejected → Accepted` after a daily reset.
-  - `holiday_override_stale` raised + deduped + resolved.
+  - `holiday_calendar_stale` raised + deduped + resolved.
   - `ACCEPT_SCHEDULE_ENABLED=0` → byte-for-byte pre-feature (discriminating input).
 - **db migration** — an existing v2 DB with the old CHECK accepts a `'rejected'`
   write after `migrate()`.
@@ -368,8 +387,11 @@ labels**, and the **meta midnight reset**, not just `bangkokCalendar`.
 - After deploy: confirm an in-hours finishable Malay job still accepts; a too-tight
   or non-working-day-deadline job is `Rejected` with reason on the Sheet; the daily
   word counter resets at Bangkok midnight; `scheduleBlocked` counts look sane.
-- **Curate `OVERRIDE_CURATED_YEARS` + the 2026–2027 Thai holiday lists before
-  deploy**, and add a yearly checklist to curate the next year before December.
+- **Curate the team's observed นักขัตฤกษ์ list (`CURATED_YEARS` + the 2026–2027
+  dates) before deploy** — weekends are covered by `ACCEPT_WORKDAYS`; cabinet
+  special / substitution days are intentionally excluded (the team works them).
+  Add a yearly checklist to add the next year before December (an uncurated year
+  pauses auto-accept per C3).
 
 ---
 
@@ -377,4 +399,3 @@ labels**, and the **meta midnight reset**, not just `bangkokCalendar`.
 
 - Per-weekday different hours — deferred (single window).
 - Per-job/per-step throughput — out of scope (one shared rate).
-- "accepted X/1000 words today" in the 09:00 daily report — optional, later.
