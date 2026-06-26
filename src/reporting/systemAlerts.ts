@@ -23,7 +23,9 @@ export type TriggerKind =
   | 'cold_start_repeat'
   | 'db_corrupt'
   | 'accept_failed'
-  | 'daily_report_dead';
+  | 'daily_report_dead'
+  | 'xtm_yielding'
+  | 'yield_stuck';
 
 interface TriggerSpec {
   severity: 'warn' | 'critical';
@@ -116,6 +118,22 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     action:
       'Check the team webhook (GOOGLE_CHAT_WEBHOOK_TEAM) URL/permissions, then run npm run outbox:requeue',
     hasRecovered: false,
+  },
+  xtm_yielding: {
+    severity: 'warn',
+    title: 'Bot paused — XTM account in use',
+    impact: 'Monitoring is paused while a teammate (or another session) uses the shared account',
+    action:
+      'No action needed if a teammate is working in XTM; the bot retries automatically and resumes when the account is free',
+    hasRecovered: true,
+  },
+  yield_stuck: {
+    severity: 'critical',
+    title: 'Bot paused too long — account still in use',
+    impact: 'Monitoring has been paused past the limit; new jobs are not being auto-accepted',
+    action:
+      'Confirm a teammate is actually using XTM. If not, free the account (log out) or disable the bot (set XTM_YIELD_ENABLED=0 then npm run deploy)',
+    hasRecovered: true,
   },
 };
 
