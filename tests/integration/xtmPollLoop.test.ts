@@ -592,3 +592,139 @@ describe('XtmPollLoop — heartbeat stuck gate excludes team channel', () => {
     expect(heartbeat.ok).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fix 2: outbox_dead alert detail must contain the reason (not a static string)
+// ---------------------------------------------------------------------------
+
+describe('XtmPollLoop — outbox_dead detail contains reason', () => {
+  it('outbox_dead system alert detail includes "rejected by Chat (400)" when a chat row is 400-rejected', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that returns 400 — isPayloadRejection → onDead with 'rejected by Chat (400)'
+    const rejectionChatSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'permanent';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'permanent', status: 400 };
+      },
+    };
+
+    const loop = new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: rejectionChatSender,
+      sheetSender: new CapturingSheet(),
+      heartbeat,
+    });
+
+    const outbox = new Outbox(db, 10, 6);
+    outbox.enqueue('job:key-x:first_seen', JSON.stringify({ cardsV2: [{}] }), NOW, 'chat');
+
+    await loop.runOnce();
+
+    // The outbox_dead system alert must have the reason in its payload_json (the 'Detail' card row)
+    const alert = db
+      .prepare(
+        "SELECT payload_json FROM system_events WHERE event_type='system_alert' AND dedup_key='outbox_dead'",
+      )
+      .get() as { payload_json: string } | undefined;
+    expect(alert).toBeDefined();
+    expect(alert!.payload_json).toContain('rejected by Chat (400)');
+  });
+
+  it('outbox_dead system alert detail includes "retry limit exceeded" when a chat row exhausts retries', async () => {
+    fresh();
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    const failingChatSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'transient';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'transient', status: 503 };
+      },
+    };
+
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ OUTBOX_RETRY_CAP: 1, OUTBOX_DEAD_AFTER_HOURS: 6 }),
+      noopLogger,
+      clock,
+      { chatSender: failingChatSender, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    const outbox = new Outbox(db, 1, 6);
+    outbox.enqueue('job:key-y:first_seen', JSON.stringify({ text: 'hi' }), NOW, 'chat');
+
+    await loop.runOnce();
+
+    const alert = db
+      .prepare(
+        "SELECT payload_json FROM system_events WHERE event_type='system_alert' AND dedup_key='outbox_dead'",
+      )
+      .get() as { payload_json: string } | undefined;
+    expect(alert).toBeDefined();
+    expect(alert!.payload_json).toContain('retry limit exceeded');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 7: daily_report_dead alert raised when team row dies (retry-exhausted)
+// ---------------------------------------------------------------------------
+
+describe('XtmPollLoop — daily_report_dead alert when team row dies', () => {
+  it('raises daily_report_dead alert with date in detail when a daily:<date> team row exhausts retries', async () => {
+    fresh();
+    const client = new StubClient(); // empty Active
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    // Sender that always returns transient — will exhaust retry cap in this flush
+    const failingTeamSender: ChatSender = {
+      async send(): Promise<SendOutcome> {
+        return 'transient';
+      },
+      async sendDetailed(): Promise<{ outcome: SendOutcome; status: number }> {
+        return { outcome: 'transient', status: 503 };
+      },
+    };
+
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ OUTBOX_RETRY_CAP: 1, OUTBOX_DEAD_AFTER_HOURS: 6 }),
+      noopLogger,
+      clock,
+      {
+        chatSender: okChat,
+        teamChatSender: failingTeamSender,
+        sheetSender: new CapturingSheet(),
+        heartbeat,
+      },
+    );
+
+    // Seed a pending 'team' daily row — it will exhaust retries (cap=1) in this flush
+    const outbox = new Outbox(db, 1, 6);
+    outbox.enqueue('daily:2026-06-19', JSON.stringify({ text: 'daily' }), NOW, 'team');
+
+    await loop.runOnce();
+
+    // heartbeat.fail must NOT be called (team failure never pages on-call)
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+
+    // A system_alert with dedup_key='daily_report_dead' must be enqueued
+    const alert = db
+      .prepare(
+        "SELECT payload_json FROM system_events WHERE event_type='system_alert' AND dedup_key='daily_report_dead'",
+      )
+      .get() as { payload_json: string } | undefined;
+    expect(alert).toBeDefined();
+
+    // The alert detail must contain the date from the event_id ('daily:2026-06-19' → '2026-06-19')
+    expect(alert!.payload_json).toContain('2026-06-19');
+  });
+});

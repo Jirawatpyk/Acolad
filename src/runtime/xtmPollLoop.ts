@@ -57,7 +57,7 @@ export class XtmPollLoop {
    * the 'team' channel (daily report delivery) must NOT page on-call — it surfaces via
    * the system alert only (Constitution IV). Reset once before the first flush() so the
    * flag accumulates across both flush() calls in a malformed cycle.
-   * null channel (unknown event) intentionally pages — fail-loud safe default.
+   * Any channel other than 'team' pages on-call.
    */
   private nonTeamFailureThisFlush = false;
 
@@ -98,7 +98,7 @@ export class XtmPollLoop {
           // even if new team-channel event types are added in future.
           // Team-channel delivery failures NEVER page on-call (Constitution IV); they
           // surface via this alert only. Today the only team row is the daily report.
-          // A null/unknown channel (null !== 'team' → true) pages — fail-loud safe default.
+          // Any channel other than 'team' pages on-call.
           // Fix 5: channel passed by dispatcher — no extra DB lookup needed.
           this.raiseTerminalAlert(eventId, channel, reason);
         },
@@ -227,25 +227,42 @@ export class XtmPollLoop {
 
       // Daily 09:00 Bangkok report — once per calendar day, crash-safe via one
       // SQLite transaction (enqueue outbox row + set meta in same txn so a crash
-      // between them can't double-send or lose the sent date).
+      // between them can't double-send or lose the sent date). Non-fatal: a throw
+      // is logged and swallowed so detection is never blocked (Constitution IV).
+      // Meta stays unset on failure so the next cycle retries.
       if (dueDailyReport(this.clock.nowMs(), this.meta.lastDailyReportDate)) {
         const held = this.store.listByLifecycle('accepted');
         const card = buildDailyReportCard(held, this.clock.nowMs(), this.cfg.XTM_ACOLAD_OFFERS_URL);
         const date = bangkokDate(this.clock.nowMs());
-        this.db.transaction(() => {
-          this.outbox.enqueue(`daily:${date}`, JSON.stringify(card), this.clock.nowIso(), 'team');
-          this.meta.set('last_daily_report_date', date);
-        })();
-        this.logger.info(
-          {
-            module: 'xtmPollLoop',
-            action: 'daily_report',
-            outcome: 'enqueued',
-            date,
-            held: held.length,
-          },
-          'daily in-progress report enqueued',
-        );
+        try {
+          this.db.transaction(() => {
+            this.outbox.enqueue(`daily:${date}`, JSON.stringify(card), this.clock.nowIso(), 'team');
+            this.meta.set('last_daily_report_date', date);
+          })();
+          this.logger.info(
+            {
+              module: 'xtmPollLoop',
+              action: 'daily_report',
+              outcome: 'enqueued',
+              date,
+              held: held.length,
+            },
+            'daily in-progress report enqueued',
+          );
+        } catch (e) {
+          this.logger.error(
+            {
+              module: 'xtmPollLoop',
+              action: 'daily_report',
+              outcome: 'error',
+              date,
+              err: String(e),
+            },
+            'daily report enqueue failed — will retry next cycle',
+          );
+          // Do NOT re-throw: a non-critical report failure must not tank the detection cycle.
+          // Meta stays unset so the next eligible cycle retries.
+        }
       }
 
       // Reset the per-flush terminal-failure flag once, before the first flush(), so it
@@ -327,11 +344,10 @@ export class XtmPollLoop {
    * Shared terminal-alert helper for onDead and onPermanent (Fix 1 + Fix 5 + Fix 6).
    *
    * Branch on CHANNEL so the team-page invariant holds for both dead and permanent paths:
-   *   team   → raise 'daily_report_dead' with a detail of `${date} — ${reason}` (Fix 6).
+   *   team   → raise 'daily_report_dead' with a detail of `${date} — ${reason}`.
    *            Does NOT set nonTeamFailureThisFlush (Constitution IV: team failures never page).
-   *   others → raise 'outbox_dead' and set nonTeamFailureThisFlush = true.
-   *
-   * A null/unknown channel routes to the non-team branch intentionally — fail-loud safe default.
+   *   others → raise 'outbox_dead' with detail `outbox row dead — ${reason}` and
+   *            set nonTeamFailureThisFlush = true. Any channel other than 'team' pages on-call.
    */
   private raiseTerminalAlert(eventId: string, channel: OutboxChannel, reason: string): void {
     if (channel === 'team') {
@@ -345,7 +361,7 @@ export class XtmPollLoop {
         this.outbox,
         'outbox_dead',
         this.clock.nowIso(),
-        'outbox row exceeded retry limit',
+        `outbox row dead — ${reason}`,
       );
       // Covers transient-exhausted, malformed, 400-payload-rejected (onDead path), and
       // webhook-revoked (onPermanent path) failures on non-team channels.
