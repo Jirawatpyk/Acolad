@@ -11,6 +11,9 @@ export interface DispatchSummary {
   permanentFailures: number;
 }
 
+/** Closed union of all terminal-drop reasons the dispatcher can emit. */
+export type DeadReason = 'retry limit exceeded' | 'malformed payload' | 'rejected by Chat (400)';
+
 export interface DispatcherHooks {
   /**
    * Called when a row is terminally dropped (retries exhausted, malformed, or
@@ -22,7 +25,7 @@ export interface DispatcherHooks {
    *   'malformed payload'        — invalid JSON / missing sender / unknown shape
    *   'rejected by Chat (400)'   — Google Chat rejected the payload (400)
    */
-  onDead?: (eventId: string, channel: OutboxChannel, reason: string) => void;
+  onDead?: (eventId: string, channel: OutboxChannel, reason: DeadReason) => void;
   /**
    * Called when the channel returns a permanent error (webhook revoked: 401/403/404).
    * Passes the row's channel so callers can branch without an extra DB lookup (Fix 5).
@@ -186,7 +189,17 @@ export class Dispatcher {
       let sheetRow: SheetRow | undefined;
       try {
         sheetRow = (JSON.parse(row.payload_json) as { row: SheetRow }).row;
-      } catch {
+      } catch (e) {
+        this.logger.warn(
+          {
+            module: 'dispatcher',
+            action: 'parse_sheets',
+            channel: row.channel,
+            eventId: row.event_id,
+            err: String(e),
+          },
+          'sheets payload JSON parse failed — treating as malformed',
+        );
         sheetRow = undefined;
       }
       if (!sheetRow || typeof sheetRow.jobKey !== 'string' || sheetRow.jobKey === '') {
@@ -195,7 +208,17 @@ export class Dispatcher {
       let outcome: SendOutcome;
       try {
         outcome = await this.senders.sheet.send(sheetRow);
-      } catch {
+      } catch (e) {
+        this.logger.warn(
+          {
+            module: 'dispatcher',
+            action: 'send_sheets',
+            channel: row.channel,
+            eventId: row.event_id,
+            err: String(e),
+          },
+          'sheets sender threw — treating as transient',
+        );
         outcome = 'transient';
       }
       return { outcome, latencyMs: Date.now() - start, payloadRejected: false };
@@ -217,7 +240,17 @@ export class Dispatcher {
       } else if (typeof parsed['text'] === 'string' && parsed['text'] !== '') {
         payload = { text: parsed['text'] };
       }
-    } catch {
+    } catch (e) {
+      this.logger.warn(
+        {
+          module: 'dispatcher',
+          action: 'parse_chat',
+          channel: row.channel,
+          eventId: row.event_id,
+          err: String(e),
+        },
+        'chat payload JSON parse failed — treating as malformed',
+      );
       payload = undefined;
     }
     if (!payload) return 'malformed';
@@ -226,7 +259,17 @@ export class Dispatcher {
     let status: number;
     try {
       ({ outcome, status } = await sender.sendDetailed(payload));
-    } catch {
+    } catch (e) {
+      this.logger.warn(
+        {
+          module: 'dispatcher',
+          action: 'send_chat',
+          channel: row.channel,
+          eventId: row.event_id,
+          err: String(e),
+        },
+        'chat sender threw — treating as transient',
+      );
       outcome = 'transient';
       status = 0;
     }

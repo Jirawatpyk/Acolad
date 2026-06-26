@@ -10,12 +10,15 @@ export interface ChatSender {
 }
 
 /**
- * Classify an HTTP status into the failure taxonomy (contracts/notifications.md):
+ * Classify an HTTP status into the transport failure taxonomy (contracts/notifications.md):
  *   2xx                  -> ok
  *   429, 5xx             -> transient (retry with backoff)
- *   400                  -> permanent (payload itself is bad — oversized/malformed card;
- *                           un-fixable by config, dead+alert via isPayloadRejection)
+ *   400                  -> permanent (transport layer: payload rejected by endpoint)
  *   401/403/404 (4xx)    -> permanent (webhook revoked/removed)
+ *
+ * Callers that need to distinguish payload-rejection (400) from webhook errors
+ * (401/403/404) must call isPayloadRejection(status) separately. The dead+alert
+ * behavior for 400 is the dispatcher's responsibility, not this function's.
  */
 export function classifyStatus(status: number): SendOutcome {
   if (status >= 200 && status < 300) return 'ok';
