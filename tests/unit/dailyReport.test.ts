@@ -104,52 +104,55 @@ describe('buildDailyReportCard', () => {
   it('header title includes job count for 2 jobs', () => {
     const j1 = makeJob({ jobKey: 'K1', projectName: 'Alpha', fileName: 'a.docx' });
     const j2 = makeJob({ jobKey: 'K2', projectName: 'Beta', fileName: 'b.docx' });
-    const card = buildDailyReportCard([j1, j2], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([j1, j2], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
     expect(entry.card.header.title).toBe('📋 Jobs in Progress (2)');
   });
 
   it('header subtitle is the Bangkok date string', () => {
-    const card = buildDailyReportCard([makeJob()], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([makeJob()], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
     expect(entry.card.header.subtitle).toBe('2026-06-25');
   });
 
   it('card ID includes the Bangkok date', () => {
-    const card = buildDailyReportCard([makeJob()], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([makeJob()], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
     expect(entry.cardId).toBe('daily-2026-06-25');
   });
 
   it('each row label is the project name and value contains fileName', () => {
     const j = makeJob({ projectName: 'My Project', fileName: 'report.xlf' });
-    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
     const rowSection = entry.card.sections[0]!;
-    const widget = rowSection.widgets[0] as AnyWidget;
+    // widgets[0] is the capacity row; job rows start at widgets[1]
+    const widget = rowSection.widgets[1] as AnyWidget;
     expect(widget.decoratedText?.topLabel).toBe('My Project');
     expect(widget.decoratedText?.text).toContain('report.xlf');
   });
 
   it('row value contains "due" keyword and formatted date', () => {
     const j = makeJob({ dueDate: '2026-06-30T00:00:00Z' });
-    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
-    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    // widgets[0] = capacity row; job row at widgets[1]
+    const widget = entry.card.sections[0]!.widgets[1] as AnyWidget;
     expect(widget.decoratedText?.text).toContain('due');
     expect(widget.decoratedText?.text).toContain('30/06/2026');
   });
 
   it('row value contains words count', () => {
     const j = makeJob({ words: 1500 });
-    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
-    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    // widgets[0] = capacity row; job row at widgets[1]
+    const widget = entry.card.sections[0]!.widgets[1] as AnyWidget;
     expect(widget.decoratedText?.text).toContain('1500');
   });
 
   it('button links to XTM URL', () => {
-    const card = buildDailyReportCard([makeJob()], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([makeJob()], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
     // Button section is the last section
     const sections = entry.card.sections;
@@ -159,32 +162,35 @@ describe('buildDailyReportCard', () => {
   });
 
   it('empty list → title (0) and single "No jobs in progress" row', () => {
-    const card = buildDailyReportCard([], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
     expect(entry.card.header.title).toBe('📋 Jobs in Progress (0)');
-    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    // widgets[0] = capacity row; "No jobs" fallback at widgets[1]
+    const widget = entry.card.sections[0]!.widgets[1] as AnyWidget;
     expect(widget.decoratedText?.text).toBe('No jobs in progress');
   });
 
   it('null/empty projectName falls back to dash', () => {
     const j = makeJob({ projectName: '' });
-    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
-    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    // widgets[0] = capacity row; job row at widgets[1]
+    const widget = entry.card.sections[0]!.widgets[1] as AnyWidget;
     expect(widget.decoratedText?.topLabel).toBe('—');
   });
 
   it('null dueDate falls back gracefully (no crash)', () => {
     const j = makeJob({ dueDate: null, dueRaw: null });
     // should not throw
-    expect(() => buildDailyReportCard([j], NOW_MS, XTM_URL)).not.toThrow();
+    expect(() => buildDailyReportCard([j], NOW_MS, XTM_URL, 0, 0)).not.toThrow();
   });
 
   it('null dueDate and null dueRaw renders "due —" (not "due " blank)', () => {
     const j = makeJob({ dueDate: null, dueRaw: null });
-    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
-    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    // widgets[0] = capacity row; job row at widgets[1]
+    const widget = entry.card.sections[0]!.widgets[1] as AnyWidget;
     // Must show dash placeholder, not a trailing blank after "due "
     expect(widget.decoratedText?.text).toContain('due —');
     expect(widget.decoratedText?.text).not.toMatch(/due\s{2,}/); // no double-space "due  "
@@ -192,9 +198,10 @@ describe('buildDailyReportCard', () => {
 
   it('null words renders "—" not "—w" (Fix 8 — no stray w on em-dash)', () => {
     const j = makeJob({ words: null });
-    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
-    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    // widgets[0] = capacity row; job row at widgets[1]
+    const widget = entry.card.sections[0]!.widgets[1] as AnyWidget;
     const text = widget.decoratedText?.text ?? '';
     // Must NOT produce "—w"
     expect(text).not.toContain('—w');
@@ -204,17 +211,48 @@ describe('buildDailyReportCard', () => {
 
   it('words=0 renders "0w" (Fix 8 — zero is a real value)', () => {
     const j = makeJob({ words: 0 });
-    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
-    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    // widgets[0] = capacity row; job row at widgets[1]
+    const widget = entry.card.sections[0]!.widgets[1] as AnyWidget;
     expect(widget.decoratedText?.text).toContain('0w');
   });
 
   it('positive words render with "w" suffix (e.g. 1500w)', () => {
     const j = makeJob({ words: 1500 });
-    const card = buildDailyReportCard([j], NOW_MS, XTM_URL);
+    const card = buildDailyReportCard([j], NOW_MS, XTM_URL, 0, 0);
     const entry = firstEntry(card);
-    const widget = entry.card.sections[0]!.widgets[0] as AnyWidget;
+    // widgets[0] = capacity row; job row at widgets[1]
+    const widget = entry.card.sections[0]!.widgets[1] as AnyWidget;
     expect(widget.decoratedText?.text).toContain('1500w');
   });
+});
+
+// ---------------------------------------------------------------------------
+// buildDailyReportCard — capacity usage line (Task 11)
+// ---------------------------------------------------------------------------
+
+const flat = (card: { cardsV2: unknown[] }) => JSON.stringify(card);
+
+it('renders the capacity usage line', () => {
+  const card = buildDailyReportCard(
+    [],
+    Date.parse('2026-06-22T09:00:00+07:00'),
+    'https://x',
+    250,
+    1000,
+  );
+  expect(flat(card)).toContain('Auto-accepted today');
+  expect(flat(card)).toContain('250 / 1000');
+});
+
+it('renders no-cap when maxWordsPerDay is 0', () => {
+  const card = buildDailyReportCard(
+    [],
+    Date.parse('2026-06-22T09:00:00+07:00'),
+    'https://x',
+    250,
+    0,
+  );
+  expect(flat(card)).toContain('250 words (no cap)');
 });

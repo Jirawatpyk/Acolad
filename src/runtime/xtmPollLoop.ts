@@ -316,7 +316,13 @@ export class XtmPollLoop {
       // Meta stays unset on failure so the next cycle retries.
       if (dueDailyReport(this.clock.nowMs(), this.meta.lastDailyReportDate)) {
         const held = this.store.listByLifecycle('accepted');
-        const card = buildDailyReportCard(held, this.clock.nowMs(), this.cfg.XTM_ACOLAD_OFFERS_URL);
+        const card = buildDailyReportCard(
+          held,
+          this.clock.nowMs(),
+          this.cfg.XTM_ACOLAD_OFFERS_URL,
+          this.meta.acceptedWordsToday(bangkokDate(this.clock.nowMs())),
+          this.cfg.ACCEPT_MAX_WORDS_PER_DAY,
+        );
         const date = bangkokDate(this.clock.nowMs());
         try {
           this.db.transaction(() => {

@@ -45,18 +45,28 @@ export function dueDailyReport(nowMs: number, lastSentDate: string | null, hour 
 /**
  * Builds the Google Chat cardsV2 payload for the daily in-progress jobs report.
  *
- * @param held    Jobs currently in lifecycle_status='accepted'.
- * @param nowMs   Current epoch ms (for the date header / card ID).
- * @param xtmUrl  Deep-link to XTM Active task list.
+ * @param held                Jobs currently in lifecycle_status='accepted'.
+ * @param nowMs               Current epoch ms (for the date header / card ID).
+ * @param xtmUrl              Deep-link to XTM Active task list.
+ * @param acceptedWordsToday  Running word total auto-accepted today (Bangkok date).
+ * @param maxWordsPerDay      Daily word cap from config (0 = no cap).
  */
 export function buildDailyReportCard(
   held: XtmJobState[],
   nowMs: number,
   xtmUrl: string,
+  acceptedWordsToday: number,
+  maxWordsPerDay: number,
 ): { cardsV2: unknown[] } {
   const date = bangkokDate(nowMs);
 
-  const rows =
+  const usage =
+    maxWordsPerDay > 0
+      ? `${acceptedWordsToday} / ${maxWordsPerDay}`
+      : `${acceptedWordsToday} words (no cap)`;
+  const capacityRow = { label: 'Auto-accepted today', value: usage };
+
+  const jobRows =
     held.length > 0
       ? held.map((j) => ({
           label: dash(j.projectName),
@@ -68,7 +78,7 @@ export function buildDailyReportCard(
     cardId: `daily-${date}`,
     headerTitle: `📋 Jobs in Progress (${held.length})`,
     headerSubtitle: date,
-    rows,
+    rows: [capacityRow, ...jobRows],
     buttonUrl: xtmUrl,
     buttonText: 'Open in XTM',
   });
