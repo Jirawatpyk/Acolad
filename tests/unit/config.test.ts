@@ -119,6 +119,14 @@ describe('auto-yield config', () => {
     expect(loadConfig(validEnv({ XTM_YIELD_ENABLED: '0' })).XTM_YIELD_ENABLED).toBe(false);
   });
 
+  it('kill-switch disables on false/off/0 and stays enabled on 1 or unset (footgun guard)', () => {
+    expect(loadConfig(validEnv({ XTM_YIELD_ENABLED: 'false' })).XTM_YIELD_ENABLED).toBe(false);
+    expect(loadConfig(validEnv({ XTM_YIELD_ENABLED: 'off' })).XTM_YIELD_ENABLED).toBe(false);
+    expect(loadConfig(validEnv({ XTM_YIELD_ENABLED: '0' })).XTM_YIELD_ENABLED).toBe(false);
+    expect(loadConfig(validEnv({ XTM_YIELD_ENABLED: '1' })).XTM_YIELD_ENABLED).toBe(true);
+    expect(loadConfig(validEnv()).XTM_YIELD_ENABLED).toBe(true);
+  });
+
   it('rejects a window smaller than 3x the poll interval (fail-fast)', () => {
     expect(() =>
       loadConfig(validEnv({ POLL_INTERVAL_MS: '20000', XTM_YIELD_WINDOW_MS: '40000' })),

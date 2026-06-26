@@ -80,7 +80,10 @@ const schema = z
     XTM_YIELD_ENABLED: z
       .string()
       .optional()
-      .transform((v) => v !== '0'), // default ON; only '0' disables
+      .transform((v) => {
+        const s = (v ?? '').trim().toLowerCase();
+        return !['0', 'false', 'off', 'no'].includes(s);
+      }), // default ON; '0'/'false'/'off'/'no' disables
     XTM_YIELD_WINDOW_MS: z.coerce.number().int().positive().default(600_000),
     XTM_YIELD_MAX_MINUTES: z.coerce.number().int().positive().default(60),
   })

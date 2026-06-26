@@ -795,15 +795,23 @@ describe('auto-yield', () => {
       return snap([]);
     };
     const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    // Seed a pending chat row before the cooldown cycle so we can prove flush ran
+    const seedOutbox = new Outbox(db, 10, 6);
+    seedOutbox.enqueue('yield_flush_probe', JSON.stringify({ text: 'probe' }), NOW, 'chat');
     const loop = new XtmPollLoop(db, client, yCfg(), noopLogger, clock, {
-      chatSender: okChat,
+      chatSender: okChat, // returns 'ok' → row transitions to 'sent'
       heartbeat,
     });
     const ok = await loop.runOnce();
     expect(ok).toBe(true);
     expect(fetched).toBe(0); // never touched the portal
-    expect(heartbeat.ok).toHaveBeenCalledTimes(1); // flush ran (heartbeat ok follows flush)
-    expect(outboxRows(db).length).toBeGreaterThanOrEqual(0); // outbox touched (even if empty)
+    // The cooldown cycle MUST have flushed: the seeded row should be sent now
+    const row = db
+      .prepare("SELECT status FROM outbox WHERE event_id = 'yield_flush_probe'")
+      .get() as { status: string } | undefined;
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('sent'); // proves dispatcher.flush executed during cooldown
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1); // heartbeat follows the flush
   });
 
   it('escalates to yield_stuck + heartbeat.fail once the episode exceeds the cap', async () => {

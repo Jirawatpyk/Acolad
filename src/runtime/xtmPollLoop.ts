@@ -206,9 +206,13 @@ export class XtmPollLoop {
         this.consecutiveActiveCycles += 1;
         if (this.consecutiveActiveCycles >= RESUME_STABLE_CYCLES) {
           const min = Math.round((this.clock.nowMs() - this.meta.yieldEpisodeStartedMs) / 60_000);
-          resolveAlert(this.db, this.outbox, 'xtm_yielding', this.clock.nowIso(), `${min} min`);
-          resolveAlert(this.db, this.outbox, 'yield_stuck', this.clock.nowIso(), `${min} min`);
+          // Fold both resolveAlert calls and the meta-clear into one outer transaction so a
+          // crash cannot resolve standing alerts without clearing the episode (which would
+          // silently drop the next episode's paused card). resolveAlert opens its own inner
+          // transaction; better-sqlite3 nests via savepoints — safe.
           this.db.transaction(() => {
+            resolveAlert(this.db, this.outbox, 'xtm_yielding', this.clock.nowIso(), `${min} min`);
+            resolveAlert(this.db, this.outbox, 'yield_stuck', this.clock.nowIso(), `${min} min`);
             this.meta.setYieldUntilMs(0);
             this.meta.setYieldEpisodeStartedMs(0);
           })();
