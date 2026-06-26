@@ -57,4 +57,18 @@ export class MetaStore {
   setYieldEpisodeStartedMs(ms: number): void {
     this.set('yield_episode_started_ms', String(ms));
   }
+
+  // --- daily accepted-words counter (reset on Bangkok date roll) ---
+  acceptedWordsToday(dateStr: string): number {
+    return this.get('accepted_words_date') === dateStr ? this.getNumber('accepted_words_count', 0) : 0;
+  }
+
+  addAcceptedWords(dateStr: string, n: number): void {
+    const tx = this.db.transaction(() => {
+      const cur = this.get('accepted_words_date') === dateStr ? this.getNumber('accepted_words_count', 0) : 0;
+      this.set('accepted_words_date', dateStr);
+      this.set('accepted_words_count', String(cur + n));
+    });
+    tx();
+  }
 }
