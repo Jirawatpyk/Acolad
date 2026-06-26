@@ -861,8 +861,18 @@ Immediately after the existing lockout block (after its `return false;`/closing 
 Replace the existing `const snapshot = await this.client.fetchJobSnapshot(pollCycleId);` line with:
 
 ```ts
+      // A post-cooldown PROBE (episode active + not yet retaken this episode, i.e.
+      // consecutiveActiveCycles === 0) MUST force a relogin to retake the account.
+      // Without this, the kicked_by_other policy (always-yield) would refuse to
+      // relogin forever and the bot could never resume. After the probe retakes
+      // (consecutiveActiveCycles >= 1) we fall back to the normal yield-on-kick policy.
+      const probing =
+        this.cfg.XTM_YIELD_ENABLED &&
+        this.meta.yieldEpisodeStartedMs > 0 &&
+        this.consecutiveActiveCycles === 0;
       const decideRelogin = this.cfg.XTM_YIELD_ENABLED
         ? (kind: LogoutKind): boolean =>
+            probing ||
             !shouldYieldOnLogout({
               kind,
               lastAuthSuccessMs: this.meta.lastAuthSuccessMs,
@@ -938,6 +948,11 @@ Add this private method:
     const nowIso = this.clock.nowIso();
     this.consecutiveActiveCycles = 0;
     const firstEntry = this.meta.yieldEpisodeStartedMs === 0;
+    // A re-yield while already past the hard cap must keep paging (not silently flip
+    // heartbeat back to ok). firstEntry can never be stuck (episode just started).
+    const stuck =
+      !firstEntry &&
+      yieldStuck(this.meta.yieldEpisodeStartedMs, nowMs, this.cfg.XTM_YIELD_MAX_MINUTES);
     if (firstEntry) {
       const windowMin = Math.round(this.cfg.XTM_YIELD_WINDOW_MS / 60_000);
       raiseAlert(
@@ -953,10 +968,10 @@ Add this private method:
       if (firstEntry) this.meta.setYieldEpisodeStartedMs(nowMs);
     })();
     this.logger.info(
-      { module: 'xtmPollLoop', action: 'yield', outcome: 'paused', kind: err.logoutKind },
+      { module: 'xtmPollLoop', action: 'yield', outcome: 'paused', kind: err.logoutKind, stuck },
       'yielded XTM account to another session',
     );
-    await this.flushAndHeartbeat(false); // a fresh yield is healthy unless the outbox is dead
+    await this.flushAndHeartbeat(stuck); // healthy unless the outbox is dead OR past the cap
   }
 ```
 
