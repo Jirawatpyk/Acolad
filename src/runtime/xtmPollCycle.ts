@@ -529,14 +529,18 @@ export class XtmPollCycle {
     };
   }
 
-  /** The bulk-accept unit one portal click grabs: language + project group (C1). The
-   *  portal's "Accept all tasks for THIS language in this group" claims every sibling at
-   *  once, so the schedule gate must decide at this granularity, never per job.
-   *  ASSUMPTION: the portal "group" == projectName (cannot be verified against a live
-   *  portal here). Isolated as a one-liner so widening the key (if the portal groups more
-   *  broadly) is a single change — see the report's bulkGroupKey note. */
+  /** The bulk-accept unit one portal click grabs (C1) — keyed by LANGUAGE ONLY, matching
+   *  the acceptor's actual claim unit (`src/portal/xtmAccept.ts` groups its targets by
+   *  `byLang` and the bulk "Accept all tasks for this language in this group" returns after
+   *  the first claimable row). Language-only is the conservative, ACCEPT-safe key: it
+   *  eliminates the cross-project owned-but-Rejected leak — if the portal's "group" ever
+   *  spans more than one project, a single bulk click on an ALLOWed job would also grab a
+   *  Malay sibling we marked Rejected in another project (irreversible). Trade-off: coarser
+   *  capacity granularity — one infeasible Malay job rejects ALL Malay that cycle
+   *  (all-or-nothing per language). Refine to (lang, project) ONLY after live-verifying the
+   *  portal's bulk "group" boundary equals a single project. */
   private bulkGroupKey(s: XtmJobState): string {
-    return `${s.targetLang ?? ''} ${s.projectName}`;
+    return s.targetLang ?? '';
   }
 
   /** Compose the schedule verdict for one would-accept job (C4 — the single gate used by

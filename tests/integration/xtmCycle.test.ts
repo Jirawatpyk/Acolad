@@ -613,24 +613,48 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(states.every((s) => s.acceptStatus === 'none')).toBe(true);
   });
 
-  it('C1: an infeasible job in group A does NOT block a finishable job in group B', async () => {
+  it('C1: an infeasible Malay job in project A ALSO rejects a finishable Malay job in project B (one language = one bulk group)', async () => {
     fresh();
     const acc = new StubAcceptor();
+    // bulkGroupKey is LANGUAGE-ONLY (the acceptor's real claim unit): two projects of the
+    // SAME language are ONE bulk group. So an infeasible sibling rejects the whole group —
+    // the conservative all-or-nothing that prevents a cross-project owned-but-Rejected leak.
     await new XtmPollCycle(db, schedCfg(), acc).run(
       snapAt(
         [
-          xraw({ fileName: 'a.docx', projectName: 'GroupA', dueDate: dueMon12, words: 5000 }), // infeasible
-          xraw({ fileName: 'b.docx', projectName: 'GroupB', dueDate: dueWed18, words: 100 }), // finishable
+          xraw({ fileName: 'a.docx', projectName: 'ProjA', dueDate: dueMon12, words: 5000 }), // infeasible
+          xraw({ fileName: 'b.docx', projectName: 'ProjB', dueDate: dueWed18, words: 100 }), // finishable alone
         ],
         MON_10,
       ),
     );
+    expect(acc.calls.flat()).toHaveLength(0); // acceptor NOT called for EITHER (whole group rejected)
     const byFile = new Map(
       [...new XtmJobStore(db).loadAll().values()].map((s) => [s.fileName, s.lifecycleStatus]),
     );
     expect(byFile.get('a.docx')).toBe('rejected');
-    expect(byFile.get('b.docx')).toBe('accepted');
-    expect(acc.calls.flat().map((t) => t.fileName)).toEqual(['b.docx']); // only group B clicked
+    expect(byFile.get('b.docx')).toBe('rejected'); // also rejected — same language, one bulk unit
+  });
+
+  it('capacity: two finishable Malay jobs whose COMBINED words exceed the cap are rejected as one group (running total, not per-job)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    // cap 1000, no seed. Each job fits alone (600 ≤ 1000) but 600 + 600 = 1200 > 1000. A stale
+    // per-job check would accept both; the group-combined (running) total must reject both.
+    // Different projects, same language → one bulk group, so the combined total is checked.
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt(
+        [
+          xraw({ fileName: 'p1.docx', projectName: 'ProjOne', dueDate: dueWed18, words: 600 }),
+          xraw({ fileName: 'p2.docx', projectName: 'ProjTwo', dueDate: dueWed18, words: 600 }),
+        ],
+        MON_10,
+      ),
+    );
+    expect(acc.calls.flat()).toHaveLength(0); // group rejected as a unit (combined > cap)
+    const states = [...new XtmJobStore(db).loadAll().values()];
+    expect(states.every((s) => s.lifecycleStatus === 'rejected')).toBe(true);
+    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(0); // nothing accepted → counter untouched
   });
 
   it('capacity: a group whose combined words would exceed the remaining cap is rejected', async () => {
