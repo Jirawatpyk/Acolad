@@ -10,72 +10,85 @@ loadDotenv();
  * (FR-003) and no faster than 20s between requests (FR-011). 002 defaults the
  * poll to the 20s floor to win the <1min snatch window (R7).
  */
-const schema = z.object({
-  // --- XTM Cloud (002 target) ---
-  XTM_ACOLAD_PORTAL_URL: z.string().url(),
-  XTM_ACOLAD_OFFERS_URL: z.string().url(),
-  XTM_ACOLAD_CLOSED_URL: z.string().url().optional().or(z.literal('')),
-  XTM_ACOLAD_Company: z.string().min(1),
-  XTM_ACOLAD_Username: z.string().min(1),
-  XTM_ACOLAD_Password: z.string().min(1),
-  // --- Google Sheets (002 required) ---
-  GOOGLE_SHEETS_ID: z.string().min(1),
-  GOOGLE_SERVICE_ACCOUNT_KEY_PATH: z.string().min(1).default('google-credentials.json'),
-  SHEETS_TAB_NAME: z.string().min(1),
-  // --- Accept control (FR-012/025) ---
-  ACCEPT_ENABLED: z
-    .string()
-    .optional()
-    .transform((v) => v === '1'),
-  // Evidence-only: when 1 (and ACCEPT_ENABLED=0), capture the real per-row accept
-  // menu DOM (hover only, NEVER clicks accept) so the live "Accept task" vs "Finish
-  // task" signal can be confirmed and computed into acceptAvailable. Safe to leave on.
-  ACCEPT_RECON: z
-    .string()
-    .optional()
-    .transform((v) => v === '1'),
-  ACCEPT_LANGUAGES: z
-    .string()
-    .default('Malay (Malaysia)')
-    .transform((v) =>
-      v
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean),
-    ),
-  ACCEPT_MAX_WORDS: z.coerce.number().int().min(0).default(0),
-  ACCEPT_MAX_PER_CYCLE: z.coerce.number().int().min(0).default(0),
-  GOOGLE_CHAT_WEBHOOK_SYSTEM: z.string().url(),
-  GOOGLE_CHAT_WEBHOOK_TEAM: z.string().url(),
-  GOOGLE_CHAT_WEBHOOK_DAILY_REPORT: z.string().url().optional().or(z.literal('')),
-  HEALTHCHECKS_PING_URL: z.string().url(),
-  POLL_INTERVAL_MS: z.coerce.number().int().min(20_000).max(25_000).default(20_000),
-  // Port-bind single-instance lock token (src/runtime/singleInstance.ts). The bot binds
-  // 127.0.0.1:<this> at startup; a second instance refuses. Change only if it ever clashes.
-  // NOTE: scripts/deploy.ps1 hardcodes this same port and does NOT read .env — if you
-  // override it here, change deploy.ps1's $Port too or the orphan-sweep watches the wrong port.
-  SINGLE_INSTANCE_PORT: z.coerce.number().int().min(1).max(65_535).default(47811),
-  LOGIN_MAX_RETRY: z.coerce.number().int().positive().default(3),
-  LOGIN_LOCKOUT_MINUTES: z.coerce.number().int().positive().default(15),
-  BROWSER_RECYCLE_HOURS: z.coerce.number().int().positive().default(6),
-  OUTBOX_RETRY_CAP: z.coerce.number().int().positive().default(10),
-  OUTBOX_DEAD_AFTER_HOURS: z.coerce.number().int().positive().default(6),
-  REQUESTS_PER_HOUR_CAP: z.coerce.number().int().positive().default(180),
-  LOG_DIR: z.string().default('logs'),
-  STATE_DIR: z.string().default('state'),
-  TZ_DISPLAY: z.string().default('Asia/Bangkok'),
-  LIVE_PORTAL: z
-    .string()
-    .optional()
-    .transform((v) => v === '1'),
-  // Diagnostic: when 1, capture the bot's OWN rendered inbox (HTML + iframe + screenshot,
-  // sanitized) so a missed job can be seen from the bot's exact view. Throttled to ~60s
-  // in xtmPollLoop (≈ every 3rd cycle at the 20s poll) — turn off after diagnosis.
-  DIAG: z
-    .string()
-    .optional()
-    .transform((v) => v === '1'),
-});
+const schema = z
+  .object({
+    // --- XTM Cloud (002 target) ---
+    XTM_ACOLAD_PORTAL_URL: z.string().url(),
+    XTM_ACOLAD_OFFERS_URL: z.string().url(),
+    XTM_ACOLAD_CLOSED_URL: z.string().url().optional().or(z.literal('')),
+    XTM_ACOLAD_Company: z.string().min(1),
+    XTM_ACOLAD_Username: z.string().min(1),
+    XTM_ACOLAD_Password: z.string().min(1),
+    // --- Google Sheets (002 required) ---
+    GOOGLE_SHEETS_ID: z.string().min(1),
+    GOOGLE_SERVICE_ACCOUNT_KEY_PATH: z.string().min(1).default('google-credentials.json'),
+    SHEETS_TAB_NAME: z.string().min(1),
+    // --- Accept control (FR-012/025) ---
+    ACCEPT_ENABLED: z
+      .string()
+      .optional()
+      .transform((v) => v === '1'),
+    // Evidence-only: when 1 (and ACCEPT_ENABLED=0), capture the real per-row accept
+    // menu DOM (hover only, NEVER clicks accept) so the live "Accept task" vs "Finish
+    // task" signal can be confirmed and computed into acceptAvailable. Safe to leave on.
+    ACCEPT_RECON: z
+      .string()
+      .optional()
+      .transform((v) => v === '1'),
+    ACCEPT_LANGUAGES: z
+      .string()
+      .default('Malay (Malaysia)')
+      .transform((v) =>
+        v
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
+    ACCEPT_MAX_WORDS: z.coerce.number().int().min(0).default(0),
+    ACCEPT_MAX_PER_CYCLE: z.coerce.number().int().min(0).default(0),
+    GOOGLE_CHAT_WEBHOOK_SYSTEM: z.string().url(),
+    GOOGLE_CHAT_WEBHOOK_TEAM: z.string().url(),
+    GOOGLE_CHAT_WEBHOOK_DAILY_REPORT: z.string().url().optional().or(z.literal('')),
+    HEALTHCHECKS_PING_URL: z.string().url(),
+    POLL_INTERVAL_MS: z.coerce.number().int().min(20_000).max(25_000).default(20_000),
+    // Port-bind single-instance lock token (src/runtime/singleInstance.ts). The bot binds
+    // 127.0.0.1:<this> at startup; a second instance refuses. Change only if it ever clashes.
+    // NOTE: scripts/deploy.ps1 hardcodes this same port and does NOT read .env — if you
+    // override it here, change deploy.ps1's $Port too or the orphan-sweep watches the wrong port.
+    SINGLE_INSTANCE_PORT: z.coerce.number().int().min(1).max(65_535).default(47811),
+    LOGIN_MAX_RETRY: z.coerce.number().int().positive().default(3),
+    LOGIN_LOCKOUT_MINUTES: z.coerce.number().int().positive().default(15),
+    BROWSER_RECYCLE_HOURS: z.coerce.number().int().positive().default(6),
+    OUTBOX_RETRY_CAP: z.coerce.number().int().positive().default(10),
+    OUTBOX_DEAD_AFTER_HOURS: z.coerce.number().int().positive().default(6),
+    REQUESTS_PER_HOUR_CAP: z.coerce.number().int().positive().default(180),
+    LOG_DIR: z.string().default('logs'),
+    STATE_DIR: z.string().default('state'),
+    TZ_DISPLAY: z.string().default('Asia/Bangkok'),
+    LIVE_PORTAL: z
+      .string()
+      .optional()
+      .transform((v) => v === '1'),
+    // Diagnostic: when 1, capture the bot's OWN rendered inbox (HTML + iframe + screenshot,
+    // sanitized) so a missed job can be seen from the bot's exact view. Throttled to ~60s
+    // in xtmPollLoop (≈ every 3rd cycle at the 20s poll) — turn off after diagnosis.
+    DIAG: z
+      .string()
+      .optional()
+      .transform((v) => v === '1'),
+    // --- auto-yield (shared-account session-collision back-off) ---
+    XTM_YIELD_ENABLED: z
+      .string()
+      .optional()
+      .transform((v) => v !== '0'), // default ON; only '0' disables
+    XTM_YIELD_WINDOW_MS: z.coerce.number().int().positive().default(600_000),
+    XTM_YIELD_MAX_MINUTES: z.coerce.number().int().positive().default(60),
+  })
+  .refine((c) => c.XTM_YIELD_WINDOW_MS >= 3 * c.POLL_INTERVAL_MS, {
+    path: ['XTM_YIELD_WINDOW_MS'],
+    message:
+      'XTM_YIELD_WINDOW_MS must be >= 3 x POLL_INTERVAL_MS (yield would otherwise be a no-op)',
+  });
 
 export type AppConfig = z.infer<typeof schema>;
 

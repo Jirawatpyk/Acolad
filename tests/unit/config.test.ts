@@ -101,3 +101,32 @@ describe('loadConfig', () => {
     expect(secrets).toContain('https://chat.googleapis.com/v1/spaces/TEAM/messages?key=k&token=t');
   });
 });
+
+/** Wrap base with per-test overrides (string values only, mirrors ProcessEnv). */
+function validEnv(over: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return { ...base, ...over };
+}
+
+describe('auto-yield config', () => {
+  it('defaults yield enabled, window 600000ms, max 60 min', () => {
+    const cfg = loadConfig(validEnv());
+    expect(cfg.XTM_YIELD_ENABLED).toBe(true);
+    expect(cfg.XTM_YIELD_WINDOW_MS).toBe(600_000);
+    expect(cfg.XTM_YIELD_MAX_MINUTES).toBe(60);
+  });
+
+  it('can be disabled via XTM_YIELD_ENABLED=0', () => {
+    expect(loadConfig(validEnv({ XTM_YIELD_ENABLED: '0' })).XTM_YIELD_ENABLED).toBe(false);
+  });
+
+  it('rejects a window smaller than 3x the poll interval (fail-fast)', () => {
+    expect(() =>
+      loadConfig(validEnv({ POLL_INTERVAL_MS: '20000', XTM_YIELD_WINDOW_MS: '40000' })),
+    ).toThrow(/XTM_YIELD_WINDOW_MS/);
+  });
+
+  it('accepts a window exactly 3x the poll interval', () => {
+    const cfg = loadConfig(validEnv({ POLL_INTERVAL_MS: '20000', XTM_YIELD_WINDOW_MS: '60000' }));
+    expect(cfg.XTM_YIELD_WINDOW_MS).toBe(60_000);
+  });
+});
