@@ -25,7 +25,8 @@ export type TriggerKind =
   | 'accept_failed'
   | 'daily_report_dead'
   | 'xtm_yielding'
-  | 'yield_stuck';
+  | 'yield_stuck'
+  | 'holiday_calendar_stale';
 
 interface TriggerSpec {
   severity: 'warn' | 'critical';
@@ -133,6 +134,14 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     impact: 'Monitoring has been paused past the limit; new jobs are not being auto-accepted',
     action:
       'Confirm a teammate is actually using XTM. If not, free the account (log out) or disable the bot (set XTM_YIELD_ENABLED=0 then npm run deploy)',
+    hasRecovered: true,
+  },
+  holiday_calendar_stale: {
+    severity: 'warn',
+    title: 'Holiday calendar not confirmed for a year in scope',
+    impact: 'Auto-accept is paused for jobs whose dates fall in the un-curated year',
+    action:
+      'Add that year to src/schedule/thaiHolidaysData.ts (HOLIDAYS + CURATED_YEARS), get npm test green, then npm run deploy',
     hasRecovered: true,
   },
 };

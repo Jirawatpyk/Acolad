@@ -219,3 +219,16 @@ describe('yield alert triggers', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 10: holiday_calendar_stale trigger
+// ---------------------------------------------------------------------------
+
+describe('raiseAlert — holiday_calendar_stale', () => {
+  it('holiday_calendar_stale is a warn trigger that recovers', () => {
+    const t = TRIGGERS['holiday_calendar_stale'];
+    expect(t.severity).toBe('warn');
+    expect(t.hasRecovered).toBe(true);
+    expect(t.title.length).toBeGreaterThan(0);
+  });
+});
