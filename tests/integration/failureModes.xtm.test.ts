@@ -9,7 +9,7 @@ import type { AppConfig } from '../../src/config/index.js';
 import type { XtmRawJob, XtmJobSnapshot } from '../../src/detection/types.js';
 import type { ChatSender, SendOutcome } from '../../src/reporting/googleChat.js';
 import type { SheetSender, SheetRow } from '../../src/reporting/sheets.js';
-import { LoginFailedError } from '../../src/portal/errors.js';
+import { LoginFailedError, SessionYieldError, type LogoutKind } from '../../src/portal/errors.js';
 
 /**
  * Consolidated failure-mode suite (Constitution II). Maps the six T049 modes to
@@ -69,7 +69,10 @@ class StubClient implements XtmPortalClient {
   snapshot: XtmJobSnapshot = snap([]);
   fetchError: Error | undefined;
   ensureLoggedIn = vi.fn(async () => {});
-  async fetchJobSnapshot(): Promise<XtmJobSnapshot> {
+  async fetchJobSnapshot(
+    _id: string,
+    _opts?: { decideRelogin?: (kind: LogoutKind) => boolean },
+  ): Promise<XtmJobSnapshot> {
     if (this.fetchError) throw this.fetchError;
     return this.snapshot;
   }
@@ -226,4 +229,46 @@ describe('XTM failure modes (integrated, Constitution II/IV)', () => {
   // the recovery actually lives — PlaywrightXtmClient.fetchJobSnapshot — in
   // tests/unit/xtmClient.test.ts. The loop is the wrong layer: it has no
   // SessionExpiredError handling, so a leaked expiry would be a generic transient.
+});
+
+// ---------------------------------------------------------------------------
+// SessionYieldError isolation: must never reach handleError (Task 6)
+// ---------------------------------------------------------------------------
+
+describe('SessionYieldError isolation (auto-yield, Task 6)', () => {
+  it('does not count as a login failure or portal_down after repeated yields', async () => {
+    fresh();
+    const client = new StubClient();
+    client.fetchJobSnapshot = async () => {
+      throw new SessionYieldError('kicked_by_other');
+    };
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ XTM_YIELD_ENABLED: true, XTM_YIELD_WINDOW_MS: 600_000, XTM_YIELD_MAX_MINUTES: 60 }),
+      noopLogger,
+      clock,
+      { chatSender: okChat, heartbeat },
+    );
+    await loop.runOnce(); // first yield → episode started, cooldown set
+    await loop.runOnce(); // second call → in cooldown, portal not touched
+    // must NOT raise login_failed
+    const loginFailed = db
+      .prepare(
+        "SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key='login_failed'",
+      )
+      .all();
+    expect(loginFailed.length).toBe(0);
+    // must NOT raise portal_down
+    const portalDown = db
+      .prepare(
+        "SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key='portal_down'",
+      )
+      .all();
+    expect(portalDown.length).toBe(0);
+    // yield is healthy: heartbeat.fail never called
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalled();
+  });
 });

@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { openDatabase, type DB } from '../../src/state/db.js';
 import { XtmPollLoop } from '../../src/runtime/xtmPollLoop.js';
 import { XtmJobStore } from '../../src/state/xtmJobStore.js';
-import { LoginFailedError } from '../../src/portal/errors.js';
+import { LoginFailedError, SessionYieldError, type LogoutKind } from '../../src/portal/errors.js';
+import { MetaStore } from '../../src/state/meta.js';
 import type { XtmPortalClient } from '../../src/portal/xtmClient.js';
 import type { AppConfig } from '../../src/config/index.js';
 import type { XtmRawJob, XtmJobSnapshot, XtmJobState } from '../../src/detection/types.js';
@@ -54,7 +55,10 @@ class StubClient implements XtmPortalClient {
   snapshot: XtmJobSnapshot = snap([]);
   fetchError: Error | undefined;
   ensureLoggedIn = vi.fn(async () => {});
-  async fetchJobSnapshot(): Promise<XtmJobSnapshot> {
+  async fetchJobSnapshot(
+    _id: string,
+    _opts?: { decideRelogin?: (kind: LogoutKind) => boolean },
+  ): Promise<XtmJobSnapshot> {
     if (this.fetchError) throw this.fetchError;
     return this.snapshot;
   }
@@ -726,5 +730,140 @@ describe('XtmPollLoop — daily_report_dead alert when team row dies', () => {
 
     // The alert detail must contain the date from the event_id ('daily:2026-06-19' → '2026-06-19')
     expect(alert!.payload_json).toContain('2026-06-19');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// auto-yield state machine (Task 6)
+// ---------------------------------------------------------------------------
+
+describe('auto-yield', () => {
+  /** cfg with yield enabled and safe defaults. */
+  const yCfg = (over: Partial<AppConfig> = {}) =>
+    cfg({
+      XTM_YIELD_ENABLED: true,
+      XTM_YIELD_WINDOW_MS: 600_000,
+      XTM_YIELD_MAX_MINUTES: 60,
+      ...over,
+    });
+
+  /** Helper: query all outbox rows. */
+  function outboxRows(database: DB): { event_id: string; payload_json: string }[] {
+    return database.prepare('SELECT event_id, payload_json FROM outbox').all() as {
+      event_id: string;
+      payload_json: string;
+    }[];
+  }
+
+  it('enters YIELDING on a kicked logout: no error escalation, heartbeat ok, paused alert once', async () => {
+    fresh();
+    const client = new StubClient();
+    client.fetchJobSnapshot = async () => {
+      throw new SessionYieldError('kicked_by_other');
+    };
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, yCfg(), noopLogger, clock, {
+      chatSender: okChat,
+      heartbeat,
+    });
+    const ok = await loop.runOnce();
+    expect(ok).toBe(true); // a quiet yield is healthy
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+    // 'xtm_yielding' alert raised exactly once
+    const alerts = db
+      .prepare(
+        "SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key='xtm_yielding'",
+      )
+      .all();
+    expect(alerts.length).toBe(1);
+    // meta marks the episode + cooldown
+    const meta = new MetaStore(db);
+    expect(meta.yieldEpisodeStartedMs).toBeGreaterThan(0);
+    expect(meta.yieldUntilMs).toBeGreaterThan(0);
+  });
+
+  it('skips the portal read during cooldown but still flushes the outbox', async () => {
+    fresh();
+    const client = new StubClient();
+    const setup = new MetaStore(db);
+    setup.setYieldEpisodeStartedMs(clock.nowMs());
+    setup.setYieldUntilMs(clock.nowMs() + 600_000); // far future → in cooldown
+    let fetched = 0;
+    client.fetchJobSnapshot = async (_id, _opts) => {
+      fetched++;
+      return snap([]);
+    };
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, yCfg(), noopLogger, clock, {
+      chatSender: okChat,
+      heartbeat,
+    });
+    const ok = await loop.runOnce();
+    expect(ok).toBe(true);
+    expect(fetched).toBe(0); // never touched the portal
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1); // flush ran (heartbeat ok follows flush)
+    expect(outboxRows(db).length).toBeGreaterThanOrEqual(0); // outbox touched (even if empty)
+  });
+
+  it('escalates to yield_stuck + heartbeat.fail once the episode exceeds the cap', async () => {
+    fresh();
+    const setup = new MetaStore(db);
+    setup.setYieldEpisodeStartedMs(clock.nowMs() - 61 * 60_000); // 61 min ago → past cap
+    setup.setYieldUntilMs(clock.nowMs() + 600_000); // still in cooldown
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, yCfg(), noopLogger, clock, {
+      chatSender: okChat,
+      heartbeat,
+    });
+    const ok = await loop.runOnce();
+    expect(ok).toBe(false); // stuck → not healthy
+    expect(heartbeat.fail).toHaveBeenCalledTimes(1);
+    // yield_stuck critical alert raised
+    const stuckAlerts = db
+      .prepare(
+        "SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key='yield_stuck'",
+      )
+      .all();
+    expect(stuckAlerts.length).toBe(1);
+  });
+
+  it('resumes only after RESUME_STABLE_CYCLES consecutive successful reads', async () => {
+    fresh();
+    const setup = new MetaStore(db);
+    setup.setYieldEpisodeStartedMs(clock.nowMs() - 5_000); // episode active, not stuck
+    setup.setYieldUntilMs(0); // cooldown already elapsed → probe allowed
+    setup.setLastAuthSuccessMs(clock.nowMs() - 5_000);
+    const client = new StubClient();
+    client.fetchJobSnapshot = async () => snap([]);
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, yCfg(), noopLogger, clock, {
+      chatSender: okChat,
+      heartbeat,
+    });
+    await loop.runOnce(); // probe #1: still tentative, episode not cleared yet
+    expect(new MetaStore(db).yieldEpisodeStartedMs).toBeGreaterThan(0);
+    await loop.runOnce(); // probe #2: stable → resume
+    expect(new MetaStore(db).yieldEpisodeStartedMs).toBe(0);
+    expect(new MetaStore(db).yieldUntilMs).toBe(0);
+  });
+
+  it('is a no-op when XTM_YIELD_ENABLED=false: no decideRelogin passed to client', async () => {
+    fresh();
+    const client = new StubClient();
+    let receivedOpts: { decideRelogin?: (kind: LogoutKind) => boolean } | undefined =
+      'NOT_SET' as never;
+    client.fetchJobSnapshot = async (_id, opts) => {
+      receivedOpts = opts;
+      return snap([]);
+    };
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(db, client, cfg({ XTM_YIELD_ENABLED: false }), noopLogger, clock, {
+      chatSender: okChat,
+      heartbeat,
+    });
+    expect(await loop.runOnce()).toBe(true);
+    expect(receivedOpts).toBeUndefined(); // no policy passed when disabled
   });
 });

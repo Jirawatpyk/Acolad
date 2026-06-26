@@ -16,12 +16,18 @@ import {
   LayoutChangedError,
   LoginFailedError,
   PaginationDetectedError,
+  SessionYieldError,
+  type LogoutKind,
 } from '../portal/errors.js';
+import { inCooldown, yieldStuck, shouldYieldOnLogout } from './yieldPolicy.js';
 import type { AppConfig } from '../config/index.js';
 import type { Logger } from '../monitoring/logger.js';
 import { type Clock, systemClock } from '../clock.js';
 
 const PORTAL_DOWN_THRESHOLD_MS = 10 * 60_000;
+
+/** Consecutive clean reads required after a yield before declaring full resume. */
+const RESUME_STABLE_CYCLES = 2;
 
 /** Collaborators injected for testing (default to production impls). */
 export interface XtmPollLoopDeps {
@@ -47,6 +53,7 @@ export class XtmPollLoop {
   private readonly heartbeat: HeartbeatPinger;
   private readonly sheetSender: SheetSender | undefined;
   private loginFailures = 0;
+  private consecutiveActiveCycles = 0;
   private lockoutUntilMs = 0;
   private firstPortalErrorMs = 0;
   private lastDiagMs = 0;
@@ -125,6 +132,36 @@ export class XtmPollLoop {
       return false;
     }
 
+    // --- auto-yield gate (shared-account session collision) ---
+    if (this.cfg.XTM_YIELD_ENABLED) {
+      const yNow = this.clock.nowMs();
+      const stuck = yieldStuck(
+        this.meta.yieldEpisodeStartedMs,
+        yNow,
+        this.cfg.XTM_YIELD_MAX_MINUTES,
+      );
+      if (stuck) {
+        // Louder escalation (deduped) — but DO NOT stop probing: still fall through so the
+        // bot retries each cooldown and auto-recovers if the human leaves.
+        const min = Math.round((yNow - this.meta.yieldEpisodeStartedMs) / 60_000);
+        raiseAlert(
+          this.db,
+          this.outbox,
+          'yield_stuck',
+          this.clock.nowIso(),
+          `bot paused ${min} min — confirm a teammate is using XTM, or free the account / disable the bot`,
+        );
+      }
+      if (inCooldown(this.meta.yieldUntilMs, yNow)) {
+        this.logger.info(
+          { module: 'xtmPollLoop', action: 'yield', outcome: 'cooldown', stuck },
+          'yielding to another XTM session (cooldown)',
+        );
+        await this.flushAndHeartbeat(stuck);
+        return !stuck;
+      }
+    }
+
     const pollCycleId = randomUUID();
     const startMs = this.clock.nowMs();
     try {
@@ -141,7 +178,47 @@ export class XtmPollLoop {
           );
         }
       }
-      const snapshot = await this.client.fetchJobSnapshot(pollCycleId);
+      // A post-cooldown PROBE (episode active + not yet retaken this episode, i.e.
+      // consecutiveActiveCycles === 0) MUST force a relogin to retake the account.
+      // Without this, the kicked_by_other policy would yield forever and never resume.
+      // After the probe retakes (consecutiveActiveCycles >= 1) we fall back to the
+      // normal yield-on-kick policy.
+      const probing =
+        this.cfg.XTM_YIELD_ENABLED &&
+        this.meta.yieldEpisodeStartedMs > 0 &&
+        this.consecutiveActiveCycles === 0;
+      const decideRelogin = this.cfg.XTM_YIELD_ENABLED
+        ? (kind: LogoutKind): boolean =>
+            probing ||
+            !shouldYieldOnLogout({
+              kind,
+              lastAuthSuccessMs: this.meta.lastAuthSuccessMs,
+              nowMs: this.clock.nowMs(),
+              windowMs: this.cfg.XTM_YIELD_WINDOW_MS,
+            })
+        : undefined;
+      const snapshot = await this.client.fetchJobSnapshot(
+        pollCycleId,
+        decideRelogin ? { decideRelogin } : undefined,
+      );
+      this.meta.setLastAuthSuccessMs(this.clock.nowMs());
+      if (this.cfg.XTM_YIELD_ENABLED && this.meta.yieldEpisodeStartedMs > 0) {
+        this.consecutiveActiveCycles += 1;
+        if (this.consecutiveActiveCycles >= RESUME_STABLE_CYCLES) {
+          const min = Math.round((this.clock.nowMs() - this.meta.yieldEpisodeStartedMs) / 60_000);
+          resolveAlert(this.db, this.outbox, 'xtm_yielding', this.clock.nowIso(), `${min} min`);
+          resolveAlert(this.db, this.outbox, 'yield_stuck', this.clock.nowIso(), `${min} min`);
+          this.db.transaction(() => {
+            this.meta.setYieldUntilMs(0);
+            this.meta.setYieldEpisodeStartedMs(0);
+          })();
+          this.consecutiveActiveCycles = 0;
+          this.logger.info(
+            { module: 'xtmPollLoop', action: 'yield', outcome: 'resumed' },
+            'resumed XTM monitoring',
+          );
+        }
+      }
       const summary = await this.cycle.run(snapshot);
       this.onCycleSuccess();
 
@@ -335,9 +412,72 @@ export class XtmPollLoop {
       );
       return true;
     } catch (err) {
+      if (err instanceof SessionYieldError) {
+        await this.handleYield(err);
+        return true; // a yield is a healthy, expected state — not an error
+      }
       await this.handleError(err);
       return false;
     }
+  }
+
+  /** Flush the outbox and set heartbeat ok/fail by the dead-backlog gate (or forceFail). */
+  private async flushAndHeartbeat(forceFail: boolean): Promise<void> {
+    this.nonTeamFailureThisFlush = false;
+    await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
+    const stuck =
+      forceFail ||
+      this.nonTeamFailureThisFlush ||
+      this.outbox.countDeadExcludingChannel('team') > 0;
+    if (stuck) {
+      await this.heartbeat.fail();
+    } else {
+      resolveAlert(
+        this.db,
+        this.outbox,
+        'outbox_dead',
+        this.clock.nowIso(),
+        'notifications delivering normally',
+      );
+      await this.heartbeat.ok();
+    }
+  }
+
+  /**
+   * Enter (or extend) a yield episode. raiseAlert runs BEFORE the meta writes so a
+   * crash between them is self-healing: on restart the episode is unset → firstEntry
+   * is true again → raiseAlert re-fires but the active-alert dedup drops the duplicate,
+   * and the meta gets set on the retry. No nested transaction needed.
+   */
+  private async handleYield(err: SessionYieldError): Promise<void> {
+    const nowMs = this.clock.nowMs();
+    const nowIso = this.clock.nowIso();
+    this.consecutiveActiveCycles = 0;
+    const firstEntry = this.meta.yieldEpisodeStartedMs === 0;
+    // A re-yield while already past the hard cap must keep paging (not silently flip
+    // heartbeat back to ok). firstEntry can never be stuck (episode just started).
+    const stuck =
+      !firstEntry &&
+      yieldStuck(this.meta.yieldEpisodeStartedMs, nowMs, this.cfg.XTM_YIELD_MAX_MINUTES);
+    if (firstEntry) {
+      const windowMin = Math.round(this.cfg.XTM_YIELD_WINDOW_MS / 60_000);
+      raiseAlert(
+        this.db,
+        this.outbox,
+        'xtm_yielding',
+        nowIso,
+        `XTM account in use by another session (logout: ${err.logoutKind}) — monitoring paused, retrying ~every ${windowMin} min`,
+      );
+    }
+    this.db.transaction(() => {
+      this.meta.setYieldUntilMs(nowMs + this.cfg.XTM_YIELD_WINDOW_MS);
+      if (firstEntry) this.meta.setYieldEpisodeStartedMs(nowMs);
+    })();
+    this.logger.info(
+      { module: 'xtmPollLoop', action: 'yield', outcome: 'paused', kind: err.logoutKind, stuck },
+      'yielded XTM account to another session',
+    );
+    await this.flushAndHeartbeat(stuck); // healthy unless the outbox is dead OR past the cap
   }
 
   /**
