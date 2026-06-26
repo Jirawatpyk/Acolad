@@ -522,6 +522,208 @@ describe('XtmPollCycle crash recovery (review #1/#2)', () => {
   });
 });
 
+// --- Task 12: accept-schedule gate helpers ---------------------------------
+// Derived schedule fields (Task 9 computes these in loadConfig; the test cfg() is a
+// loose cast, so we supply them explicitly here). 09:00–18:00 Mon–Fri, cap 1000,
+// throughput derived = 1000 / 9h ≈ 111.1 words/h.
+const SCHED_FIELDS = {
+  ACCEPT_SCHEDULE_ENABLED: true,
+  ACCEPT_MAX_WORDS_PER_DAY: 1000,
+  hoursStartMin: 9 * 60,
+  hoursEndMin: 18 * 60,
+  workdays: new Set([1, 2, 3, 4, 5]),
+  throughputWordsPerHour: 1000 / 9,
+};
+const schedCfg = (over: Partial<AppConfig> = {}): AppConfig =>
+  cfg({ ...SCHED_FIELDS, ...over } as Partial<AppConfig>);
+
+// TZ-explicit snapshot (capturedAt carries +07:00 — never a TZ-naive local Date, so the
+// Bangkok date/weekday is identical under TZ=UTC in CI).
+const snapAt = (jobs: XtmRawJob[], capturedAt: string, cycle = 'c1'): XtmJobSnapshot => ({
+  jobs,
+  malformed: [],
+  capturedAt,
+  pollCycleId: cycle,
+  emptyListConfirmed: jobs.length === 0,
+});
+
+describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
+  const MON_10 = '2026-06-22T10:00:00+07:00'; // Bangkok Monday 10:00 (working hours)
+  const TODAY = '2026-06-22'; // bangkokDateString(MON_10)
+  const dueWed18 = '2026-06-24T18:00:00+07:00'; // Wed 18:00 — far, finishable for small jobs
+  const dueMon12 = '2026-06-22T12:00:00+07:00'; // same Monday noon — tight (120 working min)
+
+  const sheetRows = (): Array<{ status: string; note: string | null }> =>
+    (
+      db.prepare("SELECT payload_json FROM outbox WHERE channel='sheets'").all() as {
+        payload_json: string;
+      }[]
+    ).map(
+      (r) => (JSON.parse(r.payload_json) as { row: { status: string; note: string | null } }).row,
+    );
+  const chatText = (): string => JSON.stringify(outboxPayloads('chat'));
+
+  it('accepts a finishable in-hours Malay job and counts its words in the txn (gate ALLOW + I1)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    const summary = await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10),
+    );
+    expect(acc.calls.flat()).toHaveLength(1); // clicked
+    expect(only().lifecycleStatus).toBe('accepted');
+    expect(summary.scheduleBlocked).toBe(0);
+    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(100); // counter advanced
+  });
+
+  it('rejects a too-tight job — Sheet Rejected + reason in Note + Chat; accept untouched; counter 0', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone(); // past baseline → per-job chat fires
+    const acc = new StubAcceptor();
+    const summary = await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10),
+    );
+    expect(acc.calls.flat()).toHaveLength(0); // never clicked
+    const s = only();
+    expect(s.lifecycleStatus).toBe('rejected');
+    expect(s.acceptStatus).toBe('none'); // re-evaluable next cycle
+    expect(summary.scheduleBlocked).toBe(1);
+    expect(sheetRows().at(-1)?.status).toBe('Rejected');
+    expect(sheetRows().at(-1)?.note).toContain('cannot finish in time'); // reason surfaced
+    expect(chatHasTitle('🆕')).toBe(true); // rendered as a new-job card
+    expect(chatText()).toContain('Rejected —'); // reason threaded into Chat (I3)
+    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(0); // not counted
+  });
+
+  it('C1: one infeasible member rejects the WHOLE bulk group (no member left accepted)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt(
+        [
+          xraw({ fileName: 'g1.docx', projectName: 'GroupA', dueDate: dueWed18, words: 100 }), // finishable alone
+          xraw({ fileName: 'g2.docx', projectName: 'GroupA', dueDate: dueMon12, words: 5000 }), // infeasible
+        ],
+        MON_10,
+      ),
+    );
+    expect(acc.calls.flat()).toHaveLength(0); // group not accepted at all
+    const states = [...new XtmJobStore(db).loadAll().values()];
+    expect(states).toHaveLength(2);
+    expect(states.every((s) => s.lifecycleStatus === 'rejected')).toBe(true);
+    expect(states.every((s) => s.acceptStatus === 'none')).toBe(true);
+  });
+
+  it('C1: an infeasible job in group A does NOT block a finishable job in group B', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt(
+        [
+          xraw({ fileName: 'a.docx', projectName: 'GroupA', dueDate: dueMon12, words: 5000 }), // infeasible
+          xraw({ fileName: 'b.docx', projectName: 'GroupB', dueDate: dueWed18, words: 100 }), // finishable
+        ],
+        MON_10,
+      ),
+    );
+    const byFile = new Map(
+      [...new XtmJobStore(db).loadAll().values()].map((s) => [s.fileName, s.lifecycleStatus]),
+    );
+    expect(byFile.get('a.docx')).toBe('rejected');
+    expect(byFile.get('b.docx')).toBe('accepted');
+    expect(acc.calls.flat().map((t) => t.fileName)).toEqual(['b.docx']); // only group B clicked
+  });
+
+  it('capacity: a group whose combined words would exceed the remaining cap is rejected', async () => {
+    fresh();
+    new MetaStore(db).addAcceptedWords(TODAY, 950); // 50 left under the 1000 cap
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10), // 950 + 100 = 1050 > 1000
+    );
+    expect(acc.calls.flat()).toHaveLength(0);
+    expect(only().lifecycleStatus).toBe('rejected');
+    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(950); // unchanged
+  });
+
+  it('capacity: a group that fits the remaining cap is accepted and increments the counter', async () => {
+    fresh();
+    new MetaStore(db).addAcceptedWords(TODAY, 950);
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 50 })], MON_10), // 950 + 50 = 1000 ≤ 1000
+    );
+    expect(acc.calls.flat()).toHaveLength(1);
+    expect(only().lifecycleStatus).toBe('accepted');
+    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(1000);
+  });
+
+  it('does NOT re-announce a still-present rejected job the second cycle (no duplicate Sheet/Chat)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const acc = new StubAcceptor();
+    const cycle = new XtmPollCycle(db, schedCfg(), acc);
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c1'));
+    const sheets1 = sheetRows().length;
+    const chat1 = outboxPayloads('chat').length;
+    expect(sheets1).toBe(1);
+    expect(chat1).toBe(1);
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c2'));
+    expect(sheetRows().length).toBe(sheets1); // no new Sheet row
+    expect(outboxPayloads('chat').length).toBe(chat1); // no new Chat row
+    expect(only().lifecycleStatus).toBe('rejected');
+  });
+
+  it('C4: a robustness-pass schedule block is reported (Sheet Rejected), not silently dropped', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    // c1: schedule on but ACCEPT off → detected 'new', accept_status 'none', no future event.
+    await new XtmPollCycle(db, schedCfg({ ACCEPT_ENABLED: false }), new StubAcceptor()).run(
+      snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c1'),
+    );
+    expect(only().lifecycleStatus).toBe('new');
+    // c2: ACCEPT on, SAME job still present (no fresh event) → robustness pass → schedule BLOCK.
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg({ ACCEPT_ENABLED: true }), acc).run(
+      snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c2'),
+    );
+    expect(acc.calls.flat()).toHaveLength(0);
+    expect(only().lifecycleStatus).toBe('rejected');
+    expect(sheetRows().at(-1)?.status).toBe('Rejected'); // not silent
+  });
+
+  it('ACCEPT_SCHEDULE_ENABLED=0 accepts even with dueDate null (byte-for-byte pre-feature)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), acc).run(
+      snapAt([xraw({ dueDate: null, words: 100 })], MON_10),
+    );
+    expect(acc.calls.flat()).toHaveLength(1);
+    expect(only().lifecycleStatus).toBe('accepted'); // gate bypassed
+  });
+
+  it('rejects a job whose deadline year is uncurated and raises holiday_calendar_stale', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: '2099-06-24T18:00:00+07:00', words: 100 })], MON_10),
+    );
+    expect(acc.calls.flat()).toHaveLength(0);
+    expect(only().lifecycleStatus).toBe('rejected');
+    expect(sheetRows().at(-1)?.note).toContain('holiday calendar not confirmed');
+    const alerts = db
+      .prepare(
+        "SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key='holiday_calendar_stale'",
+      )
+      .all();
+    expect(alerts.length).toBeGreaterThanOrEqual(1); // alert raised + deduped
+    const chatOut = db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE channel='chat'").get() as {
+      n: number;
+    };
+    expect(chatOut.n).toBeGreaterThanOrEqual(1); // alert reaches Chat via the outbox
+  });
+});
+
 describe('XtmPollCycle field-change re-sync / Bug B (sheet:fieldsync)', () => {
   it('enqueues a sheet:fieldsync event (no chat) when dueDate arrives after first_seen', async () => {
     fresh();

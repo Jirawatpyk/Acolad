@@ -6,8 +6,11 @@ import { XtmJobStore } from '../state/xtmJobStore.js';
 import { JobStore } from '../state/jobStore.js';
 import { MetaStore } from '../state/meta.js';
 import { Outbox, createOutbox } from '../state/outbox.js';
-import { raiseAlert } from '../reporting/systemAlerts.js';
+import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
 import { hasMaterialSheetChange } from '../reporting/sheetSync.js';
+import { evaluateAcceptSchedule, type AcceptScheduleVerdict } from '../schedule/acceptSchedule.js';
+import { resolveHolidaysForSpan } from '../schedule/thaiHolidays.js';
+import { bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
@@ -57,6 +60,8 @@ export interface XtmCycleSummary {
   acceptLatencies: AcceptLatencySample[];
   /** Eligible jobs to recon the accept-menu DOM for (ACCEPT_RECON on + accept off). */
   reconEligible: AcceptTarget[];
+  /** Jobs the schedule gate blocked this cycle (per member of a rejected bulk group). */
+  scheduleBlocked: number;
 }
 
 /**
@@ -133,11 +138,24 @@ export class XtmPollCycle {
       removed: 0,
       acceptLatencies: [],
       reconEligible: [],
+      scheduleBlocked: 0,
     };
     const detectedMs = Date.parse(snapshot.capturedAt);
-    const candidates: XtmJobState[] = [];
+    // Schedule-gate state (Task 12). nowMs = the snapshot clock; today/counter keyed to
+    // Bangkok. acceptedWordsToday is read ONCE then advanced optimistically per accepted
+    // group within this cycle so multiple groups respect the daily cap (§5).
+    const scheduleEnabled = this.cfg.ACCEPT_SCHEDULE_ENABLED === true;
+    const today = bangkokDateString(detectedMs);
+    let acceptedWordsToday = this.meta.acceptedWordsToday(today);
+    // Jobs whose decideAccept() → accept, collected from BOTH passes BEFORE the schedule
+    // gate (C4 — one gate, no per-site drift). The gate then groups them per bulk-accept
+    // unit and decides all-or-nothing (C1).
+    const wouldAccept: XtmJobState[] = [];
+    const candidates: XtmJobState[] = []; // post-gate accept set
     const disappearedAccepted: XtmJobState[] = [];
     const skipNotes = new Map<string, string>(); // jobKey → why it was skipped (Sheet note)
+    const rejectNotes = new Map<string, string>(); // jobKey → schedule-block reason (I3)
+    const wordsByKey = new Map<string, number>(); // accepted job → words, for the I1 counter
     let acceptedThisCycle = 0;
 
     for (const ev of result.events) {
@@ -187,7 +205,7 @@ export class XtmPollCycle {
           });
         }
       } else {
-        candidates.push(s);
+        wouldAccept.push(s); // schedule gate (below) decides accept vs reject per group
         acceptedThisCycle++; // counts toward the per-cycle cap for the next decision
       }
     }
@@ -214,8 +232,75 @@ export class XtmPollCycle {
         maxPerCycle: this.cfg.ACCEPT_MAX_PER_CYCLE,
       });
       if (decision.action === 'accept') {
-        candidates.push(s);
+        wouldAccept.push(s); // same gate as the event pass (C4 — no silent robustness reject)
         acceptedThisCycle++;
+      }
+    }
+
+    // Schedule gate (C1 bulk-group all-or-nothing). Applied ONLY where decideAccept()→accept;
+    // skip/disabled/non-eligible paths are untouched. When the feature is OFF every
+    // would-accept job becomes a candidate (byte-for-byte today's behavior). When ON, group
+    // by the bulk-accept unit (one portal click claims the whole group) and accept a group
+    // only if EVERY member ALLOWs AND the combined words fit the remaining daily cap;
+    // otherwise reject the WHOLE group with the binding reason — never leave a sibling
+    // grabbed-on-portal-but-Rejected (the irreversible data-corruption hazard, §2.4).
+    if (!scheduleEnabled) {
+      for (const s of wouldAccept) candidates.push(s);
+    } else {
+      const cap = this.cfg.ACCEPT_MAX_WORDS_PER_DAY;
+      const groups = new Map<string, XtmJobState[]>();
+      for (const s of wouldAccept) {
+        const key = this.bulkGroupKey(s);
+        const g = groups.get(key);
+        if (g) g.push(s);
+        else groups.set(key, [s]);
+      }
+      let anyUncurated = false;
+      for (const members of groups.values()) {
+        let blockReason: string | null = null;
+        let groupWords = 0;
+        for (const s of members) {
+          const { verdict, curated } = this.scheduleVerdict(s, detectedMs, acceptedWordsToday);
+          if (!curated) anyUncurated = true;
+          // Bind the FIRST failing member's reason (with its file for the team's note).
+          if (blockReason === null && !verdict.allow)
+            blockReason = `'${s.fileName}': ${verdict.reason}`;
+          groupWords += s.words ?? 0;
+        }
+        // Group-level capacity: the bulk grabs every member at once, so the COMBINED words
+        // (not a per-job slice) must fit the remaining cap. A single accepted group may
+        // overshoot by its own size — accepted + documented (§5), same class as the cap.
+        if (blockReason === null && cap > 0 && acceptedWordsToday + groupWords > cap) {
+          blockReason = `daily word cap reached (${acceptedWordsToday + groupWords}/${cap})`;
+        }
+        if (blockReason === null) {
+          for (const s of members) {
+            candidates.push(s);
+            wordsByKey.set(s.jobKey, s.words ?? 0);
+          }
+          acceptedWordsToday += groupWords; // optimistic advance for the next group this cycle
+        } else {
+          const note = `group blocked: ${blockReason}`;
+          for (const s of members) {
+            s.lifecycleStatus = 'rejected';
+            rejectNotes.set(s.jobKey, note);
+            summary.scheduleBlocked++;
+          }
+        }
+      }
+      // Holiday-calendar staleness (C3): a deadline in an un-curated year fails closed and
+      // must page (deduped) so a human curates the year; resolve once no span is uncurated.
+      // Guarded behind ENABLED — a disabled feature never resolves holidays or pages.
+      if (anyUncurated) {
+        raiseAlert(
+          this.db,
+          this.outbox,
+          'holiday_calendar_stale',
+          snapshot.capturedAt,
+          'a job deadline falls in a year not yet curated in src/schedule/thaiHolidaysData.ts',
+        );
+      } else {
+        resolveAlert(this.db, this.outbox, 'holiday_calendar_stale', snapshot.capturedAt, '—');
       }
     }
 
@@ -265,6 +350,12 @@ export class XtmPollCycle {
             r.outcome,
             r.outcome === 'accepted' ? r.at : null,
           );
+          // I1: advance the daily word counter in the SAME txn as the outcome record so a
+          // crash between them can never under-count (→ over-accept) or double-count. Only
+          // a confirmed accept counts; guarded by the gate so the feature-off path is inert.
+          if (scheduleEnabled && r.outcome === 'accepted') {
+            this.meta.addAcceptedWords(today, wordsByKey.get(r.jobKey) ?? 0);
+          }
         }
       })();
       // Summary + in-memory state + alerts (outside the record transaction).
@@ -337,7 +428,8 @@ export class XtmPollCycle {
       } else if (outcome?.outcome === 'missing') {
         note = 'snatched';
       } else {
-        note = skipNotes.get(jobKey) ?? null; // skipped → record the skip reason
+        // skipped → skip reason; schedule-blocked → the binding reject reason (I3).
+        note = skipNotes.get(jobKey) ?? rejectNotes.get(jobKey) ?? null;
       }
       this.outbox.enqueue(
         `sheet:${base}`,
@@ -353,6 +445,7 @@ export class XtmPollCycle {
           s,
           outcome,
           snapshot.capturedAt,
+          rejectNotes.get(jobKey),
         );
         if (card) {
           this.outbox.enqueue(`chat:${base}`, JSON.stringify(card), snapshot.capturedAt, 'chat');
@@ -366,6 +459,17 @@ export class XtmPollCycle {
     };
     for (const ev of result.events) reportJob(ev.jobKey, ev);
     for (const jobKey of acceptResults.keys()) reportJob(jobKey, undefined);
+    // I3/C4: announce schedule rejections that produced NO appearance event and NO accept
+    // outcome (a robustness-pass block) — otherwise they would be silently dropped. Only a
+    // transition INTO 'rejected' is announced: a job already 'rejected' last cycle and still
+    // blocked must NOT re-enqueue (the event_id carries pollCycleId, so re-reporting would
+    // duplicate every cycle). A reason change within 'rejected' is intentionally not
+    // re-announced (mirrors the accept_failed dedup philosophy). reportJob dedups by jobKey,
+    // so a job already reported via its event/outcome above is skipped here.
+    for (const jobKey of rejectNotes.keys()) {
+      if (prev.get(jobKey)?.lifecycleStatus === 'rejected') continue;
+      reportJob(jobKey, undefined);
+    }
     // Field-change re-sync (Bug B): a still-visible job whose Due date/Words XTM set AFTER
     // our last transition write reaches the DB but never the Sheet (which only writes on
     // transitions). The diff already records the change in detailsChanges (FR-019) — enqueue
@@ -375,9 +479,15 @@ export class XtmPollCycle {
       const s = result.nextStates.get(dc.jobKey);
       if (!s) continue;
       reported.add(dc.jobKey);
+      // I3: a still-'rejected' job's silent field re-sync must NOT wipe the reject note.
+      // The gate already re-ran this cycle (robustness pass) — if the new Due/Words made it
+      // feasible it is now 'accepted' and was reported above (skipped here); otherwise it is
+      // still 'rejected' and we preserve the binding reason instead of overwriting with null.
+      const syncNote =
+        s.lifecycleStatus === 'rejected' ? (rejectNotes.get(dc.jobKey) ?? null) : null;
       this.outbox.enqueue(
         `sheet:fieldsync:${dc.jobKey}|${snapshot.pollCycleId}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, null) }),
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, syncNote) }),
         snapshot.capturedAt,
         'sheets',
       );
@@ -419,6 +529,44 @@ export class XtmPollCycle {
     };
   }
 
+  /** The bulk-accept unit one portal click grabs: language + project group (C1). The
+   *  portal's "Accept all tasks for THIS language in this group" claims every sibling at
+   *  once, so the schedule gate must decide at this granularity, never per job.
+   *  ASSUMPTION: the portal "group" == projectName (cannot be verified against a live
+   *  portal here). Isolated as a one-liner so widening the key (if the portal groups more
+   *  broadly) is a single change — see the report's bulkGroupKey note. */
+  private bulkGroupKey(s: XtmJobState): string {
+    return `${s.targetLang ?? ''} ${s.projectName}`;
+  }
+
+  /** Compose the schedule verdict for one would-accept job (C4 — the single gate used by
+   *  both passes). Resolves the curated Thai-holiday set for every Bangkok year the
+   *  now→deadline span touches and feeds the pure `evaluateAcceptSchedule`. */
+  private scheduleVerdict(
+    s: XtmJobState,
+    nowMs: number,
+    acceptedWordsToday: number,
+  ): { verdict: AcceptScheduleVerdict; curated: boolean } {
+    const parsed = s.dueDate ? Date.parse(s.dueDate) : NaN;
+    const dueAtMs = Number.isFinite(parsed) ? parsed : null;
+    const { holidays, curated } = resolveHolidaysForSpan(nowMs, dueAtMs);
+    const verdict = evaluateAcceptSchedule({
+      enabled: true,
+      nowMs,
+      dueAtMs,
+      words: s.words,
+      acceptedWordsToday,
+      maxWordsPerDay: this.cfg.ACCEPT_MAX_WORDS_PER_DAY,
+      hoursStartMin: this.cfg.hoursStartMin,
+      hoursEndMin: this.cfg.hoursEndMin,
+      workdays: this.cfg.workdays,
+      throughputWordsPerHour: this.cfg.throughputWordsPerHour,
+      holidays,
+      holidaysCuratedForSpan: curated,
+    });
+    return { verdict, curated };
+  }
+
   /** The Chat card for an appearance, or undefined for sheet-only events. */
   private chatForEvent(
     eventType: AppearanceEventType | undefined,
@@ -426,6 +574,7 @@ export class XtmPollCycle {
     s: XtmJobState,
     outcome: AcceptResult | undefined,
     at: string,
+    rejectReason?: string,
   ): { cardsV2: unknown[] } | undefined {
     const xtmUrl = this.cfg.XTM_ACOLAD_OFFERS_URL;
     if (outcome) {
@@ -438,6 +587,12 @@ export class XtmPollCycle {
         at,
         xtmUrl,
       );
+    }
+    // A schedule-blocked job (I3) → announce as a new-job card carrying the reject reason,
+    // whether or not there was an appearance event (a robustness-pass block has neither an
+    // event nor an outcome). Without this it would wrongly read "Malay (MS) — accepting".
+    if (s.lifecycleStatus === 'rejected') {
+      return renderXtmNewJob(s, at, `Rejected — ${rejectReason ?? 'schedule blocked'}`, xtmUrl);
     }
     // No accept outcome and no appearance event (robustness-pass job that wasn't
     // accepted) → nothing to announce.
