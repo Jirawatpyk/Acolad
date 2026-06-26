@@ -8,8 +8,8 @@ import type { LogoutKind } from '../portal/errors.js';
 
 /** Read the logout reason from a `logout.jsp?type=…` URL (live-recon confirmed). */
 export function classifyLogout(url: string): LogoutKind {
-  if (/type=LOGGED_OFF_BY_ANOTHER_USER/i.test(url)) return 'kicked_by_other';
-  if (/type=SESSION_EXPIRED/i.test(url)) return 'expired';
+  if (/[?&]type=LOGGED_OFF_BY_ANOTHER_USER/i.test(url)) return 'kicked_by_other';
+  if (/[?&]type=SESSION_EXPIRED/i.test(url)) return 'expired';
   return 'unknown';
 }
 

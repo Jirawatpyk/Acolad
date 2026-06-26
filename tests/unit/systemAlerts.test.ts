@@ -205,4 +205,11 @@ describe('yield alert triggers', () => {
       true,
     );
   });
+
+  it('raises yield_stuck once per active episode, then resolves and re-arms', () => {
+    expect(raiseAlert(db, outbox, 'yield_stuck', '2026-06-26T01:00:00Z', 'paused 60 min')).toBe(true);
+    expect(raiseAlert(db, outbox, 'yield_stuck', '2026-06-26T01:00:20Z', 'paused 61 min')).toBe(false);
+    expect(resolveAlert(db, outbox, 'yield_stuck', '2026-06-26T02:00:00Z', '60 min')).toBe(true);
+    expect(raiseAlert(db, outbox, 'yield_stuck', '2026-06-26T02:01:00Z', 'paused again')).toBe(true);
+  });
 });

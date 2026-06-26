@@ -28,6 +28,11 @@ describe('classifyLogout', () => {
     expect(classifyLogout('https://xtm.acolad.com/project-manager-gui/login.jsp')).toBe('unknown');
     expect(classifyLogout('')).toBe('unknown');
   });
+  it('does not match type= in a path segment (no query boundary)', () => {
+    expect(
+      classifyLogout('https://x/path/sometype=LOGGED_OFF_BY_ANOTHER_USER'),
+    ).toBe('unknown');
+  });
 });
 
 describe('shouldYieldOnLogout', () => {
