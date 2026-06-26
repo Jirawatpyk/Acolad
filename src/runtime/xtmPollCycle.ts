@@ -385,7 +385,6 @@ export class XtmPollCycle {
     if (baseline) {
       const card = renderXtmColdStartSummary(
         [...result.nextStates.values()],
-        snapshot.capturedAt,
         snapshot.pollCycleId,
         this.cfg.XTM_ACOLAD_OFFERS_URL,
       );

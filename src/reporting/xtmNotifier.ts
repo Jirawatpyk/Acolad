@@ -118,7 +118,6 @@ export function renderXtmAcceptFailed(
 /** 📋 One-time summary of pre-existing jobs at startup (FR-005), with Malay count. */
 export function renderXtmColdStartSummary(
   jobs: XtmJobState[],
-  _occurredAt: string,
   cycleId: string,
   xtmUrl: string,
 ): { cardsV2: unknown[] } {

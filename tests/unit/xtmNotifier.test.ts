@@ -480,7 +480,6 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
     it('returns header title "📋 XTM Monitor Started"', () => {
       const result = renderXtmColdStartSummary(
         [xstate({ jobKey: 'a' }), xstate({ jobKey: 'b', eligible: false })],
-        '2026-06-19T03:00:00.000Z',
         'cycle-1',
         XTM_URL,
       );
@@ -493,12 +492,7 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
         xstate({ jobKey: 'b', eligible: false, targetLang: 'Thai' }),
         xstate({ jobKey: 'c', eligible: true }),
       ];
-      const result = renderXtmColdStartSummary(
-        jobs,
-        '2026-06-19T03:00:00.000Z',
-        'cycle-1',
-        XTM_URL,
-      );
+      const result = renderXtmColdStartSummary(jobs, 'cycle-1', XTM_URL);
       const subtitle = entry(result).card.header.subtitle ?? '';
       expect(subtitle).toContain('3');
       expect(subtitle).toMatch(/Malay-eligible.*2|2.*Malay-eligible/);
@@ -509,12 +503,7 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
         xstate({ jobKey: 'a', fileName: 'f1.docx' }),
         xstate({ jobKey: 'b', fileName: 'f2.docx', targetLang: 'Thai' }),
       ];
-      const result = renderXtmColdStartSummary(
-        jobs,
-        '2026-06-19T03:00:00.000Z',
-        'cycle-1',
-        XTM_URL,
-      );
+      const result = renderXtmColdStartSummary(jobs, 'cycle-1', XTM_URL);
       const e = entry(result);
       const labels = rowLabels(result);
       expect(labels.some((l) => l.includes('f1.docx'))).toBe(true);
@@ -526,33 +515,23 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
 
     it('renders dueDate/dueRaw via formatReadableDate in row value', () => {
       const jobs = [xstate({ jobKey: 'a', dueDate: '2026-06-18T12:25:00.000Z', dueRaw: null })];
-      const result = renderXtmColdStartSummary(
-        jobs,
-        '2026-06-19T03:00:00.000Z',
-        'cycle-1',
-        XTM_URL,
-      );
+      const result = renderXtmColdStartSummary(jobs, 'cycle-1', XTM_URL);
       const texts = rowTexts(result);
       expect(texts.some((t) => t.includes('18/06/2026 19:25'))).toBe(true);
     });
 
     it('0 jobs: subtitle "No open jobs in Active — monitoring 24/7" and no job rows', () => {
-      const result = renderXtmColdStartSummary([], '2026-06-19T03:00:00.000Z', 'cycle-1', XTM_URL);
+      const result = renderXtmColdStartSummary([], 'cycle-1', XTM_URL);
       expect(entry(result).card.header.subtitle).toContain('No open jobs in Active');
     });
 
     it('button onClick.openLink.url equals the passed xtmUrl', () => {
-      const result = renderXtmColdStartSummary(
-        [xstate({ jobKey: 'a' })],
-        '2026-06-19T03:00:00.000Z',
-        'cycle-1',
-        XTM_URL,
-      );
+      const result = renderXtmColdStartSummary([xstate({ jobKey: 'a' })], 'cycle-1', XTM_URL);
       expect(buttonUrl(result)).toBe(XTM_URL);
     });
 
     it('cardId starts with "coldstart-"', () => {
-      const result = renderXtmColdStartSummary([], '2026-06-19T03:00:00.000Z', 'cycle-1', XTM_URL);
+      const result = renderXtmColdStartSummary([], 'cycle-1', XTM_URL);
       expect(entry(result).cardId).toMatch(/^coldstart-/);
     });
   });
