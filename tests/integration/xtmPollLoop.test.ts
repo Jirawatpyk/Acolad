@@ -747,14 +747,6 @@ describe('auto-yield', () => {
       ...over,
     });
 
-  /** Helper: query all outbox rows. */
-  function outboxRows(database: DB): { event_id: string; payload_json: string }[] {
-    return database.prepare('SELECT event_id, payload_json FROM outbox').all() as {
-      event_id: string;
-      payload_json: string;
-    }[];
-  }
-
   it('enters YIELDING on a kicked logout: no error escalation, heartbeat ok, paused alert once', async () => {
     fresh();
     const client = new StubClient();

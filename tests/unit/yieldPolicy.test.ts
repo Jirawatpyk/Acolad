@@ -29,9 +29,7 @@ describe('classifyLogout', () => {
     expect(classifyLogout('')).toBe('unknown');
   });
   it('does not match type= in a path segment (no query boundary)', () => {
-    expect(
-      classifyLogout('https://x/path/sometype=LOGGED_OFF_BY_ANOTHER_USER'),
-    ).toBe('unknown');
+    expect(classifyLogout('https://x/path/sometype=LOGGED_OFF_BY_ANOTHER_USER')).toBe('unknown');
   });
 });
 
