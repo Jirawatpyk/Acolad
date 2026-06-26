@@ -4,7 +4,7 @@
  * works them. Weekends are handled by ACCEPT_WORKDAYS, not here.
  * Curate the next year before December (an uncurated year pauses auto-accept, C3).
  */
-export const CURATED_YEARS: Set<number> = new Set([2026, 2027]);
+export const CURATED_YEARS: Set<number> = new Set([2026]);
 
 export const HOLIDAYS: Record<string, Record<string, string>> = {
   '2026': {
@@ -28,12 +28,7 @@ export const HOLIDAYS: Record<string, Record<string, string>> = {
     '2026-12-10': 'Constitution Day',
     '2026-12-31': "New Year's Eve",
   },
-  '2027': {
-    '2027-01-01': "New Year's Day",
-    // … team to curate the full 2027 list before December 2026 (placeholder year marker).
-    '2027-04-13': 'Songkran Festival',
-    '2027-04-14': 'Songkran Festival',
-    '2027-04-15': 'Songkran Festival',
-    '2027-12-31': "New Year's Eve",
-  },
+  // 2027 to be added (both HOLIDAYS and CURATED_YEARS) by the team before it is
+  // needed — curate with real นักขัตฤกษ์ dates before December 2026. Until then 2027
+  // stays uncurated so any 2027-deadline job fail-closes (Reject + holiday_calendar_stale).
 };
