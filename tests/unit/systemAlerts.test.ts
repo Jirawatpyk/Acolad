@@ -180,3 +180,42 @@ describe('resolveAlert', () => {
     expect(raiseAlert(db, outbox, 'login_failed', NOW, 'again')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// yield alert triggers (Task 4)
+// ---------------------------------------------------------------------------
+
+describe('yield alert triggers', () => {
+  it('raises xtm_yielding once per active episode, then resolves', () => {
+    expect(raiseAlert(db, outbox, 'xtm_yielding', '2026-06-26T00:00:00Z', 'account in use')).toBe(
+      true,
+    );
+    expect(raiseAlert(db, outbox, 'xtm_yielding', '2026-06-26T00:00:20Z', 'account in use')).toBe(
+      false,
+    ); // deduped
+    expect(resolveAlert(db, outbox, 'xtm_yielding', '2026-06-26T00:10:00Z', '10 min')).toBe(true);
+    // after resolve a new episode can raise again
+    expect(raiseAlert(db, outbox, 'xtm_yielding', '2026-06-26T00:11:00Z', 'account in use')).toBe(
+      true,
+    );
+  });
+
+  it('raises yield_stuck as a critical alert', () => {
+    expect(raiseAlert(db, outbox, 'yield_stuck', '2026-06-26T01:00:00Z', 'paused 60 min')).toBe(
+      true,
+    );
+  });
+
+  it('raises yield_stuck once per active episode, then resolves and re-arms', () => {
+    expect(raiseAlert(db, outbox, 'yield_stuck', '2026-06-26T01:00:00Z', 'paused 60 min')).toBe(
+      true,
+    );
+    expect(raiseAlert(db, outbox, 'yield_stuck', '2026-06-26T01:00:20Z', 'paused 61 min')).toBe(
+      false,
+    );
+    expect(resolveAlert(db, outbox, 'yield_stuck', '2026-06-26T02:00:00Z', '60 min')).toBe(true);
+    expect(raiseAlert(db, outbox, 'yield_stuck', '2026-06-26T02:01:00Z', 'paused again')).toBe(
+      true,
+    );
+  });
+});

@@ -101,3 +101,56 @@ describe('loadConfig', () => {
     expect(secrets).toContain('https://chat.googleapis.com/v1/spaces/TEAM/messages?key=k&token=t');
   });
 });
+
+/** Wrap base with per-test overrides (string values only, mirrors ProcessEnv). */
+function validEnv(over: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return { ...base, ...over };
+}
+
+describe('auto-yield config', () => {
+  it('defaults yield enabled, window 600000ms, max 60 min', () => {
+    const cfg = loadConfig(validEnv());
+    expect(cfg.XTM_YIELD_ENABLED).toBe(true);
+    expect(cfg.XTM_YIELD_WINDOW_MS).toBe(600_000);
+    expect(cfg.XTM_YIELD_MAX_MINUTES).toBe(60);
+  });
+
+  it('can be disabled via XTM_YIELD_ENABLED=0', () => {
+    expect(loadConfig(validEnv({ XTM_YIELD_ENABLED: '0' })).XTM_YIELD_ENABLED).toBe(false);
+  });
+
+  it('kill-switch disables on false/off/0 and stays enabled on 1 or unset (footgun guard)', () => {
+    expect(loadConfig(validEnv({ XTM_YIELD_ENABLED: 'false' })).XTM_YIELD_ENABLED).toBe(false);
+    expect(loadConfig(validEnv({ XTM_YIELD_ENABLED: 'off' })).XTM_YIELD_ENABLED).toBe(false);
+    expect(loadConfig(validEnv({ XTM_YIELD_ENABLED: '0' })).XTM_YIELD_ENABLED).toBe(false);
+    expect(loadConfig(validEnv({ XTM_YIELD_ENABLED: '1' })).XTM_YIELD_ENABLED).toBe(true);
+    expect(loadConfig(validEnv()).XTM_YIELD_ENABLED).toBe(true);
+  });
+
+  it('rejects a window smaller than 3x the poll interval when yield is ENABLED (fail-fast)', () => {
+    expect(() =>
+      loadConfig(
+        validEnv({
+          XTM_YIELD_ENABLED: '1',
+          POLL_INTERVAL_MS: '20000',
+          XTM_YIELD_WINDOW_MS: '40000',
+        }),
+      ),
+    ).toThrow(/XTM_YIELD_WINDOW_MS/);
+  });
+
+  it('accepts a window exactly 3x the poll interval', () => {
+    const cfg = loadConfig(validEnv({ POLL_INTERVAL_MS: '20000', XTM_YIELD_WINDOW_MS: '60000' }));
+    expect(cfg.XTM_YIELD_WINDOW_MS).toBe(60_000);
+  });
+
+  it('does NOT reject a sub-3x window when yield is DISABLED — kill-switch is never blocked (F7)', () => {
+    // The refine must be gated on XTM_YIELD_ENABLED so an operator can always disable the
+    // feature without first having to fix an unrelated window value.
+    const cfg = loadConfig(
+      validEnv({ XTM_YIELD_ENABLED: '0', POLL_INTERVAL_MS: '20000', XTM_YIELD_WINDOW_MS: '40000' }),
+    );
+    expect(cfg.XTM_YIELD_ENABLED).toBe(false);
+    expect(cfg.XTM_YIELD_WINDOW_MS).toBe(40_000);
+  });
+});

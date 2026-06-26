@@ -22,6 +22,9 @@ import {
   SessionExpiredError,
   PaginationDetectedError,
   CaptchaDetectedError,
+  SessionYieldError,
+  classifyLogout,
+  type LogoutKind,
 } from './errors.js';
 import type { AcceptTarget, AcceptResult } from './errors.js';
 
@@ -34,7 +37,10 @@ export interface XtmPortalClient {
   /** Login only if there is no usable session; idempotent. */
   ensureLoggedIn(): Promise<void>;
   /** Read the current Active (IN_PROGRESS) task list once. */
-  fetchJobSnapshot(pollCycleId: string): Promise<XtmJobSnapshot>;
+  fetchJobSnapshot(
+    pollCycleId: string,
+    opts?: { decideRelogin?: (kind: LogoutKind) => boolean },
+  ): Promise<XtmJobSnapshot>;
   /** Bulk-accept eligible (Malay) tasks; outcome per job from the FR-024 re-read. */
   acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]>;
   /** Evidence-only (ACCEPT_RECON): capture the real accept-menu DOM, hover only, no accept. */
@@ -87,10 +93,17 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     if (await this.ops.isLoggedOut(page)) await this.login(page);
   }
 
-  async fetchJobSnapshot(pollCycleId: string): Promise<XtmJobSnapshot> {
+  async fetchJobSnapshot(
+    pollCycleId: string,
+    opts?: { decideRelogin?: (kind: LogoutKind) => boolean },
+  ): Promise<XtmJobSnapshot> {
+    // Default: always relogin (preserves pre-yield behavior + existing tests).
+    const decideRelogin = opts?.decideRelogin ?? ((): boolean => true);
     const page = await this.browser.page();
     await this.navigateToInbox(page);
     if (await this.ops.isLoggedOut(page)) {
+      const kind = this.classifyLoggedOut(page.url());
+      if (!decideRelogin(kind)) throw new SessionYieldError(kind);
       await this.login(page);
       await this.navigateToInbox(page);
     }
@@ -111,14 +124,38 @@ export class PlaywrightXtmClient implements XtmPortalClient {
           throw err; // probe itself failed → preserve the ORIGINAL classification
         }
       }
-      // Session expired mid-read (shared account) → re-login once, silently.
       if (err instanceof SessionExpiredError || loggedOut) {
+        const kind = this.classifyLoggedOut(page.url());
+        if (!decideRelogin(kind)) throw new SessionYieldError(kind);
         await this.login(page);
         await this.navigateToInbox(page);
         return this.ops.readActiveOnce(page, pollCycleId);
       }
       throw err;
     }
+  }
+
+  /**
+   * Classify the logout URL and, on an UNRECOGNISED type, emit a LOUD warn so a portal
+   * logout-URL change is diagnosable (F10, Constitution VI: fail loud). Control flow is
+   * unchanged — an 'unknown' still flows through the same decideRelogin policy. Only the
+   * URL PATH is logged (the query string can carry tokens — never log it, FR-012).
+   */
+  private classifyLoggedOut(url: string): LogoutKind {
+    const kind = classifyLogout(url);
+    if (kind === 'unknown') {
+      let path = url;
+      try {
+        path = new URL(url).pathname;
+      } catch {
+        path = url.split('?')[0] ?? url; // relative/empty URL → strip query defensively
+      }
+      this.logger?.warn(
+        { module: 'xtmClient', action: 'classifyLogout', outcome: 'unknown', path },
+        'landed logged-out with an unrecognised logout type — the portal logout URL may have changed',
+      );
+    }
+    return kind;
   }
 
   /** Default readActiveOnce: resolve the Active frame, then read it (overridable via ops). */

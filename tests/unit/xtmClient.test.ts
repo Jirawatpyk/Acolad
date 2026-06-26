@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { PlaywrightXtmClient, type XtmOps } from '../../src/portal/xtmClient.js';
 import {
   SessionExpiredError,
+  SessionYieldError,
   LayoutChangedError,
   PaginationDetectedError,
   CaptchaDetectedError,
@@ -10,6 +11,7 @@ import type { BrowserSession } from '../../src/portal/browser.js';
 import type { RateLimiter } from '../../src/runtime/rateLimiter.js';
 import type { AppConfig } from '../../src/config/index.js';
 import type { XtmJobSnapshot } from '../../src/detection/types.js';
+import type { Logger } from '../../src/monitoring/logger.js';
 
 /**
  * T049 mode 2 (session expiry mid-read → silent re-login, NO alert): the recovery
@@ -37,14 +39,47 @@ const snapshot = (id: string): XtmJobSnapshot => ({
 });
 
 /** A browser/page/rate stub good enough for navigate + login bookkeeping. */
-function fakes() {
-  const page = { goto: vi.fn(async () => {}) };
+function fakes(pageUrl = '') {
+  const page = {
+    goto: vi.fn(async () => {}),
+    // url() required because fetchJobSnapshot now calls it on every logged-out / session-expired path.
+    url: () => pageUrl,
+  };
   const browser = {
     page: vi.fn(async () => page),
     persistSession: vi.fn(async () => {}),
   } as unknown as BrowserSession;
   const rate = { record: vi.fn(() => {}) } as unknown as RateLimiter;
   return { browser, rate };
+}
+
+/**
+ * Helper for relogin-policy tests: builds a PlaywrightXtmClient with a fake page
+ * whose `url()` returns the given `pageUrl`, and wires up the provided ops stubs.
+ * Mirrors the existing harness but makes `page.url()` scriptable.
+ */
+function makeClientWith(opts: {
+  isLoggedOut: () => Promise<boolean>;
+  login: () => Promise<void>;
+  readActiveOnce: () => Promise<XtmJobSnapshot>;
+  pageUrl: string;
+  logger?: Logger;
+}): PlaywrightXtmClient {
+  const page = {
+    goto: vi.fn(async () => {}),
+    url: () => opts.pageUrl,
+  };
+  const browser = {
+    page: vi.fn(async () => page),
+    persistSession: vi.fn(async () => {}),
+  } as unknown as BrowserSession;
+  const rate = { record: vi.fn(() => {}) } as unknown as RateLimiter;
+  const xtmOps: XtmOps = {
+    isLoggedOut: vi.fn(async () => opts.isLoggedOut()),
+    login: vi.fn(async () => opts.login()),
+    readActiveOnce: vi.fn(async (_p, _id) => opts.readActiveOnce()),
+  };
+  return new PlaywrightXtmClient(browser, cfg, rate, clock, xtmOps, opts.logger);
 }
 
 describe('PlaywrightXtmClient.fetchJobSnapshot — session recovery (FR-021 / T049 mode 2)', () => {
@@ -131,4 +166,107 @@ describe('PlaywrightXtmClient.fetchJobSnapshot — session recovery (FR-021 / T0
       expect(ops.login).not.toHaveBeenCalled(); // not demoted to a silent re-login
     },
   );
+});
+
+describe('fetchJobSnapshot relogin policy', () => {
+  it('throws SessionYieldError (no login) when policy declines relogin on a logged-out page', async () => {
+    let loginCalls = 0;
+    // Stub ops: report logged-out, and the page.url() resolves to a kicked logout.
+    const client = makeClientWith({
+      isLoggedOut: async () => true,
+      login: async () => {
+        loginCalls++;
+      },
+      readActiveOnce: async () => ({
+        jobs: [],
+        malformed: [],
+        capturedAt: 'x',
+        pollCycleId: 'p',
+        emptyListConfirmed: false,
+      }),
+      pageUrl: 'https://xtm/logout.jsp?type=LOGGED_OFF_BY_ANOTHER_USER',
+    });
+    await expect(
+      client.fetchJobSnapshot('p', { decideRelogin: () => false }),
+    ).rejects.toBeInstanceOf(SessionYieldError);
+    expect(loginCalls).toBe(0); // never logged in → never kicked the human
+  });
+
+  it('logs in normally when policy allows relogin (default behavior)', async () => {
+    let loginCalls = 0;
+    const client = makeClientWith({
+      isLoggedOut: async () => true,
+      login: async () => {
+        loginCalls++;
+      },
+      readActiveOnce: async () => ({
+        jobs: [],
+        malformed: [],
+        capturedAt: 'x',
+        pollCycleId: 'p',
+        emptyListConfirmed: false,
+      }),
+      pageUrl: 'https://xtm/logout.jsp?type=SESSION_EXPIRED',
+    });
+    const snap = await client.fetchJobSnapshot('p'); // no opts → always relogin
+    expect(loginCalls).toBe(1);
+    expect(snap.jobs).toEqual([]);
+  });
+});
+
+describe('fetchJobSnapshot fail-loud on unrecognised logout (F10)', () => {
+  const snapEmpty = (): XtmJobSnapshot => ({
+    jobs: [],
+    malformed: [],
+    capturedAt: 'x',
+    pollCycleId: 'p',
+    emptyListConfirmed: false,
+  });
+
+  it('warns LOUD (path only — query/tokens stripped) when classifyLogout is unknown', async () => {
+    const warn = vi.fn();
+    const logger = { info: vi.fn(), warn, error: vi.fn() } as unknown as Logger;
+    let loginCalls = 0;
+    const client = makeClientWith({
+      isLoggedOut: async () => true,
+      login: async () => {
+        loginCalls++;
+      },
+      readActiveOnce: async () => snapEmpty(),
+      // unrecognised type + a secret token in the query — must NOT be logged
+      pageUrl:
+        'https://xtm.example/project-manager-gui/logout.jsp?type=MYSTERY_CODE&token=topsecret',
+      logger,
+    });
+
+    await client.fetchJobSnapshot('p'); // default policy → control flow unchanged (still re-logins)
+
+    expect(loginCalls).toBe(1); // F10 does not change control flow
+    expect(warn).toHaveBeenCalledTimes(1);
+    const fields = warn.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(fields).toMatchObject({
+      module: 'xtmClient',
+      action: 'classifyLogout',
+      outcome: 'unknown',
+    });
+    // PATH ONLY: the query string (and its token) must never appear in the log fields
+    expect(fields['path']).toBe('/project-manager-gui/logout.jsp');
+    expect(JSON.stringify(fields)).not.toContain('topsecret');
+    expect(JSON.stringify(fields)).not.toContain('MYSTERY_CODE');
+  });
+
+  it('does NOT warn when the logout type is recognised (kicked_by_other)', async () => {
+    const warn = vi.fn();
+    const logger = { info: vi.fn(), warn, error: vi.fn() } as unknown as Logger;
+    const client = makeClientWith({
+      isLoggedOut: async () => true,
+      login: async () => {},
+      readActiveOnce: async () => snapEmpty(),
+      pageUrl: 'https://xtm.example/logout.jsp?type=LOGGED_OFF_BY_ANOTHER_USER',
+      logger,
+    });
+
+    await client.fetchJobSnapshot('p');
+    expect(warn).not.toHaveBeenCalled();
+  });
 });
