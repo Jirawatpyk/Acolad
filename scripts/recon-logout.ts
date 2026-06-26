@@ -36,7 +36,7 @@
 import { config as loadDotenv } from 'dotenv';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { chromium, type Page, type Frame, type Browser, type BrowserContext } from 'playwright';
+import { chromium, type Page, type Browser, type BrowserContext } from 'playwright';
 
 loadDotenv();
 
@@ -121,7 +121,9 @@ async function probeSessionState(page: Page): Promise<SessionState> {
   let iframeHasLogin = false;
   let gridPresent = false;
   try {
-    const handle = await page.waitForSelector('#myInboxIframe', { timeout: 5_000 }).catch(() => null);
+    const handle = await page
+      .waitForSelector('#myInboxIframe', { timeout: 5_000 })
+      .catch(() => null);
     if (handle) {
       hasInboxIframe = true;
       const frame = await handle.contentFrame();
@@ -133,7 +135,9 @@ async function probeSessionState(page: Page): Promise<SessionState> {
           .then((n) => n > 0)
           .catch(() => false);
         iframeHasLogin = await frame
-          .locator('input[type="password"], body.loginPage, [ng-app="xtm.login"], form[action*="login" i]')
+          .locator(
+            'input[type="password"], body.loginPage, [ng-app="xtm.login"], form[action*="login" i]',
+          )
           .count()
           .then((n) => n > 0)
           .catch(() => false);
@@ -157,7 +161,8 @@ async function snapshot(page: Page, dir: string, name: string): Promise<void> {
     await page.screenshot({ path: join(dir, `${name}.png`), fullPage: true });
     const handle = await page.$('#myInboxIframe');
     const frame = handle ? await handle.contentFrame() : null;
-    if (frame) writeFileSync(join(dir, `${name}-iframe.html`), sanitize(await frame.content()), 'utf8');
+    if (frame)
+      writeFileSync(join(dir, `${name}-iframe.html`), sanitize(await frame.content()), 'utf8');
     console.log(`[recon] captured ${name}`);
   } catch (err) {
     console.warn(`[recon] capture ${name} failed: ${err instanceof Error ? err.message : err}`);
@@ -187,7 +192,9 @@ async function main(): Promise<void> {
   const dir = join(process.env.STATE_DIR ?? 'state', 'evidence', `xtm-logout-recon-${stamp}`);
   mkdirSync(dir, { recursive: true });
   console.log(`[recon] evidence dir: ${dir}`);
-  console.log('[recon] WARNING: this logs into the shared account TWICE and WILL kick any live human session. Bot should be STOPPED.');
+  console.log(
+    '[recon] WARNING: this logs into the shared account TWICE and WILL kick any live human session. Bot should be STOPPED.',
+  );
 
   const headless = process.env.RECON_HEADLESS === '1';
   let browser: Browser | undefined;
@@ -229,7 +236,9 @@ async function main(): Promise<void> {
     console.log('  ' + line('A', results['3-A-after-kick']));
 
     // ── Phase 4: did A's NAVIGATION (no login) kick B? (assumption: it must NOT) ─
-    console.log('\n[recon] Phase 4: B re-checked — did A navigating kick B? (should still be LOGGED_IN)');
+    console.log(
+      '\n[recon] Phase 4: B re-checked — did A navigating kick B? (should still be LOGGED_IN)',
+    );
     results['4-B-after-A-nav'] = await probeSessionState(pageB);
     await snapshot(pageB, dir, '04-B-stillalive');
     console.log('  ' + line('B', results['4-B-after-A-nav']));

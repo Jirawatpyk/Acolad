@@ -52,6 +52,22 @@ export class AcceptUnconfirmedError extends PortalError {
   }
 }
 
+/** Why XTM logged a session out — read from `logout.jsp?type=…` (live recon). */
+export type LogoutKind = 'kicked_by_other' | 'expired' | 'unknown';
+
+/**
+ * Thrown by the client when it lands logged-out and the loop's policy says to
+ * YIELD rather than re-login (a competing human/session holds the shared account).
+ * Deliberately extends Error (NOT PortalError): it is not a portal failure and
+ * must never be swept into the portal_down / login-lockout handling.
+ */
+export class SessionYieldError extends Error {
+  readonly kind = 'session_yield';
+  constructor(readonly logoutKind: LogoutKind) {
+    super(`yielding XTM account to another session (logout: ${logoutKind})`);
+  }
+}
+
 /** One eligible job to bulk-accept (contracts/xtm-portal-adapter.md). */
 export interface AcceptTarget {
   jobKey: string;
