@@ -225,11 +225,19 @@ describe('yield alert triggers', () => {
 // ---------------------------------------------------------------------------
 
 describe('raiseAlert — holiday_calendar_stale', () => {
-  it('holiday_calendar_stale is a warn trigger that recovers', () => {
+  it('holiday_calendar_stale is a CRITICAL trigger that recovers (C1 — current-year outage pages on-call)', () => {
     const t = TRIGGERS['holiday_calendar_stale'];
-    expect(t.severity).toBe('warn');
+    expect(t.severity).toBe('critical'); // escalated from warn — a total auto-accept outage
     expect(t.hasRecovered).toBe(true);
     expect(t.title.length).toBeGreaterThan(0);
+  });
+
+  it('holiday_calendar_stale action names the fix (curate the current year then npm run deploy)', () => {
+    raiseAlert(db, outbox, 'holiday_calendar_stale', NOW, 'year 2099');
+    const json = cardJson(firstPayload());
+    expect(json).toContain('thaiHolidaysData.ts');
+    expect(json).toContain('npm run deploy');
+    expect(json).toContain('🔴'); // critical emoji (was ⚠️ when it was warn)
   });
 
   // F2: behavioral (not just a constant check) — raise → dedup → resolve, mirroring yield_stuck.

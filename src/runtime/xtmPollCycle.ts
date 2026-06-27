@@ -62,6 +62,13 @@ export interface XtmCycleSummary {
   reconEligible: AcceptTarget[];
   /** Jobs the schedule gate blocked this cycle (per member of a rejected bulk group). */
   scheduleBlocked: number;
+  /**
+   * True when the CURRENT Bangkok year has no curated holiday list while the schedule
+   * gate is ON — a TOTAL auto-accept outage (every job fail-closes). The loop threads
+   * this into its heartbeat `stuck` gate so Healthchecks pages on-call (C1). False on
+   * every other path (gate disabled, current year curated).
+   */
+  holidayCalendarStale: boolean;
 }
 
 /**
@@ -139,6 +146,7 @@ export class XtmPollCycle {
       acceptLatencies: [],
       reconEligible: [],
       scheduleBlocked: 0,
+      holidayCalendarStale: false,
     };
     const detectedMs = Date.parse(snapshot.capturedAt);
     // Schedule-gate state (Task 12). nowMs = the snapshot clock; today/counter keyed to
@@ -309,6 +317,9 @@ export class XtmPollCycle {
       // never resolves holidays or pages.
       const currentYear = bangkokYear(detectedMs);
       if (!getThaiHolidays(currentYear).curated) {
+        // C1: a total auto-accept outage — surface it to the loop so the heartbeat fails
+        // and Healthchecks pages on-call (not just a Chat card).
+        summary.holidayCalendarStale = true;
         raiseAlert(
           this.db,
           this.outbox,

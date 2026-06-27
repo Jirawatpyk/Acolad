@@ -421,7 +421,11 @@ export class XtmPollLoop {
       const stuck =
         yieldStuckNow ||
         this.nonTeamFailureThisFlush ||
-        this.outbox.countDeadExcludingChannel('team') > 0;
+        this.outbox.countDeadExcludingChannel('team') > 0 ||
+        // C1: an uncurated CURRENT Bangkok year = total auto-accept outage. Fail the
+        // heartbeat so Healthchecks pages; the cycle resolves the alert (and clears this
+        // flag) once the year is curated, flipping the heartbeat back to ok.
+        summary.holidayCalendarStale;
       if (stuck) {
         await this.heartbeat.fail();
       } else {
@@ -445,6 +449,7 @@ export class XtmPollLoop {
           accepted: summary.accepted,
           skipped: summary.skipped,
           scheduleBlocked: summary.scheduleBlocked,
+          holidayCalendarStale: summary.holidayCalendarStale,
           failed: summary.failed,
           dead: disp.dead,
         },

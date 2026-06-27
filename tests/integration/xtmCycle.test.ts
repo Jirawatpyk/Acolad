@@ -846,6 +846,33 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(row.note).toContain('group blocked'); // ...specifically the binding reject reason
   });
 
+  it('C1: an uncurated current-year cycle sets summary.holidayCalendarStale (the total-outage page signal)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    // capturedAt in 2099 (uncurated current Bangkok year) → auto-accept is 100% dead → page.
+    const summary = await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([], '2099-06-22T10:00:00+07:00'),
+    );
+    expect(summary.holidayCalendarStale).toBe(true);
+  });
+
+  it('C1: a curated current-year cycle leaves summary.holidayCalendarStale false', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    const summary = await new XtmPollCycle(db, schedCfg(), acc).run(snapAt([], MON_10)); // 2026 curated
+    expect(summary.holidayCalendarStale).toBe(false);
+  });
+
+  it('C1: a DISABLED gate never flags holidayCalendarStale even in an uncurated current year', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    // Gate off → the holiday block is skipped entirely; the kill-switch must not page.
+    const summary = await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), acc).run(
+      snapAt([], '2099-06-22T10:00:00+07:00'),
+    );
+    expect(summary.holidayCalendarStale).toBe(false);
+  });
+
   it('F3: an uncurated current-year cycle raises holiday_calendar_stale; a later curated-year cycle RESOLVES it', async () => {
     fresh();
     new MetaStore(db).markBaselineDone();
