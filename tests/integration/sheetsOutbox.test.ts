@@ -107,4 +107,59 @@ describe('Sheets outbox routing (T040/T038, FR-018)', () => {
     expect(summary.dead).toBe(1);
     expect(outbox.countByStatus('pending')).toBe(0);
   });
+
+  // S1: the Sheets analog of the chat-403 permanent path. A revoked credential (401/403)
+  // surfaces as a 'permanent' SendOutcome (classifyError in sheets.ts). The dispatcher must
+  // route it to recordPermanentFailure + onPermanent (NOT dead) so queued rows flush once the
+  // service account's access is restored (FR-018) — mirroring the chat 403 behavior.
+  it('S1: a sheets row whose sender returns permanent (auth revoked) → permanentFailures + onPermanent(sheets), stays queued (mirrors chat 403)', async () => {
+    const outbox = fresh();
+    outbox.enqueue('ev-perm', JSON.stringify({ row: sheetRow() }), NOW, 'sheets');
+    const sheet = new FakeSheetSender();
+    sheet.outcome = 'permanent';
+    const onPermanent = vi.fn();
+    const onDead = vi.fn();
+    const summary = await new Dispatcher(outbox, { chat: okChat, sheet }, noopLogger, {
+      onPermanent,
+      onDead,
+    }).flush(NOW, Date.parse(NOW));
+    expect(summary.permanentFailures).toBe(1);
+    expect(summary.dead).toBe(0);
+    expect(onPermanent).toHaveBeenCalledWith('ev-perm', 'sheets'); // channel-tagged for the caller
+    expect(onDead).not.toHaveBeenCalled();
+    expect(outbox.countByStatus('pending')).toBe(1); // retried slowly, never dropped
+    expect(outbox.countByStatus('dead')).toBe(0);
+  });
+
+  it('treats a thrown error from the sheet sender as transient — row stays queued, sibling chat row still delivered, flush does not throw', async () => {
+    const outbox = fresh();
+    outbox.enqueue('e-throw', JSON.stringify({ row: sheetRow() }), NOW, 'sheets'); // sender throws
+    outbox.enqueue('e-ok', JSON.stringify({ text: 'hi' }), NOW, 'chat'); // same batch — must still send
+    const sheet: SheetSender = {
+      async send(): Promise<SendOutcome> {
+        throw new Error('ECONNRESET — simulated googleapis network error');
+      },
+    };
+    const summary = await new Dispatcher(outbox, { chat: okChat, sheet }, noopLogger, {}).flush(
+      NOW,
+      Date.parse(NOW),
+    );
+    expect(summary.transientFailures).toBe(1);
+    expect(summary.sent).toBe(1); // the chat row in the same batch
+    expect(outbox.countByStatus('pending')).toBe(1); // sheets row still queued (not lost)
+  });
+
+  it('drops a sheets row with invalid JSON as malformed/dead (no wedge), sender never called', async () => {
+    const outbox = fresh();
+    outbox.enqueue('e-badjson', '{ not valid json', NOW, 'sheets'); // JSON.parse throws → malformed
+    const sheet = new FakeSheetSender();
+    const onDead = vi.fn();
+    const summary = await new Dispatcher(outbox, { chat: okChat, sheet }, noopLogger, {
+      onDead,
+    }).flush(NOW, Date.parse(NOW));
+    expect(sheet.rows).toHaveLength(0); // never sent
+    expect(summary.dead).toBe(1);
+    expect(onDead).toHaveBeenCalledWith('e-badjson', 'sheets', 'malformed payload');
+    expect(outbox.countByStatus('pending')).toBe(0);
+  });
 });
