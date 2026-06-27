@@ -617,6 +617,78 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(summary.scheduleRejects).toHaveLength(0);
   });
 
+  // I1 (real data): drive the cycle with deadlines that fall on REAL in-lieu (วันหยุดชดเชย)
+  // days from src/schedule/thaiHolidaysData.ts — exercising resolveHolidaysForSpan end-to-end
+  // with the curated PR #11 data, NOT a synthetic holiday map. Each `now` precedes its
+  // in-lieu deadline and stays inside the curated 2026 calendar.
+  const inLieuCases: Array<{ label: string; now: string; due: string; holiday: string }> = [
+    {
+      label: 'Visakha Bucha (in lieu) 2026-06-01',
+      now: '2026-05-29T10:00:00+07:00', // Fri before the Mon in-lieu day
+      due: '2026-06-01T12:00:00+07:00', // Mon — '2026-06-01' is a real in-lieu holiday
+      holiday: 'Visakha Bucha Day (in lieu)',
+    },
+    {
+      label: "King Bhumibol's Birthday (in lieu) 2026-12-07",
+      now: '2026-12-04T10:00:00+07:00', // Fri before the Mon in-lieu day
+      due: '2026-12-07T12:00:00+07:00', // Mon — '2026-12-07' is a real in-lieu holiday
+      holiday: "King Bhumibol's Birthday / Father's Day (in lieu)",
+    },
+  ];
+  for (const c of inLieuCases) {
+    it(`I1 (real data): rejects a Malay job whose deadline lands on a real in-lieu holiday — ${c.label}`, async () => {
+      fresh();
+      const acc = new StubAcceptor();
+      const summary = await new XtmPollCycle(db, schedCfg(), acc).run(
+        snapAt([xraw({ dueDate: c.due, words: 100 })], c.now),
+      );
+      expect(acc.calls.flat()).toHaveLength(0); // never clicked — blocked by the real holiday
+      expect(only().lifecycleStatus).toBe('rejected');
+      expect(summary.scheduleBlocked).toBe(1);
+      const note = sheetRows().at(-1)?.note ?? '';
+      expect(note).toContain('non-working day'); // the binding reason is a holiday block
+      expect(note).toContain(c.holiday); // the exact curated in-lieu name flowed through
+    });
+  }
+
+  // I2: addAcceptedWords + recordAcceptOutcome must commit (or roll back) as ONE unit. Two
+  // same-language Malay jobs form one bulk group, both feasible → both claimed & attempted.
+  // The acceptor confirms job A (its words get counted mid-txn), then returns a MALFORMED
+  // outcome for job B that makes recordAcceptOutcome throw INSIDE the record transaction.
+  // The whole txn must roll back — so job A's daily-counter increment is undone too (the I1
+  // atomicity invariant: the counter can never be left advanced for an uncommitted accept).
+  it('I2: a mid-txn throw rolls the daily word counter back (addAcceptedWords + recordAcceptOutcome are atomic)', async () => {
+    fresh();
+    const acc = {
+      async acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]> {
+        return [
+          // results[0] confirmed → its words ARE counted first (counter advances to 100)…
+          { jobKey: targets[0]!.jobKey, outcome: 'accepted', at: NOW } as AcceptResult,
+          // …then results[1] carries an outcome outside the lifecycle map → recordAcceptOutcome
+          // dereferences `undefined` and throws, aborting the record transaction.
+          {
+            jobKey: targets[1]!.jobKey,
+            outcome: 'kaboom' as AcceptResult['outcome'],
+            at: NOW,
+          } as AcceptResult,
+        ];
+      },
+    };
+    await expect(
+      new XtmPollCycle(db, schedCfg(), acc).run(
+        snapAt(
+          [
+            xraw({ fileName: 'one.docx', projectName: 'P1', dueDate: dueWed18, words: 100 }),
+            xraw({ fileName: 'two.docx', projectName: 'P2', dueDate: dueWed18, words: 100 }),
+          ],
+          MON_10,
+        ),
+      ),
+    ).rejects.toThrow();
+    // The record txn rolled back → job A's mid-txn counter increment was undone.
+    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(0);
+  });
+
   it('I3a: a single group whose OWN words exceed the daily cap → "exceed" message (accept manually)', async () => {
     fresh();
     const acc = new StubAcceptor();
