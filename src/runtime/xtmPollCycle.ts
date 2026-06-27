@@ -633,7 +633,9 @@ export class XtmPollCycle {
   private scheduleVerdict(
     s: XtmJobState,
     nowMs: number,
-    acceptedWordsToday: number,
+    // Capacity moved to acceptCapacity.decideGroupCapacity (applied in the cycle); the
+    // schedule gate is feasibility-only now, so this is unused until Task 6 removes it.
+    _acceptedWordsToday: number,
   ): AcceptScheduleVerdict {
     const parsed = s.dueDate ? Date.parse(s.dueDate) : NaN;
     const dueAtMs = Number.isFinite(parsed) ? parsed : null;
@@ -646,8 +648,6 @@ export class XtmPollCycle {
       nowMs,
       dueAtMs,
       words: s.words,
-      acceptedWordsToday,
-      maxWordsPerDay: this.cfg.ACCEPT_MAX_WORDS_PER_DAY,
       throughputWordsPerHour: this.cfg.throughputWordsPerHour,
       calendar: {
         workdays: this.cfg.workdays,

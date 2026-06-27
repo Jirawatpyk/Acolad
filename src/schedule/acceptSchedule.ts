@@ -6,8 +6,6 @@ export interface AcceptScheduleInput {
   nowMs: number;
   dueAtMs: number | null;
   words: number | null;
-  acceptedWordsToday: number;
-  maxWordsPerDay: number;
   throughputWordsPerHour: number;
   /** Working-day window + holidays. Embeds WorkCalendar directly (no flattened copy). */
   calendar: WorkCalendar;
@@ -18,12 +16,6 @@ export type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: st
 
 export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVerdict {
   if (!i.enabled) return { allow: true };
-
-  if (i.maxWordsPerDay > 0 && i.acceptedWordsToday >= i.maxWordsPerDay)
-    return {
-      allow: false,
-      reason: `daily word cap reached (${i.acceptedWordsToday}/${i.maxWordsPerDay})`,
-    };
 
   if (i.dueAtMs === null) return { allow: false, reason: 'deadline unknown' };
   if (i.words === null) return { allow: false, reason: 'word count unknown' };
