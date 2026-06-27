@@ -19,7 +19,7 @@ describe('parseWorkdays', () => {
     expect([...parseWorkdays('1,3,5')].sort()).toEqual([1, 3, 5]);
     expect([...parseWorkdays('6-7')]).toEqual([6, 7]);
   });
-  it.each(['', '0-5', '1-8', '8', 'a'])('rejects %s', (s) => {
+  it.each(['', '0-5', '1-8', '8', 'a', '5-1'])('rejects %s', (s) => {
     expect(() => parseWorkdays(s)).toThrow();
   });
 });

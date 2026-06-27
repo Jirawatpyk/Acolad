@@ -27,14 +27,19 @@ export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVe
 
   if (i.dueAtMs === null) return { allow: false, reason: 'deadline unknown' };
   if (i.words === null) return { allow: false, reason: 'word count unknown' };
+  if (i.throughputWordsPerHour <= 0)
+    return {
+      allow: false,
+      reason: 'throughput not configured (throughputWordsPerHour must be positive)',
+    };
   if (!i.holidaysCuratedForSpan) {
     // Name the whole now→deadline span (F8) — naming only the deadline year is wrong
     // when the UNcurated year is the now-year (a past-deadline edge can put the deadline
     // in a curated year). Collapse to one year when the span stays within a single year.
     const yNow = bangkokYear(i.nowMs);
     const yDue = bangkokYear(i.dueAtMs);
-    // Sort so the range never renders backwards (e.g. a past-deadline edge where now > due).
-    const [y0, y1] = yNow <= yDue ? [yNow, yDue] : [yDue, yNow];
+    const y0 = Math.min(yNow, yDue);
+    const y1 = Math.max(yNow, yDue);
     const range = y0 === y1 ? `${y0}` : `${y0}–${y1}`;
     return {
       allow: false,

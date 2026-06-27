@@ -48,7 +48,7 @@ export function workingMinutesBetween(
       if (capMinutes !== undefined && total >= capMinutes) return total;
     }
     // Advance to the next Bangkok date (use noon to dodge any boundary edge).
-    const next = bangkokEpochMs(date, 0) + DAY_MS + DAY_MS / 2;
+    const next = bangkokEpochMs(date, 0) + 1.5 * DAY_MS;
     if (bangkokDateString(next) > endDate) break;
     cursor = next;
   }

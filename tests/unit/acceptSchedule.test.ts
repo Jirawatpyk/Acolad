@@ -131,6 +131,14 @@ describe('evaluateAcceptSchedule', () => {
   it('words=0 → allow (deliverable instantly)', () => {
     expect(evaluateAcceptSchedule(base({ words: 0 })).allow).toBe(true);
   });
+  it('throughputWordsPerHour=0 with words>0 → block with "throughput not configured" reason', () => {
+    // Guard: a caller passing 0 throughput with words>0 would yield Infinity hours required,
+    // which should block with a clear reason rather than a confusing NaN/Infinity in the output.
+    const v = evaluateAcceptSchedule(base({ throughputWordsPerHour: 0, words: 300 }));
+    expect(v.allow).toBe(false);
+    if (!v.allow)
+      expect(v.reason).toBe('throughput not configured (throughputWordsPerHour must be positive)');
+  });
   it('maxWordsPerDay=0 means unlimited — allow even with a large accepted total (F5)', () => {
     // cap 0 = no cap: the `maxWordsPerDay > 0` guard short-circuits the cap check, so a
     // huge acceptedWordsToday must NOT block a feasible job.

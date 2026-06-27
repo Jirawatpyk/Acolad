@@ -289,6 +289,26 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
       expect(labels.some((l) => l.includes('Detected'))).toBe(true);
       expect(texts.some((t) => t.includes('19/06/2026 10:00'))).toBe(true);
     });
+
+    it('statusNote provided → a Status row with that value is present', () => {
+      const result = renderXtmRelisted(
+        xstate(),
+        undefined,
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+        'Rejected — schedule blocked',
+      );
+      const labels = rowLabels(result);
+      const texts = rowTexts(result);
+      expect(labels.some((l) => l.includes('Status'))).toBe(true);
+      expect(texts.some((t) => t.includes('Rejected — schedule blocked'))).toBe(true);
+    });
+
+    it('statusNote absent → no Status row', () => {
+      const result = renderXtmRelisted(xstate(), undefined, '2026-06-19T03:00:00.000Z', XTM_URL);
+      const labels = rowLabels(result);
+      expect(labels.some((l) => l.includes('Status'))).toBe(false);
+    });
   });
 
   // ---------------------------------------------------------------------------
