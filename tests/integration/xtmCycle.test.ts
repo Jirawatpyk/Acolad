@@ -816,6 +816,62 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(only().lifecycleStatus).toBe('accepted'); // gate disabled → accepted as before
     expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(100); // counter advanced even while disabled
   });
+
+  it('F1: a still-rejected job whose dueDate changes keeps its reject reason on the field-sync note (I3 — never wiped to null)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const acc = new StubAcceptor();
+    const cycle = new XtmPollCycle(db, schedCfg(), acc);
+    const jobKey = computeXtmJobKey(xraw());
+    // c1: too-tight Malay job → schedule-rejected (lifecycle 'rejected', note recorded).
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c1'));
+    expect(only().lifecycleStatus).toBe('rejected');
+    // c2: SAME job still present, dueDate changes to another still-infeasible value — NO new
+    // appearance event, but the material field change fires detailsChanges. The job stays
+    // rejected, so the silent field re-sync must PRESERVE the binding reject reason, never
+    // overwrite the Sheet note with null (the I3 invariant — previously untested).
+    const due2 = '2026-06-22T13:00:00+07:00';
+    await cycle.run(snapAt([xraw({ dueDate: due2, words: 5000 })], MON_10, 'c2'));
+    expect(acc.calls.flat()).toHaveLength(0); // never accepted
+    expect(only().lifecycleStatus).toBe('rejected');
+    const syncRow = db
+      .prepare('SELECT payload_json FROM outbox WHERE event_id = ?')
+      .get(`sheet:fieldsync:${jobKey}|c2`) as { payload_json: string } | undefined;
+    expect(syncRow, 'sheet:fieldsync row for c2 must exist').toBeDefined();
+    const row = (
+      JSON.parse(syncRow!.payload_json) as { row: { dueDate: string | null; note: string | null } }
+    ).row;
+    expect(row.dueDate).toBe(due2); // carries the updated dueDate
+    expect(row.note).not.toBeNull(); // reject reason preserved (not wiped)...
+    expect(row.note).toContain('group blocked'); // ...specifically the binding reject reason
+  });
+
+  it('F3: an uncurated current-year cycle raises holiday_calendar_stale; a later curated-year cycle RESOLVES it', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    const activeStale = (): number =>
+      (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key='holiday_calendar_stale' AND resolved_at IS NULL",
+          )
+          .get() as { n: number }
+      ).n;
+    // c1: capturedAt in 2099 (uncurated current year) → raise.
+    await cycle.run(snapAt([], '2099-06-22T10:00:00+07:00', 'c1'));
+    expect(activeStale()).toBe(1);
+    // c2: capturedAt back in 2026 (curated current year) → the resolve path (currently
+    // unexercised) clears the alert and enqueues a recovered event.
+    await cycle.run(snapAt([], '2026-06-22T10:00:00+07:00', 'c2'));
+    expect(activeStale()).toBe(0); // resolved_at set → no longer active
+    const recovered = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_recovered' AND dedup_key LIKE 'holiday_calendar_stale%'",
+      )
+      .get() as { n: number };
+    expect(recovered.n).toBe(1); // a recovered event was enqueued
+  });
 });
 
 describe('XtmPollCycle field-change re-sync / Bug B (sheet:fieldsync)', () => {

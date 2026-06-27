@@ -231,4 +231,35 @@ describe('raiseAlert — holiday_calendar_stale', () => {
     expect(t.hasRecovered).toBe(true);
     expect(t.title.length).toBeGreaterThan(0);
   });
+
+  // F2: behavioral (not just a constant check) — raise → dedup → resolve, mirroring yield_stuck.
+  const activeCount = (): number =>
+    (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key='holiday_calendar_stale' AND resolved_at IS NULL",
+        )
+        .get() as { n: number }
+    ).n;
+
+  it('raises once (one active row), dedups a second raise, then resolves', () => {
+    expect(raiseAlert(db, outbox, 'holiday_calendar_stale', NOW, 'year 2099')).toBe(true);
+    expect(activeCount()).toBe(1); // exactly one active alert
+    expect(raiseAlert(db, outbox, 'holiday_calendar_stale', NOW, 'year 2099 again')).toBe(false); // deduped
+    expect(activeCount()).toBe(1); // still one
+
+    const later = '2026-06-10T11:00:00.000Z';
+    expect(resolveAlert(db, outbox, 'holiday_calendar_stale', later, '—')).toBe(true);
+    expect(activeCount()).toBe(0); // resolved_at set → no longer active
+
+    const resolved = db
+      .prepare(
+        "SELECT resolved_at FROM system_events WHERE event_type='system_alert' AND dedup_key='holiday_calendar_stale'",
+      )
+      .get() as { resolved_at: string | null };
+    expect(resolved.resolved_at).toBe(later);
+
+    // After a resolve the kind re-arms for a future uncurated year.
+    expect(raiseAlert(db, outbox, 'holiday_calendar_stale', later, 'year 2100')).toBe(true);
+  });
 });
