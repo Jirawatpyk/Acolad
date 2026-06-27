@@ -200,17 +200,19 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
 
 - **gate ตัดสินระดับ bulk-group all-or-nothing** — `bulkGroupKey` = **language-only**
   (ตรงกับ `byLang` ของ `xtmAccept.ts`; กลุ่มผ่านเมื่อทุกตัวผ่าน) กัน "owned-but-Rejected"
-  ที่ bulk คลิกเดียวคว้าทั้งกลุ่ม (irreversible). **release gate**: verify ขอบเขต portal
-  bulk-group == project ก่อนปรับเป็น `(lang,project)`
+  ที่ bulk คลิกเดียวคว้าทั้งกลุ่ม (irreversible). **ปิดด้วยข้อมูล (2026-06-27)**: Sheet 14/14
+  รอบมี Malay 1 project/รอบ (0 รอบที่มี ≥2 project) → language-only = 1 project/รอบอยู่แล้ว →
+  ปรับเป็น `(lang,project)` ได้ผลเหมือนเดิม **ไม่จำเป็น** (revisit เมื่อเริ่มเห็นหลาย project/รอบ)
 - **throughput derived จาก capacity** (`ACCEPT_MAX_WORDS_PER_DAY ÷ ชม.ทำงาน/วัน ≈ 111`) —
   ปุ่มเดียว; override ได้ด้วย `ACCEPT_THROUGHPUT_WORDS_PER_HOUR` (config refine ทั้งหมด
   gate หลัง `ACCEPT_SCHEDULE_ENABLED` เพื่อให้ kill-switch ปิดได้เสมอ)
 - **วันหยุด = ไฟล์กรอกมือ** `schedule/thaiHolidaysData.ts` (`HOLIDAYS` + `CURATED_YEARS`)
-  ไม่มี library — ทีมหยุดเฉพาะ **นักขัตฤกษ์** ไม่ตาม ครม. (library จะใส่วัน ครม.ที่ทีม
-  ทำงาน → reject ผิด; ดู [[acolad-holidays-nakkhatrik-not-cabinet]]). ปี **uncurated**
+  ไม่มี library — ทีมหยุด **นักขัตฤกษ์ + วันชดเชย (in-lieu)** แต่ไม่หยุด **วันหยุดพิเศษ ครม.**
+  (long-weekend bridges → library จะใส่วันพิเศษที่ทีมทำงาน → reject ผิด; ดู
+  [[acolad-holidays-nakkhatrik-not-cabinet]]). ปี **uncurated**
   (ไม่อยู่ใน `CURATED_YEARS`) → accept **fail-closed** (Reject + `holiday_calendar_stale`),
-  report **fail-open** (ส่งปกติ). **release gate**: ยืนยันวันที่ 2026 + เพิ่ม **2027**
-  (HOLIDAYS+CURATED_YEARS) ก่อนสิ้นปี — **ห้าม mark curated จนรายการครบ+ถูก**
+  report **fail-open** (ส่งปกติ). **2026 แก้ in-lieu + 2027 เพิ่ม+curated แล้ว (PR #11)** — เหลือ
+  reconfirm วันจันทรคติ 2027 (มาฆ/วิสาข/อาสาฬห/เข้าพรรษา) กับประกาศราชกิจจาฯ ทางการเมื่อออก
 - daily report 09:00 (`dailyReport.ts`) ส่ง **เฉพาะวันทำการ** (ข้ามเสาร์-อาทิตย์+วันหยุด,
   PR #8); ตัวนับคำต่อวันใน `state/meta.ts` reset เที่ยงคืน Bangkok, เพิ่มใน txn เดียวกับ
   `recordAcceptOutcome`. ทุกวันที่ Bangkok คำนวณผ่าน `schedule/bangkokCalendar.ts` (canonical)
