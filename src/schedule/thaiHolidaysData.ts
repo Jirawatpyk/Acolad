@@ -30,5 +30,7 @@ export const HOLIDAYS: Record<string, Record<string, string>> = {
   },
   // 2027 to be added (both HOLIDAYS and CURATED_YEARS) by the team before it is
   // needed — curate with real นักขัตฤกษ์ dates before December 2026. Until then 2027
-  // stays uncurated so any 2027-deadline job fail-closes (Reject + holiday_calendar_stale).
+  // stays uncurated so any job with a 2027-deadline span fail-closes (per-job Reject).
+  // The holiday_calendar_stale SYSTEM alert fires only when the CURRENT Bangkok year is
+  // uncurated — not for a far deadline into an uncurated future year.
 };

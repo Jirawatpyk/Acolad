@@ -127,7 +127,9 @@ const schema = z
   .transform((c) => {
     const hoursStartMin = parseHHMM(c.ACCEPT_HOURS_START);
     const hoursEndMin = parseHHMM(c.ACCEPT_HOURS_END);
-    const workdays = parseWorkdays(c.ACCEPT_WORKDAYS);
+    // ReadonlySet: consumers only `.has()` it; typing it read-only stops a caller from
+    // mutating the shared derived config (Set is assignable to ReadonlySet).
+    const workdays: ReadonlySet<number> = parseWorkdays(c.ACCEPT_WORKDAYS);
     const throughputWordsPerHour = resolveThroughput({
       // exactOptionalPropertyTypes: only include 'explicit' when it has a number value
       ...(c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR !== undefined

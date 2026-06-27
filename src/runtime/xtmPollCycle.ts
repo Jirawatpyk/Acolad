@@ -144,7 +144,7 @@ export class XtmPollCycle {
     // Schedule-gate state (Task 12). nowMs = the snapshot clock; today/counter keyed to
     // Bangkok. acceptedWordsToday is read ONCE then advanced optimistically per accepted
     // group within this cycle so multiple groups respect the daily cap (§5).
-    const scheduleEnabled = this.cfg.ACCEPT_SCHEDULE_ENABLED === true;
+    const scheduleEnabled = this.cfg.ACCEPT_SCHEDULE_ENABLED;
     const today = bangkokDateString(detectedMs);
     let acceptedWordsToday = this.meta.acceptedWordsToday(today);
     // Jobs whose decideAccept() → accept, collected from BOTH passes BEFORE the schedule
@@ -307,13 +307,14 @@ export class XtmPollCycle {
       // uncurated NEXT year still fail-closes per-job via holidaysCuratedForSpan above — it
       // just no longer raises this SYSTEM alert. Guarded behind ENABLED — a disabled feature
       // never resolves holidays or pages.
-      if (!getThaiHolidays(bangkokYear(detectedMs)).curated) {
+      const currentYear = bangkokYear(detectedMs);
+      if (!getThaiHolidays(currentYear).curated) {
         raiseAlert(
           this.db,
           this.outbox,
           'holiday_calendar_stale',
           snapshot.capturedAt,
-          `the current year (${bangkokYear(detectedMs)}) has no curated holiday list in src/schedule/thaiHolidaysData.ts`,
+          `the current year (${currentYear}) has no curated holiday list in src/schedule/thaiHolidaysData.ts`,
         );
       } else {
         resolveAlert(this.db, this.outbox, 'holiday_calendar_stale', snapshot.capturedAt, '—');
@@ -465,7 +466,11 @@ export class XtmPollCycle {
           s,
           outcome,
           snapshot.capturedAt,
-          blockNotes.get(jobKey),
+          // Reuse the note already resolved above (E6) — the schedule-reject reason for a
+          // rejected job, otherwise undefined. (For failed/missing outcomes `note` carries
+          // the failure text, but chatForEvent's outcome branch handles those before it
+          // reads rejectReason, so passing it here is harmless.)
+          note ?? undefined,
         );
         if (card) {
           this.outbox.enqueue(`chat:${base}`, JSON.stringify(card), snapshot.capturedAt, 'chat');
@@ -586,11 +591,13 @@ export class XtmPollCycle {
       words: s.words,
       acceptedWordsToday,
       maxWordsPerDay: this.cfg.ACCEPT_MAX_WORDS_PER_DAY,
-      hoursStartMin: this.cfg.hoursStartMin,
-      hoursEndMin: this.cfg.hoursEndMin,
-      workdays: this.cfg.workdays,
       throughputWordsPerHour: this.cfg.throughputWordsPerHour,
-      holidays,
+      calendar: {
+        workdays: this.cfg.workdays,
+        hoursStartMin: this.cfg.hoursStartMin,
+        hoursEndMin: this.cfg.hoursEndMin,
+        holidays,
+      },
       holidaysCuratedForSpan: curated,
     });
   }

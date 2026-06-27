@@ -1,4 +1,4 @@
-import { bangkokCalendar } from './bangkokCalendar.js';
+import { bangkokCalendar, bangkokYear } from './bangkokCalendar.js';
 import { isNonWorkingDay, workingMinutesBetween, type WorkCalendar } from './workingHours.js';
 
 export interface AcceptScheduleInput {
@@ -8,11 +8,9 @@ export interface AcceptScheduleInput {
   words: number | null;
   acceptedWordsToday: number;
   maxWordsPerDay: number;
-  hoursStartMin: number;
-  hoursEndMin: number;
-  workdays: Set<number>;
   throughputWordsPerHour: number;
-  holidays: Map<string, string>;
+  /** Working-day window + holidays. Embeds WorkCalendar directly (no flattened copy). */
+  calendar: WorkCalendar;
   holidaysCuratedForSpan: boolean;
 }
 
@@ -33,11 +31,11 @@ export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVe
     // Name the whole now→deadline span (F8) — naming only the deadline year is wrong
     // when the UNcurated year is the now-year (a past-deadline edge can put the deadline
     // in a curated year). Collapse to one year when the span stays within a single year.
-    const ya = bangkokCalendar(i.nowMs).date.slice(0, 4);
-    const yb = bangkokCalendar(i.dueAtMs).date.slice(0, 4);
+    const yNow = bangkokYear(i.nowMs);
+    const yDue = bangkokYear(i.dueAtMs);
     // Sort so the range never renders backwards (e.g. a past-deadline edge where now > due).
-    const [y0, y1] = ya <= yb ? [ya, yb] : [yb, ya];
-    const range = y0 === y1 ? y0 : `${y0}–${y1}`;
+    const [y0, y1] = yNow <= yDue ? [yNow, yDue] : [yDue, yNow];
+    const range = y0 === y1 ? `${y0}` : `${y0}–${y1}`;
     return {
       allow: false,
       reason: `holiday calendar not confirmed for the job's date range (${range})`,
@@ -45,26 +43,22 @@ export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVe
   }
 
   const dl = bangkokCalendar(i.dueAtMs);
-  if (isNonWorkingDay(dl.date, dl.weekday, i.workdays, i.holidays)) {
-    const why = i.holidays.has(dl.date) ? `holiday: ${i.holidays.get(dl.date)}` : 'weekend';
+  if (isNonWorkingDay(dl.date, dl.weekday, i.calendar.workdays, i.calendar.holidays)) {
+    const why = i.calendar.holidays.has(dl.date)
+      ? `holiday: ${i.calendar.holidays.get(dl.date)}`
+      : 'weekend';
     return { allow: false, reason: `deadline on a non-working day (${why})` };
   }
 
   if (i.dueAtMs <= i.nowMs) return { allow: false, reason: 'deadline already passed' };
 
-  const cal: WorkCalendar = {
-    workdays: i.workdays,
-    hoursStartMin: i.hoursStartMin,
-    hoursEndMin: i.hoursEndMin,
-    holidays: i.holidays,
-  };
   // Subtract a tiny epsilon before ceil (F10): a derived throughput (e.g. 100/9)
   // can make an EXACT integer-minute requirement land as N+ε (IEEE-754), which a
   // naive ceil would round up to N+1, falsely demanding one extra minute at the
   // boundary. The epsilon collapses N+ε back to N without affecting a genuine
   // fractional (N.5 stays N+1).
   const requiredMin = Math.ceil((i.words / i.throughputWordsPerHour) * 60 - 1e-9);
-  const availMin = workingMinutesBetween(i.nowMs, i.dueAtMs, cal, requiredMin);
+  const availMin = workingMinutesBetween(i.nowMs, i.dueAtMs, i.calendar, requiredMin);
   if (availMin >= requiredMin) return { allow: true };
   return {
     allow: false,
