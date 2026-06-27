@@ -8,6 +8,8 @@ import { GoogleChatSender, type ChatSender } from '../reporting/googleChat.js';
 import type { SheetSender } from '../reporting/sheets.js';
 import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
 import { bangkokDate, buildDailyReportCard, dueDailyReport } from '../reporting/dailyReport.js';
+import { getThaiHolidays } from '../schedule/thaiHolidays.js';
+import { bangkokYear } from '../schedule/bangkokCalendar.js';
 import { Heartbeat, type HeartbeatPinger } from '../monitoring/heartbeat.js';
 import type { XtmPortalClient } from '../portal/xtmClient.js';
 import { XtmPollCycle } from './xtmPollCycle.js';
@@ -314,10 +316,17 @@ export class XtmPollLoop {
       // between them can't double-send or lose the sent date). Non-fatal: a throw
       // is logged and swallowed so detection is never blocked (Constitution IV).
       // Meta stays unset on failure so the next cycle retries.
-      if (dueDailyReport(this.clock.nowMs(), this.meta.lastDailyReportDate)) {
-        // Capture the clock + Bangkok date ONCE (E2) so the card, the word-counter read,
-        // and the meta write all key off the identical instant — no intra-block drift.
-        const nowMs = this.clock.nowMs();
+      // Capture the clock ONCE (E2) so the dueDailyReport guard, the card builder,
+      // the word-counter read, and the meta write all key off the identical instant.
+      const nowMs = this.clock.nowMs();
+      if (
+        dueDailyReport(
+          nowMs,
+          this.meta.lastDailyReportDate,
+          this.cfg.workdays,
+          getThaiHolidays(bangkokYear(nowMs)).holidays,
+        )
+      ) {
         const date = bangkokDate(nowMs);
         const held = this.store.listByLifecycle('accepted');
         const card = buildDailyReportCard(

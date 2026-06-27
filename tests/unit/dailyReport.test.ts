@@ -28,30 +28,72 @@ describe('bangkokDate', () => {
 // dueDailyReport
 // ---------------------------------------------------------------------------
 describe('dueDailyReport', () => {
+  const WORKDAYS_MON_FRI = new Set([1, 2, 3, 4, 5]); // ISO weekdays: Mon=1..Fri=5
+  const NO_HOLIDAYS = new Map<string, string>();
+
+  // Thu 2026-06-25 at various Bangkok times
   const T08_BKK = Date.parse('2026-06-25T01:00:00Z'); // 08:00 Bangkok (UTC+7)
   const T10_BKK = Date.parse('2026-06-25T03:00:00Z'); // 10:00 Bangkok (UTC+7)
 
+  // ---------- existing behaviour (Thursday 2026-06-25 — a working day) ----------
+
   it('returns false when Bangkok hour < 09 (before the trigger window)', () => {
-    expect(dueDailyReport(T08_BKK, null)).toBe(false);
+    expect(dueDailyReport(T08_BKK, null, WORKDAYS_MON_FRI, NO_HOLIDAYS)).toBe(false);
   });
 
   it('returns true at 10:00 Bangkok when lastSentDate is yesterday', () => {
-    expect(dueDailyReport(T10_BKK, '2026-06-24')).toBe(true);
+    expect(dueDailyReport(T10_BKK, '2026-06-24', WORKDAYS_MON_FRI, NO_HOLIDAYS)).toBe(true);
   });
 
   it('returns false at 10:00 Bangkok when lastSentDate is today (already sent)', () => {
-    expect(dueDailyReport(T10_BKK, '2026-06-25')).toBe(false);
+    expect(dueDailyReport(T10_BKK, '2026-06-25', WORKDAYS_MON_FRI, NO_HOLIDAYS)).toBe(false);
   });
 
   it('returns true when lastSentDate is null and Bangkok hour >= 09', () => {
-    expect(dueDailyReport(T10_BKK, null)).toBe(true);
+    expect(dueDailyReport(T10_BKK, null, WORKDAYS_MON_FRI, NO_HOLIDAYS)).toBe(true);
   });
 
   it('respects a custom hour threshold', () => {
     // 10:00 BKK but threshold is 11 → not yet due
-    expect(dueDailyReport(T10_BKK, null, 11)).toBe(false);
+    expect(dueDailyReport(T10_BKK, null, WORKDAYS_MON_FRI, NO_HOLIDAYS, 11)).toBe(false);
     // 10:00 BKK with threshold 10 → due
-    expect(dueDailyReport(T10_BKK, null, 10)).toBe(true);
+    expect(dueDailyReport(T10_BKK, null, WORKDAYS_MON_FRI, NO_HOLIDAYS, 10)).toBe(true);
+  });
+
+  // ---------- working-day gate (new) ----------
+
+  // TZ-explicit epochs so the test is identical in UTC (CI) and Bangkok (dev machine).
+  // Mon 2026-06-22: weekday=1 (ISO Mon=1). Sat 2026-06-20: weekday=6 (ISO Sat=6).
+  const MON_09_00 = Date.parse('2026-06-22T09:00:00+07:00'); // Mon 2026-06-22 09:00 BKK
+  const MON_08_59 = Date.parse('2026-06-22T08:59:00+07:00'); // Mon 2026-06-22 08:59 BKK
+  const MON_10_00 = Date.parse('2026-06-22T10:00:00+07:00'); // Mon 2026-06-22 10:00 BKK
+  const SAT_10_00 = Date.parse('2026-06-20T10:00:00+07:00'); // Sat 2026-06-20 10:00 BKK
+
+  it('working weekday at 09:00 BKK (not yet sent) → true', () => {
+    expect(dueDailyReport(MON_09_00, null, WORKDAYS_MON_FRI, NO_HOLIDAYS)).toBe(true);
+  });
+
+  it('working weekday before 09:00 BKK → false', () => {
+    expect(dueDailyReport(MON_08_59, null, WORKDAYS_MON_FRI, NO_HOLIDAYS)).toBe(false);
+  });
+
+  it('working weekday already-sent today → false', () => {
+    expect(dueDailyReport(MON_10_00, '2026-06-22', WORKDAYS_MON_FRI, NO_HOLIDAYS)).toBe(false);
+  });
+
+  it('Saturday at 10:00 BKK (not sent) → false (weekend skipped)', () => {
+    expect(dueDailyReport(SAT_10_00, null, WORKDAYS_MON_FRI, NO_HOLIDAYS)).toBe(false);
+  });
+
+  it('weekday in holidays map → false (holiday skipped)', () => {
+    const holidays = new Map([['2026-06-22', 'Test Holiday']]);
+    expect(dueDailyReport(MON_10_00, null, WORKDAYS_MON_FRI, holidays)).toBe(false);
+  });
+
+  it('weekday with empty holidays map (uncurated year fail-open) → true', () => {
+    // An empty holidays map means the year is uncurated — report still fires.
+    // A missed report is worse than an extra one; do NOT suppress on uncurated years.
+    expect(dueDailyReport(MON_10_00, null, WORKDAYS_MON_FRI, NO_HOLIDAYS)).toBe(true);
   });
 });
 
