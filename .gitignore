@@ -27,3 +27,6 @@ __pycache__/
 # OS
 Thumbs.db
 .DS_Store
+
+# Claude Code per-agent scratch memory (machine-local)
+.claude/agent-memory/
