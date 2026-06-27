@@ -1,12 +1,12 @@
 /**
- * Daily 09:00 Bangkok "Jobs in Progress" report helpers.
+ * Daily 09:00 Bangkok "Daily Report" helpers.
  *
  * TZ-IMPORTANT: The bot has no process timezone set. All Bangkok math is done
  * by adding 7 h to the epoch milliseconds then reading UTC parts — NEVER
  * getHours()/toLocaleString()/process.env.TZ.
  */
 
-import { buildCard } from './chatCard.js';
+import { buildCard, type CardRow } from './chatCard.js';
 import { formatReadableDate } from './dateFormat.js';
 import { dash } from './cardText.js';
 import { bangkokCalendar, bangkokDateString } from '../schedule/bangkokCalendar.js';
@@ -57,40 +57,79 @@ export function dueDailyReport(
 /**
  * Builds the Google Chat cardsV2 payload for the daily in-progress jobs report.
  *
- * @param held                Jobs currently in lifecycle_status='accepted'.
- * @param nowMs               Current epoch ms (for the date header / card ID).
- * @param xtmUrl              Deep-link to XTM Active task list.
- * @param acceptedWordsToday  Running word total auto-accepted today (Bangkok date).
- * @param maxWordsPerDay      Daily word cap from config (0 = no cap).
+ * Layout:
+ * - "Due today" headline: words whose Bangkok deadline date is today (day-bucket,
+ *   not instant) — includes night-accepted jobs due today even if already past NOW.
+ * - "⚠️ Overdue" row (instant-based): present only when at least one held job's
+ *   deadline ms is strictly before nowMs.
+ * - Up to 5 job rows, sorted by deadline asc (null/unparseable → last).
+ * - "(+N more)" marker when N > 0.
+ *
+ * TOTAL function — never throws for any held input (null/unparseable dueDate,
+ * null words, empty list).
+ *
+ * @param held           Jobs currently in lifecycle_status='accepted'.
+ * @param nowMs          Current epoch ms (for the date header / card ID / overdue).
+ * @param xtmUrl         Deep-link to XTM Active task list.
+ * @param maxWordsPerDay Daily word cap from config (0 = no cap).
  */
 export function buildDailyReportCard(
   held: XtmJobState[],
   nowMs: number,
   xtmUrl: string,
-  acceptedWordsToday: number,
   maxWordsPerDay: number,
 ): { cardsV2: unknown[] } {
-  const date = bangkokDate(nowMs);
+  const today = bangkokDate(nowMs);
+
+  // Returns the deadline as epoch ms, or +Infinity for null/unparseable (sorts last).
+  const dueMs = (j: XtmJobState): number => {
+    const t = j.dueDate ? Date.parse(j.dueDate) : NaN;
+    return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
+  };
+
+  // Pass 1: compute "Due today" word bucket and collect overdue jobs.
+  // Only jobs with a parseable finite deadline contribute to either metric.
+  let dueTodayWords = 0;
+  const overdue: XtmJobState[] = [];
+  for (const j of held) {
+    const ms = dueMs(j);
+    if (!Number.isFinite(ms)) continue;
+    if (ms < nowMs) overdue.push(j);
+    if (bangkokDate(ms) === today) dueTodayWords += j.words ?? 0; // day-bucket (not instant)
+  }
 
   const usage =
     maxWordsPerDay > 0
-      ? `${acceptedWordsToday} / ${maxWordsPerDay}`
-      : `${acceptedWordsToday} words (no cap)`;
-  const capacityRow = { label: 'Auto-accepted today', value: usage };
+      ? `${dueTodayWords} words (cap ${maxWordsPerDay}/day per deadline)`
+      : `${dueTodayWords} words (no cap)`;
 
-  const jobRows =
-    held.length > 0
-      ? held.map((j) => ({
-          label: dash(j.projectName),
-          value: `${dash(j.fileName)} · due ${formatReadableDate(j.dueDate ?? j.dueRaw ?? null) || '—'} · ${j.words != null ? `${j.words}w` : '—'}`,
-        }))
-      : [{ label: '—', value: 'No jobs in progress' }];
+  const rows: CardRow[] = [{ label: 'Due today', value: usage }];
+
+  if (overdue.length > 0) {
+    const w = overdue.reduce((a, j) => a + (j.words ?? 0), 0);
+    rows.push({ emoji: '⚠️', label: 'Overdue', value: `${overdue.length} job(s) · ${w} words` });
+  }
+
+  // Pass 2: top-5 job rows, sorted by deadline asc (tie-break by jobKey).
+  const sorted = [...held].sort((a, b) => dueMs(a) - dueMs(b) || a.jobKey.localeCompare(b.jobKey));
+  const top = sorted.slice(0, 5);
+  const overdueSet = new Set(overdue.map((j) => j.jobKey));
+  for (const j of top) {
+    const label = dash(j.projectName);
+    const value = `${formatReadableDate(j.dueDate ?? j.dueRaw ?? null) || '—'} · ${dash(j.fileName)} · ${j.words != null ? `${j.words}w` : '—'}`;
+    // Use a ternary rather than `emoji: undefined` — exactOptionalPropertyTypes forbids the latter.
+    rows.push(overdueSet.has(j.jobKey) ? { emoji: '⚠️', label, value } : { label, value });
+  }
+  const more = sorted.length - top.length;
+  if (more > 0) rows.push({ label: '—', value: `(+${more} more)` });
+
+  // Header date: YYYY-MM-DD → DD/MM/YYYY via formatReadableDate (TZ-safe, same helper).
+  const headerDate = formatReadableDate(`${today}T00:00:00+07:00`)?.slice(0, 10) ?? today;
 
   return buildCard({
-    cardId: `daily-${date}`,
-    headerTitle: `📋 Jobs in Progress (${held.length})`,
-    headerSubtitle: date,
-    rows: [capacityRow, ...jobRows],
+    cardId: `daily-${today}`,
+    headerTitle: `📋 Daily Report — ${headerDate}`,
+    rows,
     buttonUrl: xtmUrl,
     buttonText: 'Open in XTM',
   });

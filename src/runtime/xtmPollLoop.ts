@@ -351,7 +351,6 @@ export class XtmPollLoop {
           held,
           nowMs,
           this.cfg.XTM_ACOLAD_OFFERS_URL,
-          this.meta.acceptedWordsToday(date),
           this.cfg.ACCEPT_MAX_WORDS_PER_DAY,
         );
         try {
