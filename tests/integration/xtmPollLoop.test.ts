@@ -741,6 +741,136 @@ describe('XtmPollLoop — daily_report_dead alert when team row dies', () => {
 });
 
 // ---------------------------------------------------------------------------
+// C1: holiday_calendar_stale (current Bangkok year uncurated) fails the heartbeat → pages
+// ---------------------------------------------------------------------------
+
+describe('XtmPollLoop — holiday_calendar_stale pages on-call (C1)', () => {
+  // Schedule gate fields the loop cfg() does not set (Task 9 derives these in loadConfig).
+  const SCHED = {
+    ACCEPT_SCHEDULE_ENABLED: true,
+    ACCEPT_MAX_WORDS_PER_DAY: 1000,
+    hoursStartMin: 9 * 60,
+    hoursEndMin: 18 * 60,
+    workdays: new Set([1, 2, 3, 4, 5]),
+    throughputWordsPerHour: 1000 / 9,
+  };
+  // The gate keys its Bangkok-year check off snapshot.capturedAt; the loop clock (NOW, 2026)
+  // only drives daily-report/heartbeat timing — kept at 2026 so the daily report path is
+  // identical in both cases and the only variable is the snapshot's Bangkok year.
+  const staleSnap: XtmJobSnapshot = {
+    jobs: [],
+    malformed: [],
+    capturedAt: '2099-06-22T10:00:00+07:00', // uncurated current Bangkok year → total outage
+    pollCycleId: 'c1',
+    emptyListConfirmed: true,
+  };
+
+  it('an uncurated current-year cycle fails the heartbeat (total auto-accept outage pages)', async () => {
+    fresh();
+    const client = new StubClient();
+    client.snapshot = staleSnap;
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ ...SCHED } as Partial<AppConfig>),
+      noopLogger,
+      clock,
+      {
+        chatSender: okChat,
+        teamChatSender: okChat,
+        sheetSender: new CapturingSheet(),
+        heartbeat,
+      },
+    );
+    expect(await loop.runOnce()).toBe(false); // unhealthy — auto-accept is fully paused
+    expect(heartbeat.fail).toHaveBeenCalledTimes(1);
+    expect(heartbeat.ok).not.toHaveBeenCalled();
+  });
+
+  it('a curated current-year cycle keeps the heartbeat green', async () => {
+    fresh();
+    const client = new StubClient();
+    client.snapshot = { ...staleSnap, capturedAt: NOW }; // 2026 — curated current year
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ ...SCHED } as Partial<AppConfig>),
+      noopLogger,
+      clock,
+      {
+        chatSender: okChat,
+        teamChatSender: okChat,
+        sheetSender: new CapturingSheet(),
+        heartbeat,
+      },
+    );
+    expect(await loop.runOnce()).toBe(true);
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1);
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// I1: the loop logs one structured warn line per schedule-gate reject
+// ---------------------------------------------------------------------------
+
+describe('XtmPollLoop — schedule-gate reject logging (I1)', () => {
+  const SCHED = {
+    ACCEPT_ENABLED: true,
+    ACCEPT_SCHEDULE_ENABLED: true,
+    ACCEPT_MAX_WORDS_PER_DAY: 1000,
+    hoursStartMin: 9 * 60,
+    hoursEndMin: 18 * 60,
+    workdays: new Set([1, 2, 3, 4, 5]),
+    throughputWordsPerHour: 1000 / 9,
+  };
+
+  it('logs one warn line per reject with the binding reason/words/dueDate', async () => {
+    fresh();
+    const client = new StubClient();
+    // capturedAt = NOW (2026-06-19 17:00 BKK, Friday). 5000 words due 18:00 same day →
+    // ~60 working min available → "cannot finish in time" → schedule-rejected.
+    const tightDue = '2026-06-19T18:00:00+07:00';
+    client.snapshot = snap([xraw({ dueDate: tightDue, words: 5000 })]);
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ ...SCHED } as Partial<AppConfig>),
+      noopLogger,
+      clock,
+      {
+        chatSender: okChat,
+        teamChatSender: okChat,
+        sheetSender: new CapturingSheet(),
+        heartbeat,
+      },
+    );
+
+    await loop.runOnce();
+
+    const rejectLogs = noopLogger.warn.mock.calls.filter(
+      (c) =>
+        (c[0] as { module?: string }).module === 'scheduleGate' &&
+        (c[0] as { action?: string }).action === 'reject',
+    );
+    expect(rejectLogs).toHaveLength(1);
+    const meta = rejectLogs[0]![0] as {
+      jobKey: string;
+      reason: string;
+      words: number | null;
+      dueDate: string | null;
+    };
+    expect(meta.reason).toContain('cannot finish'); // the WHY, not just a count
+    expect(meta.words).toBe(5000);
+    expect(meta.dueDate).toBe(tightDue);
+    expect(meta.jobKey.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // auto-yield state machine (Task 6)
 // ---------------------------------------------------------------------------
 

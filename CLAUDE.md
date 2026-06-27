@@ -215,6 +215,20 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
   PR #8); ตัวนับคำต่อวันใน `state/meta.ts` reset เที่ยงคืน Bangkok, เพิ่มใน txn เดียวกับ
   `recordAcceptOutcome`. ทุกวันที่ Bangkok คำนวณผ่าน `schedule/bangkokCalendar.ts` (canonical)
 
+**runbook ของ gate:**
+
+- **"ทำไมบอทไม่กดงาน X":** เปิด Google Sheet → ดู Status `Rejected` + reason ในคอลัมน์
+  Note (และ pino log `module:scheduleGate action:reject` — มี jobKey/reason/words/dueDate) →
+  ถ้าเหตุผลผิด (holiday ผิด / throughput ต่ำ / cap) แก้ config แล้ว `npm run deploy`.
+- **kill-switch:** `ACCEPT_SCHEDULE_ENABLED=0` + `npm run deploy` = กลับพฤติกรรมก่อน PR #7
+  byte-for-byte (config refines ถูก gate ด้วย ENABLED → ปิดได้เสมอแม้ค่าอื่นเพี้ยน).
+- **พฤติกรรมปกติ (ไม่ใช่ bug):** Malay = ภาษาเดียว = 1 bulk-group/รอบ → งาน
+  infeasible/uncurated 1 ตัว → Malay **ทั้งรอบ**ถูก Reject (conservative all-or-nothing
+  กัน owned-but-Rejected) — robustness pass ลองใหม่รอบหน้า.
+- **page เพิ่ม:** `holiday_calendar_stale` (ปีปัจจุบัน uncurated) ตอนนี้ **fail heartbeat
+  → page** (auto-accept ดับทั้งระบบ); `daily_cap_reached` = warn (Chat) แจ้งครั้งเดียว/วัน
+  Bangkok เมื่อ budget คำ/วันเต็มจริง (ไม่ใช่งานเดี่ยวใหญ่เกิน cap).
+
 ## ข้อควรระวังเฉพาะโปรเจกต์
 
 - **Secrets อยู่ใน `.env` เท่านั้น** (gitignored): portal credentials,

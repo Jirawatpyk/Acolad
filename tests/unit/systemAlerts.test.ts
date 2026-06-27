@@ -221,15 +221,48 @@ describe('yield alert triggers', () => {
 });
 
 // ---------------------------------------------------------------------------
+// I3b: daily_cap_reached trigger
+// ---------------------------------------------------------------------------
+
+describe('raiseAlert — daily_cap_reached (I3b)', () => {
+  it('is a warn trigger that does not auto-recover', () => {
+    const t = TRIGGERS['daily_cap_reached'];
+    expect(t.severity).toBe('warn');
+    expect(t.hasRecovered).toBe(false);
+    expect(t.title.length).toBeGreaterThan(0);
+  });
+
+  it('dedups per Bangkok day via the dedup key, re-arming on the next day', () => {
+    expect(
+      raiseAlert(db, outbox, 'daily_cap_reached', NOW, 'cap', {}, 'daily_cap_reached:2026-06-10'),
+    ).toBe(true);
+    expect(
+      raiseAlert(db, outbox, 'daily_cap_reached', NOW, 'cap', {}, 'daily_cap_reached:2026-06-10'),
+    ).toBe(false); // same day → deduped
+    expect(
+      raiseAlert(db, outbox, 'daily_cap_reached', NOW, 'cap', {}, 'daily_cap_reached:2026-06-11'),
+    ).toBe(true); // next Bangkok day re-arms
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Task 10: holiday_calendar_stale trigger
 // ---------------------------------------------------------------------------
 
 describe('raiseAlert — holiday_calendar_stale', () => {
-  it('holiday_calendar_stale is a warn trigger that recovers', () => {
+  it('holiday_calendar_stale is a CRITICAL trigger that recovers (C1 — current-year outage pages on-call)', () => {
     const t = TRIGGERS['holiday_calendar_stale'];
-    expect(t.severity).toBe('warn');
+    expect(t.severity).toBe('critical'); // escalated from warn — a total auto-accept outage
     expect(t.hasRecovered).toBe(true);
     expect(t.title.length).toBeGreaterThan(0);
+  });
+
+  it('holiday_calendar_stale action names the fix (curate the current year then npm run deploy)', () => {
+    raiseAlert(db, outbox, 'holiday_calendar_stale', NOW, 'year 2099');
+    const json = cardJson(firstPayload());
+    expect(json).toContain('thaiHolidaysData.ts');
+    expect(json).toContain('npm run deploy');
+    expect(json).toContain('🔴'); // critical emoji (was ⚠️ when it was warn)
   });
 
   // F2: behavioral (not just a constant check) — raise → dedup → resolve, mirroring yield_stuck.

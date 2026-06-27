@@ -282,6 +282,24 @@ export class XtmPollLoop {
         );
       }
 
+      // I1: one structured warn line per schedule-gate reject. The binding reason lives only
+      // in the Chat/Sheet outbox payload otherwise — this leaves a grep-able log trail of WHY
+      // a job was blocked (not just the scheduleBlocked count). Surfaced via the summary so
+      // XtmPollCycle stays logger-free (consistent with acceptLatencies above).
+      for (const r of summary.scheduleRejects) {
+        this.logger.warn(
+          {
+            module: 'scheduleGate',
+            action: 'reject',
+            jobKey: r.jobKey,
+            reason: r.reason,
+            words: r.words,
+            dueDate: r.dueDate,
+          },
+          'job blocked by schedule gate',
+        );
+      }
+
       // ACCEPT_RECON (accept off): capture the live accept-menu DOM for the first
       // eligible job — hover only, NEVER accepts — while it is still in Active this
       // cycle (beats the < 1 min snatch window). Best-effort; a one-time Chat ping
@@ -421,7 +439,11 @@ export class XtmPollLoop {
       const stuck =
         yieldStuckNow ||
         this.nonTeamFailureThisFlush ||
-        this.outbox.countDeadExcludingChannel('team') > 0;
+        this.outbox.countDeadExcludingChannel('team') > 0 ||
+        // C1: an uncurated CURRENT Bangkok year = total auto-accept outage. Fail the
+        // heartbeat so Healthchecks pages; the cycle resolves the alert (and clears this
+        // flag) once the year is curated, flipping the heartbeat back to ok.
+        summary.holidayCalendarStale;
       if (stuck) {
         await this.heartbeat.fail();
       } else {
@@ -445,6 +467,7 @@ export class XtmPollLoop {
           accepted: summary.accepted,
           skipped: summary.skipped,
           scheduleBlocked: summary.scheduleBlocked,
+          holidayCalendarStale: summary.holidayCalendarStale,
           failed: summary.failed,
           dead: disp.dead,
         },

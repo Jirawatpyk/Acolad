@@ -62,6 +62,25 @@ export interface XtmCycleSummary {
   reconEligible: AcceptTarget[];
   /** Jobs the schedule gate blocked this cycle (per member of a rejected bulk group). */
   scheduleBlocked: number;
+  /**
+   * True when the CURRENT Bangkok year has no curated holiday list while the schedule
+   * gate is ON — a TOTAL auto-accept outage (every job fail-closes). The loop threads
+   * this into its heartbeat `stuck` gate so Healthchecks pages on-call (C1). False on
+   * every other path (gate disabled, current year curated).
+   */
+  holidayCalendarStale: boolean;
+  /**
+   * One entry per job the schedule gate blocked this cycle, carrying the binding reject
+   * reason + the fields needed to debug it (I1). The cycle stays logger-free (like
+   * acceptLatencies); the loop logs these as structured warn lines so the FIRST real
+   * rejection leaves a trail of WHY, not just a count.
+   */
+  scheduleRejects: {
+    jobKey: string;
+    reason: string;
+    words: number | null;
+    dueDate: string | null;
+  }[];
 }
 
 /**
@@ -139,6 +158,8 @@ export class XtmPollCycle {
       acceptLatencies: [],
       reconEligible: [],
       scheduleBlocked: 0,
+      holidayCalendarStale: false,
+      scheduleRejects: [],
     };
     const detectedMs = Date.parse(snapshot.capturedAt);
     // Schedule-gate state (Task 12). nowMs = the snapshot clock; today/counter keyed to
@@ -282,8 +303,17 @@ export class XtmPollCycle {
         // Group-level capacity: the bulk grabs every member at once, so the COMBINED words
         // (not a per-job slice) must fit the remaining cap. A single accepted group may
         // overshoot by its own size — accepted + documented (§5), same class as the cap.
+        // I3a: split the two distinct causes. A group whose OWN words exceed the whole cap
+        // can NEVER auto-accept on any day (needs a human); a group that merely exhausts the
+        // remaining budget is a "paused for today" condition (and raises daily_cap_reached).
+        let capExhausted = false;
         if (blockReason === null && cap > 0 && acceptedWordsToday + groupWords > cap) {
-          blockReason = `daily word cap reached (${acceptedWordsToday + groupWords}/${cap})`;
+          if (groupWords > cap) {
+            blockReason = `group words (${groupWords}) exceed the daily cap (${cap}) — accept manually`;
+          } else {
+            blockReason = `daily word cap reached (${acceptedWordsToday}+${groupWords} > ${cap})`;
+            capExhausted = true;
+          }
         }
         if (blockReason === null) {
           for (const s of members) {
@@ -297,6 +327,30 @@ export class XtmPollCycle {
             s.lifecycleStatus = 'rejected';
             blockNotes.set(s.jobKey, note);
             summary.scheduleBlocked++;
+            // I1: surface the binding reason per member so the loop can log WHY (the reason
+            // otherwise lives only in the Chat/Sheet outbox payload). All members share the
+            // group's binding reason but carry their own words/dueDate for debugging.
+            summary.scheduleRejects.push({
+              jobKey: s.jobKey,
+              reason: blockReason,
+              words: s.words,
+              dueDate: s.dueDate,
+            });
+          }
+          // I3b: the daily budget is genuinely exhausted (not a single over-cap job) —
+          // alert ONCE per Bangkok day so ops knows "auto-accept paused for the day on
+          // budget" (vs "no jobs today"). Already guarded behind scheduleEnabled (this whole
+          // block). dedupKey keys the date so it fires at most once per Bangkok day.
+          if (capExhausted) {
+            raiseAlert(
+              this.db,
+              this.outbox,
+              'daily_cap_reached',
+              snapshot.capturedAt,
+              `the ${cap}-word daily cap is reached for ${today} (${acceptedWordsToday} already accepted)`,
+              {},
+              `daily_cap_reached:${today}`,
+            );
           }
         }
       }
@@ -309,6 +363,9 @@ export class XtmPollCycle {
       // never resolves holidays or pages.
       const currentYear = bangkokYear(detectedMs);
       if (!getThaiHolidays(currentYear).curated) {
+        // C1: a total auto-accept outage — surface it to the loop so the heartbeat fails
+        // and Healthchecks pages on-call (not just a Chat card).
+        summary.holidayCalendarStale = true;
         raiseAlert(
           this.db,
           this.outbox,

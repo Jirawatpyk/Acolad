@@ -26,7 +26,8 @@ export type TriggerKind =
   | 'daily_report_dead'
   | 'xtm_yielding'
   | 'yield_stuck'
-  | 'holiday_calendar_stale';
+  | 'holiday_calendar_stale'
+  | 'daily_cap_reached';
 
 interface TriggerSpec {
   severity: 'warn' | 'critical';
@@ -136,13 +137,31 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
       'Confirm a teammate is actually using XTM. If not, free the account (log out) or disable the bot (set XTM_YIELD_ENABLED=0 then npm run deploy)',
     hasRecovered: true,
   },
+  // Raised by the cycle ONLY when the CURRENT Bangkok year is uncurated — a TOTAL
+  // auto-accept outage (every Malay job fail-closes), so it is critical and FAILS the
+  // heartbeat (C1) to page on-call, then resolves once the year is curated.
   holiday_calendar_stale: {
-    severity: 'warn',
-    title: 'Holiday calendar not confirmed for a year in scope',
-    impact: 'Auto-accept is paused for jobs whose dates fall in the un-curated year',
+    severity: 'critical',
+    title: 'Holiday calendar not confirmed for the current year',
+    impact:
+      'Auto-accept is fully paused — every Malay job is rejected until the current year is curated',
+    // Kept ≤120 chars so the card's value-truncation leaves "npm run deploy" visible (the
+    // "fully paused" framing already lives in Impact above).
     action:
-      'Add that year to src/schedule/thaiHolidaysData.ts (HOLIDAYS + CURATED_YEARS), get npm test green, then npm run deploy',
+      'Add the current year to src/schedule/thaiHolidaysData.ts (HOLIDAYS + CURATED_YEARS) then npm run deploy',
     hasRecovered: true,
+  },
+  // Raised at most once per Bangkok day (dedupKey `daily_cap_reached:<date>`) when the
+  // daily word budget is genuinely exhausted — so ops knows "auto-accept paused for the
+  // day on budget" (vs "no jobs today"). hasRecovered:false (like accept_failed): it never
+  // auto-resolves; the next Bangkok day's dedupKey re-arms it.
+  daily_cap_reached: {
+    severity: 'warn',
+    title: 'Daily word cap reached — auto-accept paused for today',
+    impact: 'No more Malay jobs are auto-accepted until the Bangkok-day counter resets at midnight',
+    action:
+      'Accept further jobs manually if needed; the cap resets at Bangkok midnight. To raise it, set ACCEPT_MAX_WORDS_PER_DAY in .env then npm run deploy',
+    hasRecovered: false,
   },
 };
 
