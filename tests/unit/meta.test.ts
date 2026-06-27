@@ -38,6 +38,30 @@ describe('MetaStore yield accessors', () => {
   });
 });
 
+describe('getNumber guards non-finite stored values (A1 — cap-bypass defense)', () => {
+  it('returns the fallback for a stored non-numeric value (Number → NaN)', () => {
+    const m = new MetaStore(db);
+    m.set('accepted_words_count', 'not-a-number');
+    // Use a non-zero fallback so a returned 0 could not masquerade as a pass.
+    expect(m.getNumber('accepted_words_count', 7)).toBe(7);
+  });
+  it("returns the fallback for the self-perpetuating 'NaN' string (String(NaN)='NaN')", () => {
+    const m = new MetaStore(db);
+    m.set('accepted_words_count', 'NaN'); // the corrupt value a prior un-guarded write left
+    expect(m.getNumber('accepted_words_count', 7)).toBe(7);
+  });
+  it('returns the fallback for a stored Infinity', () => {
+    const m = new MetaStore(db);
+    m.set('accepted_words_count', 'Infinity');
+    expect(m.getNumber('accepted_words_count', 7)).toBe(7);
+  });
+  it('still returns a valid stored number', () => {
+    const m = new MetaStore(db);
+    m.set('accepted_words_count', '42');
+    expect(m.getNumber('accepted_words_count', 0)).toBe(42);
+  });
+});
+
 describe('daily word counter', () => {
   it('accumulates within a date', () => {
     const m = new MetaStore(db);

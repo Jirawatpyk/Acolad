@@ -45,4 +45,16 @@ describe('resolveThroughput', () => {
       100,
     ); // 900 / 9
   });
+  it('equal start/end (disabled-gate misconfig) → 0, never Infinity/NaN (A2)', () => {
+    // hoursEnd === hoursStart is allowed when the gate is DISABLED (the start<end refine is
+    // gated on ENABLED so the kill-switch works). The 0 divisor must NOT yield Infinity.
+    const got = resolveThroughput({ maxWordsPerDay: 1000, hoursStartMin: 540, hoursEndMin: 540 });
+    expect(got).toBe(0);
+    expect(Number.isFinite(got)).toBe(true);
+  });
+  it('equal start/end with a zero cap → 0, never NaN (A2)', () => {
+    const got = resolveThroughput({ maxWordsPerDay: 0, hoursStartMin: 540, hoursEndMin: 540 });
+    expect(got).toBe(0);
+    expect(Number.isNaN(got)).toBe(false);
+  });
 });
