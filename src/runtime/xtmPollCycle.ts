@@ -9,8 +9,8 @@ import { Outbox, createOutbox } from '../state/outbox.js';
 import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
 import { hasMaterialSheetChange } from '../reporting/sheetSync.js';
 import { evaluateAcceptSchedule, type AcceptScheduleVerdict } from '../schedule/acceptSchedule.js';
-import { resolveHolidaysForSpan } from '../schedule/thaiHolidays.js';
-import { bangkokDateString } from '../schedule/bangkokCalendar.js';
+import { resolveHolidaysForSpan, getThaiHolidays } from '../schedule/thaiHolidays.js';
+import { bangkokDateString, bangkokYear } from '../schedule/bangkokCalendar.js';
 import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
@@ -153,8 +153,9 @@ export class XtmPollCycle {
     const wouldAccept: XtmJobState[] = [];
     const candidates: XtmJobState[] = []; // post-gate accept set
     const disappearedAccepted: XtmJobState[] = [];
-    const skipNotes = new Map<string, string>(); // jobKey → why it was skipped (Sheet note)
-    const rejectNotes = new Map<string, string>(); // jobKey → schedule-block reason (I3)
+    // jobKey → why the job was blocked: a skip reason (non-Malay / cap) OR a schedule-
+    // reject reason (I3). One map (F15) read by both the Sheet-note and Chat sites.
+    const blockNotes = new Map<string, string>();
     const wordsByKey = new Map<string, number>(); // accepted job → words, for the I1 counter
     let acceptedThisCycle = 0;
 
@@ -188,7 +189,7 @@ export class XtmPollCycle {
       });
       if (decision.action === 'skip') {
         s.lifecycleStatus = 'skipped';
-        skipNotes.set(ev.jobKey, decision.reason); // surface WHY (non-Malay / cap) on the Sheet
+        blockNotes.set(ev.jobKey, decision.reason); // surface WHY (non-Malay / cap) on the Sheet
         summary.skipped++;
       } else if (decision.action === 'disabled') {
         s.lifecycleStatus = 'new'; // eligible, but auto-accept is off (FR-012)
@@ -206,7 +207,13 @@ export class XtmPollCycle {
         }
       } else {
         wouldAccept.push(s); // schedule gate (below) decides accept vs reject per group
-        acceptedThisCycle++; // counts toward the per-cycle cap for the next decision
+        // F6: counts would-accept candidates PRE-gate. The per-cycle cap mechanism relies
+        // on incrementing here so the next decideAccept in THIS pass sees the running count
+        // (moving it past the gate would defeat the cap, since the robustness pass below
+        // reads the count before the gate runs). ACCEPT_MAX_PER_CYCLE MUST stay 0 (the
+        // schedule gate owns the words/day cap); a cap > 0 is forbidden by the runbook for
+        // the bulk-claim hazard, so this pre-gate count never gates a real accept in prod.
+        acceptedThisCycle++;
       }
     }
 
@@ -233,7 +240,7 @@ export class XtmPollCycle {
       });
       if (decision.action === 'accept') {
         wouldAccept.push(s); // same gate as the event pass (C4 — no silent robustness reject)
-        acceptedThisCycle++;
+        acceptedThisCycle++; // pre-gate count (see F6 note above); ACCEPT_MAX_PER_CYCLE must stay 0
       }
     }
 
@@ -245,7 +252,14 @@ export class XtmPollCycle {
     // otherwise reject the WHOLE group with the binding reason — never leave a sibling
     // grabbed-on-portal-but-Rejected (the irreversible data-corruption hazard, §2.4).
     if (!scheduleEnabled) {
-      for (const s of wouldAccept) candidates.push(s);
+      // Gate OFF → byte-for-byte today's accept behavior. Still record each accepted job's
+      // words (F9) so the daily counter keeps accumulating while disabled; it is harmless
+      // bookkeeping when off and lets a mid-day enable read the real running total instead
+      // of under-counting (which could over-accept on the transition day).
+      for (const s of wouldAccept) {
+        candidates.push(s);
+        wordsByKey.set(s.jobKey, s.words ?? 0);
+      }
     } else {
       const cap = this.cfg.ACCEPT_MAX_WORDS_PER_DAY;
       const groups = new Map<string, XtmJobState[]>();
@@ -255,13 +269,11 @@ export class XtmPollCycle {
         if (g) g.push(s);
         else groups.set(key, [s]);
       }
-      let anyUncurated = false;
       for (const members of groups.values()) {
         let blockReason: string | null = null;
         let groupWords = 0;
         for (const s of members) {
-          const { verdict, curated } = this.scheduleVerdict(s, detectedMs, acceptedWordsToday);
-          if (!curated) anyUncurated = true;
+          const verdict = this.scheduleVerdict(s, detectedMs, acceptedWordsToday);
           // Bind the FIRST failing member's reason (with its file for the team's note).
           if (blockReason === null && !verdict.allow)
             blockReason = `'${s.fileName}': ${verdict.reason}`;
@@ -283,21 +295,25 @@ export class XtmPollCycle {
           const note = `group blocked: ${blockReason}`;
           for (const s of members) {
             s.lifecycleStatus = 'rejected';
-            rejectNotes.set(s.jobKey, note);
+            blockNotes.set(s.jobKey, note);
             summary.scheduleBlocked++;
           }
         }
       }
-      // Holiday-calendar staleness (C3): a deadline in an un-curated year fails closed and
-      // must page (deduped) so a human curates the year; resolve once no span is uncurated.
-      // Guarded behind ENABLED — a disabled feature never resolves holidays or pages.
-      if (anyUncurated) {
+      // Holiday-calendar staleness (C3, F1/F2): DATA-driven — raise iff the CURRENT Bangkok
+      // year has no curated holiday list, INDEPENDENT of any job's presence. This persists
+      // the alert until the year is curated (no flapping with job presence) and never
+      // conflates it with a per-job capacity/feasibility block. A far deadline into an
+      // uncurated NEXT year still fail-closes per-job via holidaysCuratedForSpan above — it
+      // just no longer raises this SYSTEM alert. Guarded behind ENABLED — a disabled feature
+      // never resolves holidays or pages.
+      if (!getThaiHolidays(bangkokYear(detectedMs)).curated) {
         raiseAlert(
           this.db,
           this.outbox,
           'holiday_calendar_stale',
           snapshot.capturedAt,
-          'a job deadline falls in a year not yet curated in src/schedule/thaiHolidaysData.ts',
+          `the current year (${bangkokYear(detectedMs)}) has no curated holiday list in src/schedule/thaiHolidaysData.ts`,
         );
       } else {
         resolveAlert(this.db, this.outbox, 'holiday_calendar_stale', snapshot.capturedAt, '—');
@@ -351,9 +367,12 @@ export class XtmPollCycle {
             r.outcome === 'accepted' ? r.at : null,
           );
           // I1: advance the daily word counter in the SAME txn as the outcome record so a
-          // crash between them can never under-count (→ over-accept) or double-count. Only
-          // a confirmed accept counts; guarded by the gate so the feature-off path is inert.
-          if (scheduleEnabled && r.outcome === 'accepted') {
+          // crash between them can never under-count (→ over-accept) or double-count. Only a
+          // confirmed accept counts. NOT gated on ACCEPT_SCHEDULE_ENABLED (F9): the counter
+          // must keep accumulating while the gate is off so a mid-Bangkok-day enable reads
+          // the real running total (wordsByKey is populated on both the gated and ungated
+          // accept paths above).
+          if (r.outcome === 'accepted') {
             this.meta.addAcceptedWords(today, wordsByKey.get(r.jobKey) ?? 0);
           }
         }
@@ -428,8 +447,9 @@ export class XtmPollCycle {
       } else if (outcome?.outcome === 'missing') {
         note = 'snatched';
       } else {
-        // skipped → skip reason; schedule-blocked → the binding reject reason (I3).
-        note = skipNotes.get(jobKey) ?? rejectNotes.get(jobKey) ?? null;
+        // skipped → skip reason; schedule-blocked → the binding reject reason (I3). Both
+        // live in the one blockNotes map now (F15).
+        note = blockNotes.get(jobKey) ?? null;
       }
       this.outbox.enqueue(
         `sheet:${base}`,
@@ -445,7 +465,7 @@ export class XtmPollCycle {
           s,
           outcome,
           snapshot.capturedAt,
-          rejectNotes.get(jobKey),
+          blockNotes.get(jobKey),
         );
         if (card) {
           this.outbox.enqueue(`chat:${base}`, JSON.stringify(card), snapshot.capturedAt, 'chat');
@@ -465,8 +485,10 @@ export class XtmPollCycle {
     // blocked must NOT re-enqueue (the event_id carries pollCycleId, so re-reporting would
     // duplicate every cycle). A reason change within 'rejected' is intentionally not
     // re-announced (mirrors the accept_failed dedup philosophy). reportJob dedups by jobKey,
-    // so a job already reported via its event/outcome above is skipped here.
-    for (const jobKey of rejectNotes.keys()) {
+    // so a job already reported via its event/outcome above is skipped here. blockNotes also
+    // holds skip reasons (F15), but every skipped job already fired via its appearance event
+    // above, so reportJob's jobKey dedup makes those entries no-ops here.
+    for (const jobKey of blockNotes.keys()) {
       if (prev.get(jobKey)?.lifecycleStatus === 'rejected') continue;
       reportJob(jobKey, undefined);
     }
@@ -484,7 +506,7 @@ export class XtmPollCycle {
       // feasible it is now 'accepted' and was reported above (skipped here); otherwise it is
       // still 'rejected' and we preserve the binding reason instead of overwriting with null.
       const syncNote =
-        s.lifecycleStatus === 'rejected' ? (rejectNotes.get(dc.jobKey) ?? null) : null;
+        s.lifecycleStatus === 'rejected' ? (blockNotes.get(dc.jobKey) ?? null) : null;
       this.outbox.enqueue(
         `sheet:fieldsync:${dc.jobKey}|${snapshot.pollCycleId}`,
         JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, syncNote) }),
@@ -550,11 +572,14 @@ export class XtmPollCycle {
     s: XtmJobState,
     nowMs: number,
     acceptedWordsToday: number,
-  ): { verdict: AcceptScheduleVerdict; curated: boolean } {
+  ): AcceptScheduleVerdict {
     const parsed = s.dueDate ? Date.parse(s.dueDate) : NaN;
     const dueAtMs = Number.isFinite(parsed) ? parsed : null;
+    // The per-job fail-closed still uses the SPAN's curation (a far deadline into an
+    // uncurated year blocks); the cycle-level holiday_calendar_stale alert is decided
+    // separately from the CURRENT year (F1/F2) in the gate block above.
     const { holidays, curated } = resolveHolidaysForSpan(nowMs, dueAtMs);
-    const verdict = evaluateAcceptSchedule({
+    return evaluateAcceptSchedule({
       enabled: true,
       nowMs,
       dueAtMs,
@@ -568,7 +593,6 @@ export class XtmPollCycle {
       holidays,
       holidaysCuratedForSpan: curated,
     });
-    return { verdict, curated };
   }
 
   /** The Chat card for an appearance, or undefined for sheet-only events. */
@@ -592,11 +616,16 @@ export class XtmPollCycle {
         xtmUrl,
       );
     }
-    // A schedule-blocked job (I3) → announce as a new-job card carrying the reject reason,
-    // whether or not there was an appearance event (a robustness-pass block has neither an
-    // event nor an outcome). Without this it would wrongly read "Malay (MS) — accepting".
+    // A schedule-blocked job (I3) → announce the reject reason, whether or not there was an
+    // appearance event (a robustness-pass block has neither an event nor an outcome). Without
+    // this it would wrongly read "Malay (MS) — accepting".
     if (s.lifecycleStatus === 'rejected') {
-      return renderXtmNewJob(s, at, `Rejected — ${rejectReason ?? 'schedule blocked'}`, xtmUrl);
+      const note = `Rejected — ${rejectReason ?? 'schedule blocked'}`;
+      // F3: a RELISTED job that is now schedule-blocked must keep its "returned" context
+      // (the stronger signal) — render the 🔁 relisted card (carrying the reject reason as a
+      // Status row) rather than a 🆕 new-job card that would drop the firstSeenAt history.
+      if (eventType === 'relisted') return renderXtmRelisted(s, firstSeenAt, at, xtmUrl, note);
+      return renderXtmNewJob(s, at, note, xtmUrl);
     }
     // No accept outcome and no appearance event (robustness-pass job that wasn't
     // accepted) → nothing to announce.

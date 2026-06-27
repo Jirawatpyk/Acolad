@@ -725,26 +725,96 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(only().lifecycleStatus).toBe('accepted'); // gate bypassed
   });
 
-  it('rejects a job whose deadline year is uncurated and raises holiday_calendar_stale', async () => {
+  it('rejects a far-deadline job whose span year is uncurated (per-job fail-closed) but does NOT raise holiday_calendar_stale while the current year is curated (F2)', async () => {
     fresh();
     new MetaStore(db).markBaselineDone();
     const acc = new StubAcceptor();
+    // now (MON_10) is 2026 — a CURATED year. The 2099 deadline is uncurated, so the
+    // PER-JOB gate still fail-closes (Rejected + reason). But the SYSTEM alert is now
+    // data-driven on the CURRENT year only, so a far-future deadline no longer pages.
     await new XtmPollCycle(db, schedCfg(), acc).run(
       snapAt([xraw({ dueDate: '2099-06-24T18:00:00+07:00', words: 100 })], MON_10),
     );
-    expect(acc.calls.flat()).toHaveLength(0);
-    expect(only().lifecycleStatus).toBe('rejected');
-    expect(sheetRows().at(-1)?.note).toContain('holiday calendar not confirmed');
+    expect(acc.calls.flat()).toHaveLength(0); // never clicked
+    expect(only().lifecycleStatus).toBe('rejected'); // per-job fail-closed still blocks
+    expect(sheetRows().at(-1)?.note).toContain('holiday calendar not confirmed'); // reason on the Sheet
     const alerts = db
       .prepare(
         "SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key='holiday_calendar_stale'",
       )
       .all();
-    expect(alerts.length).toBeGreaterThanOrEqual(1); // alert raised + deduped
-    const chatOut = db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE channel='chat'").get() as {
-      n: number;
-    };
-    expect(chatOut.n).toBeGreaterThanOrEqual(1); // alert reaches Chat via the outbox
+    expect(alerts).toHaveLength(0); // NOT raised — the current year (2026) is curated
+  });
+
+  it('raises holiday_calendar_stale when the CURRENT Bangkok year is uncurated — independent of jobs (F1)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const acc = new StubAcceptor();
+    // capturedAt in 2099 (uncurated current year) with NO jobs present → the alert is
+    // driven purely by the current year's curation, not by any would-accept job.
+    await new XtmPollCycle(db, schedCfg(), acc).run(snapAt([], '2099-06-22T10:00:00+07:00'));
+    const active = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key='holiday_calendar_stale' AND resolved_at IS NULL",
+      )
+      .get() as { n: number };
+    expect(active.n).toBe(1); // raised even with zero jobs present
+  });
+
+  it('does NOT resolve holiday_calendar_stale after the triggering job leaves while the current year stays uncurated (F1 — persistent, no flap)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    // c1: uncurated current year (2099) + a job → raise.
+    await cycle.run(
+      snapAt(
+        [xraw({ dueDate: '2099-08-20T18:00:00+07:00', words: 100 })],
+        '2099-06-22T10:00:00+07:00',
+        'c1',
+      ),
+    );
+    // c2: same uncurated year, the job is gone → the alert must STAY active (the old
+    // per-job logic would flap it to resolved the moment no present job was uncurated).
+    await cycle.run(snapAt([], '2099-06-22T10:00:00+07:00', 'c2'));
+    const active = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key='holiday_calendar_stale' AND resolved_at IS NULL",
+      )
+      .get() as { n: number };
+    expect(active.n).toBe(1); // still active — current year still uncurated
+    const recovered = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_recovered' AND dedup_key LIKE 'holiday_calendar_stale%'",
+      )
+      .get() as { n: number };
+    expect(recovered.n).toBe(0); // never emitted a spurious recovery
+  });
+
+  it('renders a RELISTED schedule-rejected job as the 🔁 relisted card, not 🆕 (F3)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    const tight = { dueDate: dueMon12, words: 5000 }; // infeasible → schedule-rejected
+    await cycle.run(snapAt([xraw(tight)], MON_10, 'c1')); // 🆕 rejected
+    await cycle.run(snapAt([], MON_10, 'c2')); // absent once (flicker)
+    await cycle.run(snapAt([], MON_10, 'c3')); // absent twice → missing
+    await cycle.run(snapAt([xraw(tight)], MON_10, 'c4')); // returns → relisted + still rejected
+    expect(chatHasTitle('🔁')).toBe(true); // relisted context preserved (not a 🆕 new-job card)
+    expect(only().lifecycleStatus).toBe('rejected');
+    expect(chatText()).toContain('Rejected —'); // the reject reason is still surfaced
+  });
+
+  it('counts accepted words even when the schedule gate is DISABLED (F9 — no transition-day undercount)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    // Schedule OFF but a real accept happens → its words MUST still be counted, so that
+    // enabling the gate later in the same Bangkok day reads the real running total
+    // (otherwise the transition day could over-accept by up to ~1.7× the cap).
+    await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10),
+    );
+    expect(only().lifecycleStatus).toBe('accepted'); // gate disabled → accepted as before
+    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(100); // counter advanced even while disabled
   });
 });
 
