@@ -244,9 +244,23 @@ const BKK_08_00 = Date.parse('2026-06-25T01:00:00Z');
 describe('XtmPollLoop — daily report', () => {
   it('enqueues exactly one team outbox row at 10:00 Bangkok with 2 accepted jobs', async () => {
     fresh();
-    // Seed 2 accepted jobs
-    seedAcceptedJob(db, { jobKey: 'J-A1', projectName: 'Alpha', fileName: 'a.xlf' });
-    seedAcceptedJob(db, { jobKey: 'J-A2', projectName: 'Beta', fileName: 'b.xlf' });
+    // Seed 2 accepted jobs, both due TODAY (25 Jun 2026 Bangkok) with TZ-explicit +07:00
+    // deadlines, so the "Due today" word bucket is a clear, asserted sum (700 + 500 = 1200)
+    // that holds under TZ=UTC. Both deadlines fall after 10:00, so neither is Overdue.
+    seedAcceptedJob(db, {
+      jobKey: 'J-A1',
+      projectName: 'Alpha',
+      fileName: 'a.xlf',
+      dueDate: '2026-06-25T15:00:00+07:00',
+      words: 700,
+    });
+    seedAcceptedJob(db, {
+      jobKey: 'J-A2',
+      projectName: 'Beta',
+      fileName: 'b.xlf',
+      dueDate: '2026-06-25T20:00:00+07:00',
+      words: 500,
+    });
 
     const clockAt10 = { nowMs: () => BKK_10_00, nowIso: () => new Date(BKK_10_00).toISOString() };
     const client = new StubClient(); // empty Active → no new jobs, just daily trigger
@@ -268,15 +282,17 @@ describe('XtmPollLoop — daily report', () => {
       .all() as { payload_json: string }[];
     expect(rows).toHaveLength(1);
 
-    // Card title includes (2)
+    // New card format (Task 1, commit 6f75ce3): header is "📋 Daily Report — DD/MM/YYYY".
     const payload = JSON.parse(rows[0]!.payload_json) as { cardsV2: unknown[] };
     const entry = payload.cardsV2[0] as { card: { header: { title: string } } };
-    expect(entry.card.header.title).toBe('📋 Jobs in Progress (2)');
+    expect(entry.card.header.title).toBe('📋 Daily Report — 25/06/2026');
 
-    // F4: the capacity row shows "<accepted> / <cap>" (0 / 1000) — proving the cap is
-    // threaded through; before ACCEPT_MAX_WORDS_PER_DAY was set in cfg() it silently
-    // rendered "0 words (no cap)".
-    expect(rows[0]!.payload_json).toContain('0 / 1000');
+    // The "Due today" row sums the held words whose Bangkok deadline date == today
+    // (700 + 500 = 1200) and threads ACCEPT_MAX_WORDS_PER_DAY through as the cap.
+    expect(rows[0]!.payload_json).toContain('1200 words (cap 1000/day per deadline)');
+    // Both accepted jobs appear as in-progress rows (preserves the original "2 jobs" intent).
+    expect(rows[0]!.payload_json).toContain('Alpha');
+    expect(rows[0]!.payload_json).toContain('Beta');
   });
 
   it('does NOT enqueue a second daily row when runOnce is called again on the same Bangkok day', async () => {
