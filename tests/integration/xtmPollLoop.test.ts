@@ -813,6 +813,64 @@ describe('XtmPollLoop — holiday_calendar_stale pages on-call (C1)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// I1: the loop logs one structured warn line per schedule-gate reject
+// ---------------------------------------------------------------------------
+
+describe('XtmPollLoop — schedule-gate reject logging (I1)', () => {
+  const SCHED = {
+    ACCEPT_ENABLED: true,
+    ACCEPT_SCHEDULE_ENABLED: true,
+    ACCEPT_MAX_WORDS_PER_DAY: 1000,
+    hoursStartMin: 9 * 60,
+    hoursEndMin: 18 * 60,
+    workdays: new Set([1, 2, 3, 4, 5]),
+    throughputWordsPerHour: 1000 / 9,
+  };
+
+  it('logs one warn line per reject with the binding reason/words/dueDate', async () => {
+    fresh();
+    const client = new StubClient();
+    // capturedAt = NOW (2026-06-19 17:00 BKK, Friday). 5000 words due 18:00 same day →
+    // ~60 working min available → "cannot finish in time" → schedule-rejected.
+    const tightDue = '2026-06-19T18:00:00+07:00';
+    client.snapshot = snap([xraw({ dueDate: tightDue, words: 5000 })]);
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ ...SCHED } as Partial<AppConfig>),
+      noopLogger,
+      clock,
+      {
+        chatSender: okChat,
+        teamChatSender: okChat,
+        sheetSender: new CapturingSheet(),
+        heartbeat,
+      },
+    );
+
+    await loop.runOnce();
+
+    const rejectLogs = noopLogger.warn.mock.calls.filter(
+      (c) =>
+        (c[0] as { module?: string }).module === 'scheduleGate' &&
+        (c[0] as { action?: string }).action === 'reject',
+    );
+    expect(rejectLogs).toHaveLength(1);
+    const meta = rejectLogs[0]![0] as {
+      jobKey: string;
+      reason: string;
+      words: number | null;
+      dueDate: string | null;
+    };
+    expect(meta.reason).toContain('cannot finish'); // the WHY, not just a count
+    expect(meta.words).toBe(5000);
+    expect(meta.dueDate).toBe(tightDue);
+    expect(meta.jobKey.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // auto-yield state machine (Task 6)
 // ---------------------------------------------------------------------------
 

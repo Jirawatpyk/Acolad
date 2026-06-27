@@ -69,6 +69,18 @@ export interface XtmCycleSummary {
    * every other path (gate disabled, current year curated).
    */
   holidayCalendarStale: boolean;
+  /**
+   * One entry per job the schedule gate blocked this cycle, carrying the binding reject
+   * reason + the fields needed to debug it (I1). The cycle stays logger-free (like
+   * acceptLatencies); the loop logs these as structured warn lines so the FIRST real
+   * rejection leaves a trail of WHY, not just a count.
+   */
+  scheduleRejects: {
+    jobKey: string;
+    reason: string;
+    words: number | null;
+    dueDate: string | null;
+  }[];
 }
 
 /**
@@ -147,6 +159,7 @@ export class XtmPollCycle {
       reconEligible: [],
       scheduleBlocked: 0,
       holidayCalendarStale: false,
+      scheduleRejects: [],
     };
     const detectedMs = Date.parse(snapshot.capturedAt);
     // Schedule-gate state (Task 12). nowMs = the snapshot clock; today/counter keyed to
@@ -305,6 +318,15 @@ export class XtmPollCycle {
             s.lifecycleStatus = 'rejected';
             blockNotes.set(s.jobKey, note);
             summary.scheduleBlocked++;
+            // I1: surface the binding reason per member so the loop can log WHY (the reason
+            // otherwise lives only in the Chat/Sheet outbox payload). All members share the
+            // group's binding reason but carry their own words/dueDate for debugging.
+            summary.scheduleRejects.push({
+              jobKey: s.jobKey,
+              reason: blockReason,
+              words: s.words,
+              dueDate: s.dueDate,
+            });
           }
         }
       }

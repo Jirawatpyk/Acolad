@@ -594,6 +594,29 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(0); // not counted
   });
 
+  it('I1: a schedule-blocked job surfaces reason/words/dueDate via summary.scheduleRejects', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    const summary = await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10),
+    );
+    expect(summary.scheduleRejects).toHaveLength(1);
+    const r = summary.scheduleRejects[0]!;
+    expect(r.jobKey).toBe(computeXtmJobKey(xraw({ dueDate: dueMon12, words: 5000 })));
+    expect(r.reason).toContain('cannot finish in time'); // the binding reject reason, not just a count
+    expect(r.words).toBe(5000);
+    expect(r.dueDate).toBe(dueMon12);
+  });
+
+  it('I1: an ALLOWed cycle carries an empty scheduleRejects', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    const summary = await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10),
+    );
+    expect(summary.scheduleRejects).toHaveLength(0);
+  });
+
   it('C1: one infeasible member rejects the WHOLE bulk group (no member left accepted)', async () => {
     fresh();
     const acc = new StubAcceptor();
