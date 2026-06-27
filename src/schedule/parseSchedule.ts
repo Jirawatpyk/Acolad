@@ -35,7 +35,7 @@ export function parseWorkdays(s: string): Set<number> {
  * `hoursStart`/`hoursEnd` are required for the derived path — narrowing the daily
  * window rescales (raises) the implied throughput.
  *
- * Guard: when `hoursEndMin === hoursStartMin` (allowed while the schedule gate is
+ * Guard: when `hoursEndMin <= hoursStartMin` (allowed while the schedule gate is
  * DISABLED — the start<end refine is gated on ENABLED so the kill-switch always works)
  * the divisor is 0, which would yield Infinity/NaN. Return 0 instead so a disabled
  * misconfiguration can never poison the config with a non-finite throughput. When the

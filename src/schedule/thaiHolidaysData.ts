@@ -4,9 +4,9 @@
  * works them. Weekends are handled by ACCEPT_WORKDAYS, not here.
  * Curate the next year before December (an uncurated year pauses auto-accept, C3).
  */
-export const CURATED_YEARS: Set<number> = new Set([2026]);
+export const CURATED_YEARS: ReadonlySet<number> = new Set([2026]);
 
-export const HOLIDAYS: Record<string, Record<string, string>> = {
+export const HOLIDAYS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   '2026': {
     '2026-01-01': "New Year's Day",
     '2026-03-03': 'Makha Bucha Day',

@@ -3,7 +3,7 @@ import { CURATED_YEARS, HOLIDAYS } from './thaiHolidaysData.js';
 
 export interface ThaiHolidayLookup {
   /** Bangkok `YYYY-MM-DD` → holiday name. ReadonlyMap so a caller mutating the returned
-   *  set can never poison the memoized per-year cache (`resolveHolidaysForSpan` still
+   *  map can never poison the memoized per-year cache (`resolveHolidaysForSpan` still
    *  builds and returns a fresh mutable Map, which is assignable to ReadonlyMap). */
   holidays: ReadonlyMap<string, string>;
   curated: boolean;

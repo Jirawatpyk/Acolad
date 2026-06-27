@@ -304,7 +304,7 @@ export class XtmPollCycle {
       // year has no curated holiday list, INDEPENDENT of any job's presence. This persists
       // the alert until the year is curated (no flapping with job presence) and never
       // conflates it with a per-job capacity/feasibility block. A far deadline into an
-      // uncurated NEXT year still fail-closes per-job via holidaysCuratedForSpan above — it
+      // uncurated NEXT year still fail-closes per-job via `scheduleVerdict`'s `resolveHolidaysForSpan` span-curation check above — it
       // just no longer raises this SYSTEM alert. Guarded behind ENABLED — a disabled feature
       // never resolves holidays or pages.
       const currentYear = bangkokYear(detectedMs);
@@ -571,7 +571,7 @@ export class XtmPollCycle {
   }
 
   /** Compose the schedule verdict for one would-accept job (C4 — the single gate used by
-   *  both passes). Resolves the curated Thai-holiday set for every Bangkok year the
+   *  both passes). Resolves the curated Thai-holiday map for every Bangkok year the
    *  now→deadline span touches and feeds the pure `evaluateAcceptSchedule`. */
   private scheduleVerdict(
     s: XtmJobState,
