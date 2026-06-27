@@ -10,12 +10,8 @@ import { buildCard } from './chatCard.js';
 import { formatReadableDate } from './dateFormat.js';
 import { dash } from './cardText.js';
 import { bangkokCalendar, bangkokDateString } from '../schedule/bangkokCalendar.js';
+import { isNonWorkingDay } from '../schedule/workingHours.js';
 import type { XtmJobState } from '../detection/types.js';
-
-/** Bangkok hour 0..23 — delegates to the canonical calendar (F5/F7). */
-function bangkokHour(nowMs: number): number {
-  return Math.floor(bangkokCalendar(nowMs).minutesOfDay / 60);
-}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -32,15 +28,30 @@ export function bangkokDate(nowMs: number): string {
 }
 
 /**
- * Returns true when the daily report is due: Bangkok hour >= `hour` (default 9)
- * AND the Bangkok date has not already been sent (lastSentDate !== today).
+ * Returns true when the daily report is due: today is a working day (not a weekend
+ * or Thai holiday), Bangkok time has reached `hour` (default 9 = 09:00), and
+ * today's Bangkok date has not already been sent.
  *
- * @param nowMs       Current epoch ms (from injected Clock).
- * @param lastSentDate  The value stored in meta, or null if never sent.
- * @param hour        Bangkok hour threshold (default 9 = 09:00).
+ * Fail-open on uncurated years: an empty `holidays` map means the year's data is
+ * not yet curated — only weekends are skipped; the report still fires on weekdays.
+ * A missed report is worse than an extra one.
+ *
+ * @param nowMs        Current epoch ms (from injected Clock).
+ * @param lastSentDate The value stored in meta, or null if never sent.
+ * @param workdays     ISO weekdays that count as working days (1=Mon..7=Sun).
+ * @param holidays     Bangkok YYYY-MM-DD → holiday name (empty = uncurated, fail-open).
+ * @param hour         Bangkok hour threshold (default 9 = 09:00).
  */
-export function dueDailyReport(nowMs: number, lastSentDate: string | null, hour = 9): boolean {
-  return bangkokHour(nowMs) >= hour && bangkokDate(nowMs) !== lastSentDate;
+export function dueDailyReport(
+  nowMs: number,
+  lastSentDate: string | null,
+  workdays: ReadonlySet<number>,
+  holidays: ReadonlyMap<string, string>,
+  hour = 9,
+): boolean {
+  const { date, weekday, minutesOfDay } = bangkokCalendar(nowMs);
+  if (isNonWorkingDay(date, weekday, workdays, holidays)) return false;
+  return minutesOfDay >= hour * 60 && date !== lastSentDate;
 }
 
 /**

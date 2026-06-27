@@ -27,6 +27,7 @@ const cfg = (over: Partial<AppConfig> = {}): AppConfig =>
     OUTBOX_DEAD_AFTER_HOURS: 6,
     LOGIN_MAX_RETRY: 3,
     LOGIN_LOCKOUT_MINUTES: 15,
+    workdays: new Set([1, 2, 3, 4, 5]), // Mon–Fri: required by dueDailyReport working-day gate
     ...over,
   }) as AppConfig;
 
