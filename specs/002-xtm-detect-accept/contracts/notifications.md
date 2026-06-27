@@ -33,6 +33,18 @@ One card per `job_key` even for bulk accepts (1 message per job rule).
 Header: `⚠️ Accept failed (XTM)`
 Rows: Project, File, Language pair, Cause, Needs human check, Time
 
+### 1d) Job schedule-rejected (`lifecycle_status = 'rejected'`)
+
+When the accept-schedule gate blocks an eligible Malay job (cannot finish in time,
+deadline on a non-working day, daily word cap reached, holiday calendar not
+confirmed, …) the job is **notify-only**: not clicked, `accept_status` stays
+`'none'` (re-evaluated each cycle while still in Active).
+
+- **Sheet**: Status `Rejected`, the binding reason in the **Note** column.
+- **Chat**: the 🆕 new-job card with Status = `Rejected — <reason>`. If the job is a
+  **relisted** job (disappeared then returned), the 🔁 relisted card is sent instead
+  (preserving the first-seen context) with the same `Rejected — <reason>` as a Status row.
+
 ---
 
 ## §2 System alerts (channel: `chat`)
@@ -68,6 +80,12 @@ Rows:
 | `db_corrupt` | critical | no | State store corrupt — reset to cold start |
 | `accept_failed` | critical | no | Job accept failed (could not confirm) |
 | `daily_report_dead` | warn | no | Daily report delivery failed |
+| `holiday_calendar_stale` | warn | yes | Holiday calendar not confirmed for a year in scope |
+
+`holiday_calendar_stale` is raised (deduped) when the **current** Bangkok year has
+no curated holiday list in `src/schedule/thaiHolidaysData.ts` — pausing auto-accept
+until the year is curated — and recovers once it is. It is data-driven on the current
+year, not on any individual job's deadline.
 
 `daily_report_dead` is raised on channel `chat` (not `team`) when the
 `daily:<date>` outbox row dies. The `onDead` hook in `xtmPollLoop.ts`
