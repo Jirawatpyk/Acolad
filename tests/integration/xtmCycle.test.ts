@@ -800,6 +800,38 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(activeCapAlert()).toBe(1); // deduped — at most one cap alert per deadline day
   });
 
+  it('I3b: overflowing TWO different deadline days raises TWO distinct daily_cap_reached alerts (per-day, not global)', async () => {
+    fresh();
+    // Two held seeds, one near-full on each deadline day (Tue 900, Wed 900).
+    new XtmJobStore(db).upsertMany([
+      accepted({ jobKey: 'seedTue', dueDate: dueTue18, words: 900 }),
+      accepted({ jobKey: 'seedWed', dueDate: dueWed18, words: 900 }),
+    ]);
+    const acc = new StubAcceptor();
+    const cycle = new XtmPollCycle(db, schedCfg(), acc);
+    // c1 overflows Tue (900 + 300 > 1000); c2 overflows Wed (900 + 300 > 1000).
+    await cycle.run(
+      snapAt([xraw({ fileName: 'tue.docx', dueDate: dueTue18, words: 300 })], MON_10, 'c1'),
+    );
+    await cycle.run(
+      snapAt([xraw({ fileName: 'wed.docx', dueDate: dueWed18, words: 300 })], MON_10, 'c2'),
+    );
+    const keys = (
+      db
+        .prepare(
+          "SELECT DISTINCT dedup_key FROM system_events WHERE event_type='system_alert' AND dedup_key LIKE 'daily_cap_reached:%' AND resolved_at IS NULL",
+        )
+        .all() as { dedup_key: string }[]
+    )
+      .map((k) => k.dedup_key)
+      .sort();
+    // Two DISTINCT alerts — the dedup key is per deadline day, not a single global cap alert.
+    expect(keys).toEqual([
+      `daily_cap_reached:${bangkokDateString(Date.parse(dueTue18))}`,
+      `daily_cap_reached:${bangkokDateString(Date.parse(dueWed18))}`,
+    ]);
+  });
+
   it('I3b: a single-job-over-cap block does NOT raise daily_cap_reached', async () => {
     fresh();
     const acc = new StubAcceptor();
@@ -1194,6 +1226,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
       ),
     ).resolves.toBeDefined();
   });
+
 });
 
 describe('XtmPollCycle field-change re-sync / Bug B (sheet:fieldsync)', () => {
