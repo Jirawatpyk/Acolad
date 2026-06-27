@@ -33,7 +33,13 @@ export function resolveHolidaysForSpan(nowMs: number, dueAtMs: number | null): T
   const y1 = dueAtMs !== null && Number.isFinite(dueAtMs) ? bangkokYear(dueAtMs) : y0;
   const holidays = new Map<string, string>();
   let curated = true;
-  for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++) {
+  // Bound the iteration: the 400-day feasibility cap (workingMinutesBetween) means dates
+  // beyond ~1 year out are never counted anyway, so a garbage far-future deadline (e.g.
+  // year 9999) must not loop thousands of times. yLo..yLo+2 covers every legitimate span
+  // and still fail-closes (an uncurated intermediate year flips curated=false).
+  const yLo = Math.min(y0, y1);
+  const yHi = Math.min(Math.max(y0, y1), yLo + 2);
+  for (let y = yLo; y <= yHi; y++) {
     const r = getThaiHolidays(y);
     for (const [d, name] of r.holidays) holidays.set(d, name);
     if (!r.curated) curated = false;

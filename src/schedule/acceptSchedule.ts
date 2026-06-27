@@ -33,8 +33,10 @@ export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVe
     // Name the whole now→deadline span (F8) — naming only the deadline year is wrong
     // when the UNcurated year is the now-year (a past-deadline edge can put the deadline
     // in a curated year). Collapse to one year when the span stays within a single year.
-    const y0 = bangkokCalendar(i.nowMs).date.slice(0, 4);
-    const y1 = bangkokCalendar(i.dueAtMs).date.slice(0, 4);
+    const ya = bangkokCalendar(i.nowMs).date.slice(0, 4);
+    const yb = bangkokCalendar(i.dueAtMs).date.slice(0, 4);
+    // Sort so the range never renders backwards (e.g. a past-deadline edge where now > due).
+    const [y0, y1] = ya <= yb ? [ya, yb] : [yb, ya];
     const range = y0 === y1 ? y0 : `${y0}–${y1}`;
     return {
       allow: false,
