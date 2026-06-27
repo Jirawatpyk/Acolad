@@ -327,6 +327,44 @@ describe('XtmPollLoop — daily report', () => {
       .all();
     expect(rows).toHaveLength(0); // nothing enqueued before 09:00
   });
+
+  it('a daily-report build throw does not page (no heartbeat.fail) and does not advance lastDailyReportDate', async () => {
+    fresh();
+    // 10:00 Bangkok on a working day (Thu 25 Jun 2026) → dueDailyReport true.
+    const clockAt10 = { nowMs: () => BKK_10_00, nowIso: () => new Date(BKK_10_00).toISOString() };
+
+    // Force the report's DB read to throw, exercising the moved try-scope. listByLifecycle
+    // is the loop's ONLY caller and the detection cycle never calls it, so the throw is
+    // isolated to the daily-report build — not the detection cycle (Constitution IV: a
+    // reporting bug must never block detection or page on-call).
+    const readSpy = vi.spyOn(XtmJobStore.prototype, 'listByLifecycle').mockImplementation(() => {
+      throw new Error('boom: accepted-jobs read failed');
+    });
+
+    const client = new StubClient(); // empty Active → the detection cycle still runs cleanly
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ XTM_ACOLAD_OFFERS_URL: 'https://xtm.example.com' } as Partial<AppConfig>),
+      noopLogger,
+      clockAt10,
+      { chatSender: okChat, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    const result = await loop.runOnce();
+    // Capture state, then restore the prototype spy BEFORE asserting so a failed
+    // expectation can never leak the throwing impl into the next test.
+    const calledWithAccepted = readSpy.mock.calls.some((c) => c[0] === 'accepted');
+    const metaDate = new MetaStore(db).lastDailyReportDate;
+    readSpy.mockRestore();
+
+    expect(calledWithAccepted).toBe(true); // proves the throw came from the moved read (not vacuous)
+    expect(result).toBe(true); // cycle produced a result — not tanked by the report bug
+    expect(heartbeat.fail).not.toHaveBeenCalled(); // a report throw must NOT page on-call
+    expect(heartbeat.ok).toHaveBeenCalledTimes(1); // the cycle still reported healthy
+    expect(metaDate).toBeNull(); // last_daily_report_date NOT advanced → retries next cycle
+  });
 });
 
 // ---------------------------------------------------------------------------

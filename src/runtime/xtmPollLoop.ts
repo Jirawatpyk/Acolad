@@ -335,7 +335,7 @@ export class XtmPollLoop {
       // is logged and swallowed so detection is never blocked (Constitution IV).
       // Meta stays unset on failure so the next cycle retries.
       // Capture the clock ONCE (E2) so the dueDailyReport guard, the card builder,
-      // the word-counter read, and the meta write all key off the identical instant.
+      // and the meta write all key off the identical instant.
       const nowMs = this.clock.nowMs();
       if (
         dueDailyReport(
@@ -346,14 +346,18 @@ export class XtmPollLoop {
         )
       ) {
         const date = bangkokDate(nowMs);
-        const held = this.store.listByLifecycle('accepted');
-        const card = buildDailyReportCard(
-          held,
-          nowMs,
-          this.cfg.XTM_ACOLAD_OFFERS_URL,
-          this.cfg.ACCEPT_MAX_WORDS_PER_DAY,
-        );
         try {
+          // Build INSIDE the try so a DB-read or render throw becomes "no report this
+          // cycle, retry next" — never an outer-catch heartbeat.fail() page (Constitution
+          // IV). Meta stays unset on a throw (the set below is never reached), so the next
+          // eligible cycle retries.
+          const held = this.store.listByLifecycle('accepted');
+          const card = buildDailyReportCard(
+            held,
+            nowMs,
+            this.cfg.XTM_ACOLAD_OFFERS_URL,
+            this.cfg.ACCEPT_MAX_WORDS_PER_DAY,
+          );
           this.db.transaction(() => {
             this.outbox.enqueue(`daily:${date}`, JSON.stringify(card), this.clock.nowIso(), 'team');
             this.meta.set('last_daily_report_date', date);
