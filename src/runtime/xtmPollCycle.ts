@@ -9,6 +9,7 @@ import { Outbox, createOutbox } from '../state/outbox.js';
 import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
 import { hasMaterialSheetChange } from '../reporting/sheetSync.js';
 import { evaluateAcceptSchedule, type AcceptScheduleVerdict } from '../schedule/acceptSchedule.js';
+import { decideGroupCapacity, type CapacityMember } from '../schedule/acceptCapacity.js';
 import { resolveHolidaysForSpan, getThaiHolidays } from '../schedule/thaiHolidays.js';
 import { bangkokDateString, bangkokYear } from '../schedule/bangkokCalendar.js';
 import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
@@ -162,12 +163,31 @@ export class XtmPollCycle {
       scheduleRejects: [],
     };
     const detectedMs = Date.parse(snapshot.capturedAt);
-    // Schedule-gate state (Task 12). nowMs = the snapshot clock; today/counter keyed to
-    // Bangkok. acceptedWordsToday is read ONCE then advanced optimistically per accepted
-    // group within this cycle so multiple groups respect the daily cap (§5).
+    // Schedule-gate state. Capacity is bucketed by DEADLINE day (held-derived), not accept
+    // day: seed the per-deadline-day buckets ONCE from the held list (lifecycle 'accepted')
+    // BEFORE this cycle records any new 'accepted' row — otherwise a job accepted this cycle
+    // would be counted both in the seed and the optimistic advance (design §3). When the
+    // gate is disabled the kill-switch path seeds nothing. A null/unparseable deadline is
+    // already skipped by wordsDueByDeadline (no NaN key).
     const scheduleEnabled = this.cfg.ACCEPT_SCHEDULE_ENABLED;
-    const today = bangkokDateString(detectedMs);
-    let acceptedWordsToday = this.meta.acceptedWordsToday(today);
+    const dueSeed = scheduleEnabled ? this.store.wordsDueByDeadline() : new Map<string, number>();
+    const dueBuckets = new Map<string, number>(); // memoized running buckets for THIS cycle
+    // Current words due on a Bangkok deadline day, MEMOIZING the seed default into the map on
+    // first miss (write `dueSeed.get(d) ?? 0`, don't re-read the seed each call) so a later
+    // optimistic advance via dueBuckets.set(d, …) is never lost behind a stale `?? 0`.
+    const bucketFor = (d: string): number => {
+      let v = dueBuckets.get(d);
+      if (v === undefined) {
+        v = dueSeed.get(d) ?? 0;
+        dueBuckets.set(d, v);
+      }
+      return v;
+    };
+    // The Bangkok deadline day of a job, or null when its deadline is missing/unparseable.
+    const deadlineDateOf = (s: XtmJobState): string | null => {
+      const t = s.dueDate ? Date.parse(s.dueDate) : NaN;
+      return Number.isFinite(t) ? bangkokDateString(t) : null;
+    };
     // Jobs whose decideAccept() → accept, collected from BOTH passes BEFORE the schedule
     // gate (C4 — one gate, no per-site drift). The gate then groups them per bulk-accept
     // unit and decides all-or-nothing (C1).
@@ -177,7 +197,6 @@ export class XtmPollCycle {
     // jobKey → why the job was blocked: a skip reason (non-Malay / cap) OR a schedule-
     // reject reason (I3). One map (F15) read by both the Sheet-note and Chat sites.
     const blockNotes = new Map<string, string>();
-    const wordsByKey = new Map<string, number>(); // accepted job → words, for the I1 counter
     let acceptedThisCycle = 0;
 
     for (const ev of result.events) {
@@ -232,8 +251,9 @@ export class XtmPollCycle {
         // on incrementing here so the next decideAccept in THIS pass sees the running count
         // (moving it past the gate would defeat the cap, since the robustness pass below
         // reads the count before the gate runs). ACCEPT_MAX_PER_CYCLE MUST stay 0 (the
-        // schedule gate owns the words/day cap); a cap > 0 is forbidden by the runbook for
-        // the bulk-claim hazard, so this pre-gate count never gates a real accept in prod.
+        // per-deadline-day capacity cap — decideGroupCapacity in this cycle — owns the
+        // words/day limit); a cap > 0 is forbidden by the runbook for the bulk-claim hazard,
+        // so this pre-gate count never gates a real accept in prod.
         acceptedThisCycle++;
       }
     }
@@ -269,18 +289,13 @@ export class XtmPollCycle {
     // skip/disabled/non-eligible paths are untouched. When the feature is OFF every
     // would-accept job becomes a candidate (byte-for-byte today's behavior). When ON, group
     // by the bulk-accept unit (one portal click claims the whole group) and accept a group
-    // only if EVERY member ALLOWs AND the combined words fit the remaining daily cap;
-    // otherwise reject the WHOLE group with the binding reason — never leave a sibling
-    // grabbed-on-portal-but-Rejected (the irreversible data-corruption hazard, §2.4).
+    // only if EVERY member ALLOWs (feasibility) AND every deadline-day bucket still fits the
+    // cap (capacity); otherwise reject the WHOLE group with the binding reason — never leave a
+    // sibling grabbed-on-portal-but-Rejected (the irreversible data-corruption hazard, §2.4).
     if (!scheduleEnabled) {
-      // Gate OFF → byte-for-byte today's accept behavior. Still record each accepted job's
-      // words (F9) so the daily counter keeps accumulating while disabled; it is harmless
-      // bookkeeping when off and lets a mid-day enable read the real running total instead
-      // of under-counting (which could over-accept on the transition day).
-      for (const s of wouldAccept) {
-        candidates.push(s);
-        wordsByKey.set(s.jobKey, s.words ?? 0);
-      }
+      // Gate OFF → byte-for-byte today's accept behavior (kill-switch): every would-accept
+      // job becomes a candidate, no capacity cap, no seed (dueSeed is empty when disabled).
+      for (const s of wouldAccept) candidates.push(s);
     } else {
       const cap = this.cfg.ACCEPT_MAX_WORDS_PER_DAY;
       const groups = new Map<string, XtmJobState[]>();
@@ -291,36 +306,39 @@ export class XtmPollCycle {
         else groups.set(key, [s]);
       }
       for (const members of groups.values()) {
+        // Feasibility pass first (unchanged): if ANY member fails, bind the FIRST failing
+        // member's reason and block the WHOLE group — a bulk click claims every member, so a
+        // partial accept would strand a sibling owned-but-Rejected (§2.4).
         let blockReason: string | null = null;
-        let groupWords = 0;
         for (const s of members) {
-          const verdict = this.scheduleVerdict(s, detectedMs, acceptedWordsToday);
-          // Bind the FIRST failing member's reason (with its file for the team's note).
+          const verdict = this.scheduleVerdict(s, detectedMs);
           if (blockReason === null && !verdict.allow)
             blockReason = `'${s.fileName}': ${verdict.reason}`;
-          groupWords += s.words ?? 0;
         }
-        // Group-level capacity: the bulk grabs every member at once, so the COMBINED words
-        // (not a per-job slice) must fit the remaining cap. A single accepted group may
-        // overshoot by its own size — accepted + documented (§5), same class as the cap.
-        // I3a: split the two distinct causes. A group whose OWN words exceed the whole cap
-        // can NEVER auto-accept on any day (needs a human); a group that merely exhausts the
-        // remaining budget is a "paused for today" condition (and raises daily_cap_reached).
-        let capExhausted = false;
-        if (blockReason === null && cap > 0 && acceptedWordsToday + groupWords > cap) {
-          if (groupWords > cap) {
-            blockReason = `group words (${groupWords}) exceed the daily cap (${cap}) — accept manually`;
+        // Capacity decision (group-level, per DEADLINE day) — gated behind feasibility so an
+        // infeasible job reads "can't finish", never "cap reached" (§3). Buckets are the held
+        // words due on each member's deadline day (held-derived), advanced optimistically per
+        // day. Skipping a null deadlineDateOf is defensive: when ON every member already
+        // passed feasibility (deadline known), so deadlineDateOf is non-null here.
+        let capExhaustedDay: string | undefined;
+        if (blockReason === null && cap > 0) {
+          const capMembers: CapacityMember[] = members.map((s) => ({
+            jobKey: s.jobKey,
+            words: s.words ?? 0,
+            deadlineDate: deadlineDateOf(s)!,
+          }));
+          const v = decideGroupCapacity(capMembers, bucketFor, cap);
+          if (!v.accept) {
+            blockReason = `'${members[0]!.fileName}': ${v.reason}`;
+            capExhaustedDay = v.capExhaustedDay;
           } else {
-            blockReason = `daily word cap reached (${acceptedWordsToday}+${groupWords} > ${cap})`;
-            capExhausted = true;
+            // Advance EACH deadline day's bucket by its OWN subtotal (never lump a
+            // multi-deadline group onto one day) so a later group this cycle sees them.
+            for (const [day, sub] of v.subtotalsByDay) dueBuckets.set(day, bucketFor(day) + sub);
           }
         }
         if (blockReason === null) {
-          for (const s of members) {
-            candidates.push(s);
-            wordsByKey.set(s.jobKey, s.words ?? 0);
-          }
-          acceptedWordsToday += groupWords; // optimistic advance for the next group this cycle
+          for (const s of members) candidates.push(s);
         } else {
           const note = `group blocked: ${blockReason}`;
           for (const s of members) {
@@ -337,19 +355,19 @@ export class XtmPollCycle {
               dueDate: s.dueDate,
             });
           }
-          // I3b: the daily budget is genuinely exhausted (not a single over-cap job) —
-          // alert ONCE per Bangkok day so ops knows "auto-accept paused for the day on
-          // budget" (vs "no jobs today"). Already guarded behind scheduleEnabled (this whole
-          // block). dedupKey keys the date so it fires at most once per Bangkok day.
-          if (capExhausted) {
+          // I3b: a deadline day's budget is genuinely exhausted (not a single over-cap job) —
+          // alert ONCE per DEADLINE day so ops knows "auto-accept paused for that day on
+          // budget" (vs "no jobs"). Guarded behind scheduleEnabled (this whole block); the
+          // dedupKey keys the deadline day so it fires at most once per that day.
+          if (capExhaustedDay) {
             raiseAlert(
               this.db,
               this.outbox,
               'daily_cap_reached',
               snapshot.capturedAt,
-              `the ${cap}-word daily cap is reached for ${today} (${acceptedWordsToday} already accepted)`,
+              `the ${cap}-word daily cap is reached for ${capExhaustedDay}`,
               {},
-              `daily_cap_reached:${today}`,
+              `daily_cap_reached:${capExhaustedDay}`,
             );
           }
         }
@@ -424,15 +442,6 @@ export class XtmPollCycle {
             r.outcome,
             r.outcome === 'accepted' ? r.at : null,
           );
-          // I1: advance the daily word counter in the SAME txn as the outcome record so a
-          // crash between them can never under-count (→ over-accept) or double-count. Only a
-          // confirmed accept counts. NOT gated on ACCEPT_SCHEDULE_ENABLED (F9): the counter
-          // must keep accumulating while the gate is off so a mid-Bangkok-day enable reads
-          // the real running total (wordsByKey is populated on both the gated and ungated
-          // accept paths above).
-          if (r.outcome === 'accepted') {
-            this.meta.addAcceptedWords(today, wordsByKey.get(r.jobKey) ?? 0);
-          }
         }
       })();
       // Summary + in-memory state + alerts (outside the record transaction).
@@ -627,16 +636,11 @@ export class XtmPollCycle {
     return s.targetLang ?? '';
   }
 
-  /** Compose the schedule verdict for one would-accept job (C4 — the single gate used by
-   *  both passes). Resolves the curated Thai-holiday map for every Bangkok year the
-   *  now→deadline span touches and feeds the pure `evaluateAcceptSchedule`. */
-  private scheduleVerdict(
-    s: XtmJobState,
-    nowMs: number,
-    // Capacity moved to acceptCapacity.decideGroupCapacity (applied in the cycle); the
-    // schedule gate is feasibility-only now, so this is unused until Task 6 removes it.
-    _acceptedWordsToday: number,
-  ): AcceptScheduleVerdict {
+  /** Compose the schedule (feasibility-only) verdict for one would-accept job (C4 — the
+   *  single gate used by both passes). Resolves the curated Thai-holiday map for every
+   *  Bangkok year the now→deadline span touches and feeds the pure `evaluateAcceptSchedule`.
+   *  Capacity is decided separately by `decideGroupCapacity` (per deadline day) in the cycle. */
+  private scheduleVerdict(s: XtmJobState, nowMs: number): AcceptScheduleVerdict {
     const parsed = s.dueDate ? Date.parse(s.dueDate) : NaN;
     const dueAtMs = Number.isFinite(parsed) ? parsed : null;
     // The per-job fail-closed still uses the SPAN's curation (a far deadline into an

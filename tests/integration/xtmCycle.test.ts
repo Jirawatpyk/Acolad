@@ -7,6 +7,7 @@ import { XtmPollCycle } from '../../src/runtime/xtmPollCycle.js';
 import { XtmJobStore } from '../../src/state/xtmJobStore.js';
 import { MetaStore } from '../../src/state/meta.js';
 import { computeXtmJobKey } from '../../src/detection/jobKey.js';
+import { bangkokDateString } from '../../src/schedule/bangkokCalendar.js';
 import type { AppConfig } from '../../src/config/index.js';
 import type { XtmRawJob, XtmJobSnapshot, XtmJobState } from '../../src/detection/types.js';
 import type { AcceptTarget, AcceptResult } from '../../src/portal/errors.js';
@@ -69,11 +70,55 @@ function fresh(): DB {
   db = openDatabase(d, NOW).db;
   return db;
 }
-const only = (): XtmJobState => [...new XtmJobStore(db).loadAll().values()][0]!;
+const only = (fileName?: string): XtmJobState => {
+  const all = [...new XtmJobStore(db).loadAll().values()];
+  return (fileName === undefined ? all[0] : all.find((s) => s.fileName === fileName))!;
+};
 afterEach(() => {
   db?.close();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
+
+// Held-job seed + lifecycle helpers for the deadline-day capacity tests (Task 6). A held
+// job (lifecycle 'accepted') is what wordsDueByDeadline() buckets; finishJob moves it out
+// of 'accepted' (freeing its deadline-day quota); acceptedKeys/jobKeyFor read the result.
+const accepted = (over: {
+  jobKey: string;
+  dueDate: string | null;
+  words: number | null;
+  fileName?: string;
+}): XtmJobState => ({
+  jobKey: over.jobKey,
+  xtmTaskId: null,
+  projectName: 'P',
+  fileName: over.fileName ?? `${over.jobKey}.seed.docx`,
+  sourceLang: 'English (USA)',
+  targetLang: 'Malay (Malaysia)',
+  dueDate: over.dueDate,
+  dueRaw: null,
+  words: over.words,
+  step: 'PE 1',
+  role: 'Corrector',
+  eligible: true,
+  lifecycleStatus: 'accepted',
+  acceptStatus: 'accepted',
+  acceptedAt: NOW,
+  status: 'visible',
+  firstSeenAt: NOW,
+  lastSeenAt: NOW,
+  snapshotHash: 'seed',
+  consecutiveMisses: 0,
+});
+const finishJob = (database: DB, jobKey: string): void => {
+  database.prepare("UPDATE jobs SET lifecycle_status='closed' WHERE job_key = ?").run(jobKey);
+};
+const acceptedKeys = (database: DB): string[] =>
+  (
+    database.prepare("SELECT job_key FROM jobs WHERE lifecycle_status='accepted'").all() as {
+      job_key: string;
+    }[]
+  ).map((r) => r.job_key);
+const jobKeyFor = (fileName: string): string => computeXtmJobKey(xraw({ fileName }));
 
 describe('XtmPollCycle (US1 — detect, accept, record)', () => {
   it('accepts a new Malay job and records accepted state (FR-006)', async () => {
@@ -549,21 +594,27 @@ const snapAt = (jobs: XtmRawJob[], capturedAt: string, cycle = 'c1'): XtmJobSnap
 
 describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
   const MON_10 = '2026-06-22T10:00:00+07:00'; // Bangkok Monday 10:00 (working hours)
-  const TODAY = '2026-06-22'; // bangkokDateString(MON_10)
   const dueWed18 = '2026-06-24T18:00:00+07:00'; // Wed 18:00 — far, finishable for small jobs
+  const dueTue18 = '2026-06-23T18:00:00+07:00'; // Tue 18:00 — far, finishable for small jobs
   const dueMon12 = '2026-06-22T12:00:00+07:00'; // same Monday noon — tight (120 working min)
+  const MON_10b = '2026-06-22T11:00:00+07:00'; // later same Monday — re-attempt via robustness pass
 
-  const sheetRows = (): Array<{ status: string; note: string | null }> =>
+  const sheetRows = (): Array<{ status: string; note: string | null; file: string }> =>
     (
       db.prepare("SELECT payload_json FROM outbox WHERE channel='sheets'").all() as {
         payload_json: string;
       }[]
-    ).map(
-      (r) => (JSON.parse(r.payload_json) as { row: { status: string; note: string | null } }).row,
-    );
+    ).map((r) => {
+      const row = (
+        JSON.parse(r.payload_json) as {
+          row: { status: string; note: string | null; fileName: string };
+        }
+      ).row;
+      return { status: row.status, note: row.note, file: row.fileName };
+    });
   const chatText = (): string => JSON.stringify(outboxPayloads('chat'));
 
-  it('accepts a finishable in-hours Malay job and counts its words in the txn (gate ALLOW + I1)', async () => {
+  it('accepts a finishable in-hours Malay job and advances its deadline-day bucket (gate ALLOW)', async () => {
     fresh();
     const acc = new StubAcceptor();
     const summary = await new XtmPollCycle(db, schedCfg(), acc).run(
@@ -572,7 +623,11 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(acc.calls.flat()).toHaveLength(1); // clicked
     expect(only().lifecycleStatus).toBe('accepted');
     expect(summary.scheduleBlocked).toBe(0);
-    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(100); // counter advanced
+    // The held list (the single source of truth for capacity) now carries the accepted
+    // job's words under its DEADLINE day — not a meta accept-day counter.
+    expect(
+      new XtmJobStore(db).wordsDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
+    ).toBe(100);
   });
 
   it('rejects a too-tight job — Sheet Rejected + reason in Note + Chat; accept untouched; counter 0', async () => {
@@ -591,7 +646,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(sheetRows().at(-1)?.note).toContain('cannot finish in time'); // reason surfaced
     expect(chatHasTitle('🆕')).toBe(true); // rendered as a new-job card
     expect(chatText()).toContain('Rejected —'); // reason threaded into Chat (I3)
-    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(0); // not counted
+    expect(new XtmJobStore(db).wordsDueByDeadline().size).toBe(0); // nothing held → no bucket
   });
 
   it('I1: a schedule-blocked job surfaces reason/words/dueDate via summary.scheduleRejects', async () => {
@@ -651,18 +706,18 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     });
   }
 
-  // I2: addAcceptedWords + recordAcceptOutcome must commit (or roll back) as ONE unit. Two
-  // same-language Malay jobs form one bulk group, both feasible → both claimed & attempted.
-  // The acceptor confirms job A (its words get counted mid-txn), then returns a MALFORMED
+  // I2: the record transaction is all-or-nothing. Two same-language Malay jobs form one
+  // bulk group, both feasible → both claimed & attempted. The acceptor confirms job A (its
+  // recordAcceptOutcome flips it to lifecycle 'accepted' mid-txn), then returns a MALFORMED
   // outcome for job B that makes recordAcceptOutcome throw INSIDE the record transaction.
-  // The whole txn must roll back — so job A's daily-counter increment is undone too (the I1
-  // atomicity invariant: the counter can never be left advanced for an uncommitted accept).
-  it('I2: a mid-txn throw rolls the daily word counter back (addAcceptedWords + recordAcceptOutcome are atomic)', async () => {
+  // The whole txn must roll back — so job A is NOT left committed as 'accepted', and the
+  // held list (the capacity source of truth) shows no held words for an uncommitted accept.
+  it('I2: a mid-txn throw leaves NO job committed as accepted (record txn is atomic)', async () => {
     fresh();
     const acc = {
       async acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]> {
         return [
-          // results[0] confirmed → its words ARE counted first (counter advances to 100)…
+          // results[0] confirmed → recordAcceptOutcome flips job A to 'accepted' first…
           { jobKey: targets[0]!.jobKey, outcome: 'accepted', at: NOW } as AcceptResult,
           // …then results[1] carries an outcome outside the lifecycle map → recordAcceptOutcome
           // dereferences `undefined` and throws, aborting the record transaction.
@@ -685,8 +740,8 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
         ),
       ),
     ).rejects.toThrow();
-    // The record txn rolled back → job A's mid-txn counter increment was undone.
-    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(0);
+    // The record txn rolled back → job A's 'accepted' write was undone, so nothing is held.
+    expect(new XtmJobStore(db).wordsDueByDeadline().size).toBe(0);
   });
 
   it('I3a: a single group whose OWN words exceed the daily cap → "exceed" message (accept manually)', async () => {
@@ -704,41 +759,45 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(note).toContain('accept manually');
   });
 
-  it('I3a: a group that fits alone but exhausts the remaining daily budget → "cap reached" message', async () => {
+  it('I3a: a group that fits alone but exhausts the remaining deadline-day budget → "cap reached" message', async () => {
     fresh();
-    new MetaStore(db).addAcceptedWords(TODAY, 900); // 100 left under the 1000 cap
+    // Held seed: 900 words already due Wed (under the 1000 cap, 100 left for that day).
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 900 })]);
     const acc = new StubAcceptor();
     await new XtmPollCycle(db, schedCfg(), acc).run(
-      snapAt([xraw({ dueDate: dueWed18, words: 300 })], MON_10), // 300 ≤ cap, but 900+300 > 1000
+      snapAt([xraw({ dueDate: dueWed18, words: 300 })], MON_10), // 300 ≤ cap, but 900+300 > 1000 on Wed
     );
     expect(acc.calls.flat()).toHaveLength(0);
-    expect(only().lifecycleStatus).toBe('rejected');
-    const note = sheetRows().at(-1)?.note ?? '';
+    expect(only('a.docx').lifecycleStatus).toBe('rejected');
+    const note = sheetRows().find((r) => r.file === 'a.docx')?.note ?? '';
     expect(note).toContain('daily word cap reached');
+    expect(note).toContain(bangkokDateString(Date.parse(dueWed18))); // names the deadline day
     expect(note).not.toContain('exceed the daily cap'); // distinct from the over-cap case
   });
 
-  it('I3b: a genuine cap-reached block raises daily_cap_reached once per Bangkok day (deduped)', async () => {
+  it('I3b: a genuine cap-reached block raises daily_cap_reached once per DEADLINE day (deduped)', async () => {
     fresh();
-    new MetaStore(db).addAcceptedWords(TODAY, 900); // 100 left
+    // Held seed: 900 words already due Wed (100 left for that deadline day).
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 900 })]);
     const acc = new StubAcceptor();
     const cycle = new XtmPollCycle(db, schedCfg(), acc);
+    const wedDay = bangkokDateString(Date.parse(dueWed18)); // '2026-06-24'
     const activeCapAlert = (): number =>
       (
         db
           .prepare(
             "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key=? AND resolved_at IS NULL",
           )
-          .get('daily_cap_reached:2026-06-22') as { n: number }
+          .get(`daily_cap_reached:${wedDay}`) as { n: number }
       ).n;
     await cycle.run(
       snapAt([xraw({ fileName: 'a.docx', dueDate: dueWed18, words: 300 })], MON_10, 'c1'),
     );
-    expect(activeCapAlert()).toBe(1); // raised once when the budget is genuinely exhausted
+    expect(activeCapAlert()).toBe(1); // raised once when that deadline day's budget is exhausted
     await cycle.run(
       snapAt([xraw({ fileName: 'b.docx', dueDate: dueWed18, words: 300 })], MON_10, 'c2'),
     );
-    expect(activeCapAlert()).toBe(1); // deduped — at most one cap alert per Bangkok day
+    expect(activeCapAlert()).toBe(1); // deduped — at most one cap alert per deadline day
   });
 
   it('I3b: a single-job-over-cap block does NOT raise daily_cap_reached', async () => {
@@ -758,7 +817,8 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
 
   it('I3b: the cap alert is guarded behind scheduleEnabled (gate OFF never raises it)', async () => {
     fresh();
-    new MetaStore(db).addAcceptedWords(TODAY, 900);
+    // Held seed that would exhaust Wed's budget IF the gate ran — but the gate is OFF.
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 900 })]);
     const acc = new StubAcceptor();
     // Gate OFF → every would-accept job is accepted byte-for-byte; the cap alert must not fire.
     await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), acc).run(
@@ -832,31 +892,36 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(acc.calls.flat()).toHaveLength(0); // group rejected as a unit (combined > cap)
     const states = [...new XtmJobStore(db).loadAll().values()];
     expect(states.every((s) => s.lifecycleStatus === 'rejected')).toBe(true);
-    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(0); // nothing accepted → counter untouched
+    expect(new XtmJobStore(db).wordsDueByDeadline().size).toBe(0); // nothing accepted → no held words
   });
 
-  it('capacity: a group whose combined words would exceed the remaining cap is rejected', async () => {
+  it('capacity: a group whose combined words would exceed the remaining deadline-day cap is rejected', async () => {
     fresh();
-    new MetaStore(db).addAcceptedWords(TODAY, 950); // 50 left under the 1000 cap
+    // Held seed: 950 words already due Wed (50 left under the 1000 cap for that day).
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 950 })]);
     const acc = new StubAcceptor();
     await new XtmPollCycle(db, schedCfg(), acc).run(
-      snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10), // 950 + 100 = 1050 > 1000
+      snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10), // 950 + 100 = 1050 > 1000 on Wed
     );
     expect(acc.calls.flat()).toHaveLength(0);
-    expect(only().lifecycleStatus).toBe('rejected');
-    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(950); // unchanged
+    expect(only('a.docx').lifecycleStatus).toBe('rejected');
+    expect(
+      new XtmJobStore(db).wordsDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
+    ).toBe(950); // unchanged — the rejected job is not held
   });
 
-  it('capacity: a group that fits the remaining cap is accepted and increments the counter', async () => {
+  it('capacity: a group that fits the remaining deadline-day cap is accepted and advances its bucket', async () => {
     fresh();
-    new MetaStore(db).addAcceptedWords(TODAY, 950);
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 950 })]);
     const acc = new StubAcceptor();
     await new XtmPollCycle(db, schedCfg(), acc).run(
-      snapAt([xraw({ dueDate: dueWed18, words: 50 })], MON_10), // 950 + 50 = 1000 ≤ 1000
+      snapAt([xraw({ dueDate: dueWed18, words: 50 })], MON_10), // 950 + 50 = 1000 ≤ 1000 on Wed
     );
     expect(acc.calls.flat()).toHaveLength(1);
-    expect(only().lifecycleStatus).toBe('accepted');
-    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(1000);
+    expect(only('a.docx').lifecycleStatus).toBe('accepted');
+    expect(
+      new XtmJobStore(db).wordsDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
+    ).toBe(1000); // 950 held + 50 newly accepted, both due Wed
   });
 
   it('does NOT re-announce a still-present rejected job the second cycle (no duplicate Sheet/Chat)', async () => {
@@ -982,19 +1047,6 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(chatText()).toContain('Rejected —'); // the reject reason is still surfaced
   });
 
-  it('counts accepted words even when the schedule gate is DISABLED (F9 — no transition-day undercount)', async () => {
-    fresh();
-    const acc = new StubAcceptor();
-    // Schedule OFF but a real accept happens → its words MUST still be counted, so that
-    // enabling the gate later in the same Bangkok day reads the real running total
-    // (otherwise the transition day could over-accept by up to ~1.7× the cap).
-    await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), acc).run(
-      snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10),
-    );
-    expect(only().lifecycleStatus).toBe('accepted'); // gate disabled → accepted as before
-    expect(new MetaStore(db).acceptedWordsToday(TODAY)).toBe(100); // counter advanced even while disabled
-  });
-
   it('F1: a still-rejected job whose dueDate changes keeps its reject reason on the field-sync note (I3 — never wiped to null)', async () => {
     fresh();
     new MetaStore(db).markBaselineDone();
@@ -1076,6 +1128,71 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
       )
       .get() as { n: number };
     expect(recovered.n).toBe(1); // a recovered event was enqueued
+  });
+
+  // --- Component A: cap by DEADLINE day, held-derived (Task 6) ---------------
+  it('multi-deadline ALLOW: two feasible Malay jobs > cap combined but ≤ cap each day → both accepted', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt(
+        [
+          xraw({ fileName: 'tue.docx', projectName: 'P', dueDate: dueTue18, words: 800 }),
+          xraw({ fileName: 'wed.docx', projectName: 'P', dueDate: dueWed18, words: 800 }),
+        ],
+        MON_10,
+      ),
+    );
+    // 800 + 800 = 1600 > the 1000 cap, but each DEADLINE day holds only 800 → both accepted
+    // (the old per-accept-day cap would have rejected the pair).
+    expect(acc.calls.flat()).toHaveLength(2);
+    const m = new XtmJobStore(db).wordsDueByDeadline();
+    expect(m.get(bangkokDateString(Date.parse(dueTue18)))).toBe(800);
+    expect(m.get(bangkokDateString(Date.parse(dueWed18)))).toBe(800);
+  });
+
+  it('finished returns quota (A3) with a negative control', async () => {
+    fresh();
+    // negative control: Tue bucket already 800 (a held accepted job) → a new 800w-due-Tue is rejected
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'old', dueDate: dueTue18, words: 800 })]);
+    await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
+      snapAt([xraw({ fileName: 'new.docx', dueDate: dueTue18, words: 800 })], MON_10),
+    );
+    expect(only('new.docx').lifecycleStatus).toBe('rejected'); // 800+800 > 1000
+    // free the quota: the old job finishes (leaves 'accepted')
+    finishJob(db, 'old'); // set lifecycle_status='closed'
+    await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
+      snapAt([xraw({ fileName: 'new.docx', dueDate: dueTue18, words: 800 })], MON_10b),
+    );
+    expect(acceptedKeys(db)).toContain(jobKeyFor('new.docx')); // now accepted
+  });
+
+  it('cross-deadline all-or-nothing: a Wed-overflow blocks the whole Malay group incl the fitting Tue job', async () => {
+    fresh();
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'w', dueDate: dueWed18, words: 900 })]); // Wed near full
+    await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
+      snapAt(
+        [
+          xraw({ fileName: 'tue.docx', dueDate: dueTue18, words: 100 }),
+          xraw({ fileName: 'wed.docx', dueDate: dueWed18, words: 200 }), // 900+200 > 1000
+        ],
+        MON_10,
+      ),
+    );
+    expect(only('tue.docx').lifecycleStatus).toBe('rejected');
+    expect(only('wed.docx').lifecycleStatus).toBe('rejected');
+    const note = sheetRows().find((r) => r.file === 'tue.docx')?.note ?? '';
+    expect(note).toContain(bangkokDateString(Date.parse(dueWed18))); // names the overflowing day
+  });
+
+  it('capacity seed skips a null-deadline held job without crashing', async () => {
+    fresh();
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'nul', dueDate: null, words: 999 })]);
+    await expect(
+      new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
+        snapAt([xraw({ fileName: 'ok.docx', dueDate: dueTue18, words: 100 })], MON_10),
+      ),
+    ).resolves.toBeDefined();
   });
 });
 
