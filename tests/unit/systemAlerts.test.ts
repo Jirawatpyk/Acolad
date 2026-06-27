@@ -221,6 +221,31 @@ describe('yield alert triggers', () => {
 });
 
 // ---------------------------------------------------------------------------
+// I3b: daily_cap_reached trigger
+// ---------------------------------------------------------------------------
+
+describe('raiseAlert — daily_cap_reached (I3b)', () => {
+  it('is a warn trigger that does not auto-recover', () => {
+    const t = TRIGGERS['daily_cap_reached'];
+    expect(t.severity).toBe('warn');
+    expect(t.hasRecovered).toBe(false);
+    expect(t.title.length).toBeGreaterThan(0);
+  });
+
+  it('dedups per Bangkok day via the dedup key, re-arming on the next day', () => {
+    expect(
+      raiseAlert(db, outbox, 'daily_cap_reached', NOW, 'cap', {}, 'daily_cap_reached:2026-06-10'),
+    ).toBe(true);
+    expect(
+      raiseAlert(db, outbox, 'daily_cap_reached', NOW, 'cap', {}, 'daily_cap_reached:2026-06-10'),
+    ).toBe(false); // same day → deduped
+    expect(
+      raiseAlert(db, outbox, 'daily_cap_reached', NOW, 'cap', {}, 'daily_cap_reached:2026-06-11'),
+    ).toBe(true); // next Bangkok day re-arms
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Task 10: holiday_calendar_stale trigger
 // ---------------------------------------------------------------------------
 

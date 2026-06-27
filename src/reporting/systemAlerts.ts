@@ -26,7 +26,8 @@ export type TriggerKind =
   | 'daily_report_dead'
   | 'xtm_yielding'
   | 'yield_stuck'
-  | 'holiday_calendar_stale';
+  | 'holiday_calendar_stale'
+  | 'daily_cap_reached';
 
 interface TriggerSpec {
   severity: 'warn' | 'critical';
@@ -149,6 +150,18 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     action:
       'Add the current year to src/schedule/thaiHolidaysData.ts (HOLIDAYS + CURATED_YEARS) then npm run deploy',
     hasRecovered: true,
+  },
+  // Raised at most once per Bangkok day (dedupKey `daily_cap_reached:<date>`) when the
+  // daily word budget is genuinely exhausted — so ops knows "auto-accept paused for the
+  // day on budget" (vs "no jobs today"). hasRecovered:false (like accept_failed): it never
+  // auto-resolves; the next Bangkok day's dedupKey re-arms it.
+  daily_cap_reached: {
+    severity: 'warn',
+    title: 'Daily word cap reached — auto-accept paused for today',
+    impact: 'No more Malay jobs are auto-accepted until the Bangkok-day counter resets at midnight',
+    action:
+      'Accept further jobs manually if needed; the cap resets at Bangkok midnight. To raise it, set ACCEPT_MAX_WORDS_PER_DAY in .env then npm run deploy',
+    hasRecovered: false,
   },
 };
 

@@ -303,8 +303,17 @@ export class XtmPollCycle {
         // Group-level capacity: the bulk grabs every member at once, so the COMBINED words
         // (not a per-job slice) must fit the remaining cap. A single accepted group may
         // overshoot by its own size — accepted + documented (§5), same class as the cap.
+        // I3a: split the two distinct causes. A group whose OWN words exceed the whole cap
+        // can NEVER auto-accept on any day (needs a human); a group that merely exhausts the
+        // remaining budget is a "paused for today" condition (and raises daily_cap_reached).
+        let capExhausted = false;
         if (blockReason === null && cap > 0 && acceptedWordsToday + groupWords > cap) {
-          blockReason = `daily word cap reached (${acceptedWordsToday + groupWords}/${cap})`;
+          if (groupWords > cap) {
+            blockReason = `group words (${groupWords}) exceed the daily cap (${cap}) — accept manually`;
+          } else {
+            blockReason = `daily word cap reached (${acceptedWordsToday}+${groupWords} > ${cap})`;
+            capExhausted = true;
+          }
         }
         if (blockReason === null) {
           for (const s of members) {
@@ -327,6 +336,21 @@ export class XtmPollCycle {
               words: s.words,
               dueDate: s.dueDate,
             });
+          }
+          // I3b: the daily budget is genuinely exhausted (not a single over-cap job) —
+          // alert ONCE per Bangkok day so ops knows "auto-accept paused for the day on
+          // budget" (vs "no jobs today"). Already guarded behind scheduleEnabled (this whole
+          // block). dedupKey keys the date so it fires at most once per Bangkok day.
+          if (capExhausted) {
+            raiseAlert(
+              this.db,
+              this.outbox,
+              'daily_cap_reached',
+              snapshot.capturedAt,
+              `the ${cap}-word daily cap is reached for ${today} (${acceptedWordsToday} already accepted)`,
+              {},
+              `daily_cap_reached:${today}`,
+            );
           }
         }
       }

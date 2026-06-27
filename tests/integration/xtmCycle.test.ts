@@ -617,6 +617,89 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(summary.scheduleRejects).toHaveLength(0);
   });
 
+  it('I3a: a single group whose OWN words exceed the daily cap → "exceed" message (accept manually)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    // 1500 words is feasible by Wed but its own size (1500) > the 1000-word daily cap → can
+    // never auto-accept on any day. The message must not read like a budget already spent.
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 1500 })], MON_10), // counter 0
+    );
+    expect(acc.calls.flat()).toHaveLength(0);
+    expect(only().lifecycleStatus).toBe('rejected');
+    const note = sheetRows().at(-1)?.note ?? '';
+    expect(note).toContain('exceed the daily cap');
+    expect(note).toContain('accept manually');
+  });
+
+  it('I3a: a group that fits alone but exhausts the remaining daily budget → "cap reached" message', async () => {
+    fresh();
+    new MetaStore(db).addAcceptedWords(TODAY, 900); // 100 left under the 1000 cap
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 300 })], MON_10), // 300 ≤ cap, but 900+300 > 1000
+    );
+    expect(acc.calls.flat()).toHaveLength(0);
+    expect(only().lifecycleStatus).toBe('rejected');
+    const note = sheetRows().at(-1)?.note ?? '';
+    expect(note).toContain('daily word cap reached');
+    expect(note).not.toContain('exceed the daily cap'); // distinct from the over-cap case
+  });
+
+  it('I3b: a genuine cap-reached block raises daily_cap_reached once per Bangkok day (deduped)', async () => {
+    fresh();
+    new MetaStore(db).addAcceptedWords(TODAY, 900); // 100 left
+    const acc = new StubAcceptor();
+    const cycle = new XtmPollCycle(db, schedCfg(), acc);
+    const activeCapAlert = (): number =>
+      (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key=? AND resolved_at IS NULL",
+          )
+          .get('daily_cap_reached:2026-06-22') as { n: number }
+      ).n;
+    await cycle.run(
+      snapAt([xraw({ fileName: 'a.docx', dueDate: dueWed18, words: 300 })], MON_10, 'c1'),
+    );
+    expect(activeCapAlert()).toBe(1); // raised once when the budget is genuinely exhausted
+    await cycle.run(
+      snapAt([xraw({ fileName: 'b.docx', dueDate: dueWed18, words: 300 })], MON_10, 'c2'),
+    );
+    expect(activeCapAlert()).toBe(1); // deduped — at most one cap alert per Bangkok day
+  });
+
+  it('I3b: a single-job-over-cap block does NOT raise daily_cap_reached', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    // 1500 > cap → "exceed" case, NOT a budget-exhausted day → no daily_cap_reached alert.
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 1500 })], MON_10),
+    );
+    const alerts = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key LIKE 'daily_cap_reached%'",
+      )
+      .get() as { n: number };
+    expect(alerts.n).toBe(0);
+  });
+
+  it('I3b: the cap alert is guarded behind scheduleEnabled (gate OFF never raises it)', async () => {
+    fresh();
+    new MetaStore(db).addAcceptedWords(TODAY, 900);
+    const acc = new StubAcceptor();
+    // Gate OFF → every would-accept job is accepted byte-for-byte; the cap alert must not fire.
+    await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 300 })], MON_10),
+    );
+    const alerts = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key LIKE 'daily_cap_reached%'",
+      )
+      .get() as { n: number };
+    expect(alerts.n).toBe(0);
+  });
+
   it('C1: one infeasible member rejects the WHOLE bulk group (no member left accepted)', async () => {
     fresh();
     const acc = new StubAcceptor();
