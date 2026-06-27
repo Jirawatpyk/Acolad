@@ -9,11 +9,12 @@
 import { buildCard } from './chatCard.js';
 import { formatReadableDate } from './dateFormat.js';
 import { dash } from './cardText.js';
+import { bangkokCalendar, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import type { XtmJobState } from '../detection/types.js';
 
-/** Shift to Asia/Bangkok (+07:00) then read UTC hours. */
+/** Bangkok hour 0..23 — delegates to the canonical calendar (F5/F7). */
 function bangkokHour(nowMs: number): number {
-  return new Date(nowMs + 7 * 3_600_000).getUTCHours();
+  return Math.floor(bangkokCalendar(nowMs).minutesOfDay / 60);
 }
 
 // ---------------------------------------------------------------------------
@@ -22,12 +23,12 @@ function bangkokHour(nowMs: number): number {
 
 /**
  * Returns the Bangkok calendar date as 'YYYY-MM-DD' for the given epoch ms.
- * Uses +7h shift then UTC parts — safe without a process timezone.
+ * Delegates to the canonical `bangkokDateString` (F5/F7) so the daily-report read
+ * and the meta word-counter write key off the IDENTICAL "Bangkok date" function —
+ * eliminating the latent key-divergence that could silently bypass the daily cap.
  */
 export function bangkokDate(nowMs: number): string {
-  const d = new Date(nowMs + 7 * 3_600_000);
-  const p = (n: number): string => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
+  return bangkokDateString(nowMs);
 }
 
 /**
@@ -45,18 +46,28 @@ export function dueDailyReport(nowMs: number, lastSentDate: string | null, hour 
 /**
  * Builds the Google Chat cardsV2 payload for the daily in-progress jobs report.
  *
- * @param held    Jobs currently in lifecycle_status='accepted'.
- * @param nowMs   Current epoch ms (for the date header / card ID).
- * @param xtmUrl  Deep-link to XTM Active task list.
+ * @param held                Jobs currently in lifecycle_status='accepted'.
+ * @param nowMs               Current epoch ms (for the date header / card ID).
+ * @param xtmUrl              Deep-link to XTM Active task list.
+ * @param acceptedWordsToday  Running word total auto-accepted today (Bangkok date).
+ * @param maxWordsPerDay      Daily word cap from config (0 = no cap).
  */
 export function buildDailyReportCard(
   held: XtmJobState[],
   nowMs: number,
   xtmUrl: string,
+  acceptedWordsToday: number,
+  maxWordsPerDay: number,
 ): { cardsV2: unknown[] } {
   const date = bangkokDate(nowMs);
 
-  const rows =
+  const usage =
+    maxWordsPerDay > 0
+      ? `${acceptedWordsToday} / ${maxWordsPerDay}`
+      : `${acceptedWordsToday} words (no cap)`;
+  const capacityRow = { label: 'Auto-accepted today', value: usage };
+
+  const jobRows =
     held.length > 0
       ? held.map((j) => ({
           label: dash(j.projectName),
@@ -68,7 +79,7 @@ export function buildDailyReportCard(
     cardId: `daily-${date}`,
     headerTitle: `📋 Jobs in Progress (${held.length})`,
     headerSubtitle: date,
-    rows,
+    rows: [capacityRow, ...jobRows],
     buttonUrl: xtmUrl,
     buttonText: 'Open in XTM',
   });

@@ -48,8 +48,8 @@ shell commands, and other important information, read the current plan:
 **Constitution เป็นกฎสูงสุด (non-negotiable)** — ข้อที่กระทบงานเขียนโค้ดตรงๆ:
 
 - TDD บังคับสำหรับ core logic (`src/detection/`, `src/state/`,
-  `src/reporting/`): เขียน test ก่อน ต้อง FAIL ก่อน implement; coverage gate
-  ≥ 80% เฉพาะสามโมดูลนี้
+  `src/reporting/`, `src/schedule/`): เขียน test ก่อน ต้อง FAIL ก่อน implement;
+  coverage gate ≥ 80% เฉพาะสี่โมดูลนี้
 - Failure-mode suite เป็นข้อบังคับ (login fail, session expiry, timeout,
   malformed jobs, quota/auth error, restart กลางรอบ)
 - Live-portal tests อยู่หลัง env flag `LIVE_PORTAL=1` เท่านั้น — **ห้ามรันใน CI**
@@ -74,7 +74,7 @@ npm run lint            # ESLint + Prettier — ต้อง 0 error
 npm run typecheck       # tsc --noEmit (strict)
 npm test                # Vitest unit + integration (fixtures เท่านั้น)
 npx vitest run tests/unit/xtmDiff.test.ts  # รัน test ไฟล์เดียว
-npm run test:coverage   # gate ≥ 80% บน detection/state/reporting
+npm run test:coverage   # gate ≥ 80% บน detection/state/reporting/schedule
 npm run poll:once       # รันรอบเดียวจบ (smoke) — เพิ่ม $env:LIVE_PORTAL='1' สำหรับ portal จริง
 npm run deploy          # รัน 24/7: build + restart แบบ single-instance-safe + verify (ใช้อันนี้เสมอ)
 # ห้าม `pm2 restart acolad-bot` ด้วยมือ — มัน skip stop-and-wait แล้วทิ้ง orphan/ชน lock

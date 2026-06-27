@@ -4,6 +4,7 @@ import {
   GoogleSheetSender,
   V2_HEADER,
   formatSheetDate,
+  lifecycleToSheetStatus,
   type SheetsApi,
   type SheetRow,
 } from '../../src/reporting/sheets.js';
@@ -186,5 +187,11 @@ describe('GoogleSheetSender.ensureReady (proactive header so an empty sheet is s
     };
     const sender = new GoogleSheetSender(new SheetSink(api));
     expect(await sender.ensureReady()).toBe('transient');
+  });
+});
+
+describe('lifecycleToSheetStatus', () => {
+  it('maps rejected → Rejected', () => {
+    expect(lifecycleToSheetStatus('rejected')).toBe('Rejected');
   });
 });

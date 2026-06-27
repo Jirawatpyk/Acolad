@@ -22,6 +22,7 @@ const cfg = (over: Partial<AppConfig> = {}): AppConfig =>
     ACCEPT_LANGUAGES: ['Malay (Malaysia)'],
     ACCEPT_MAX_WORDS: 0,
     ACCEPT_MAX_PER_CYCLE: 0,
+    ACCEPT_MAX_WORDS_PER_DAY: 1000, // so the daily-report capacity row shows "N / 1000", not "(no cap)"
     OUTBOX_RETRY_CAP: 10,
     OUTBOX_DEAD_AFTER_HOURS: 6,
     LOGIN_MAX_RETRY: 3,
@@ -270,6 +271,11 @@ describe('XtmPollLoop — daily report', () => {
     const payload = JSON.parse(rows[0]!.payload_json) as { cardsV2: unknown[] };
     const entry = payload.cardsV2[0] as { card: { header: { title: string } } };
     expect(entry.card.header.title).toBe('📋 Jobs in Progress (2)');
+
+    // F4: the capacity row shows "<accepted> / <cap>" (0 / 1000) — proving the cap is
+    // threaded through; before ACCEPT_MAX_WORDS_PER_DAY was set in cfg() it silently
+    // rendered "0 words (no cap)".
+    expect(rows[0]!.payload_json).toContain('0 / 1000');
   });
 
   it('does NOT enqueue a second daily row when runOnce is called again on the same Bangkok day', async () => {

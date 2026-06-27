@@ -154,3 +154,48 @@ describe('auto-yield config', () => {
     expect(cfg.XTM_YIELD_WINDOW_MS).toBe(40_000);
   });
 });
+
+describe('ACCEPT_SCHEDULE config', () => {
+  it('defaults: enabled ON, derived throughput 1000/9', () => {
+    const c = loadConfig({ ...base });
+    expect(c.ACCEPT_SCHEDULE_ENABLED).toBe(true);
+    expect(c.hoursStartMin).toBe(540);
+    expect(c.hoursEndMin).toBe(1080);
+    expect([...c.workdays]).toEqual([1, 2, 3, 4, 5]);
+    expect(c.throughputWordsPerHour).toBeCloseTo(1000 / 9, 5);
+  });
+
+  it("kill-switch '0' disables", () => {
+    expect(loadConfig({ ...base, ACCEPT_SCHEDULE_ENABLED: '0' }).ACCEPT_SCHEDULE_ENABLED).toBe(
+      false,
+    );
+  });
+
+  it('empty throughput → derived (not 0)', () => {
+    expect(
+      loadConfig({ ...base, ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '' }).throughputWordsPerHour,
+    ).toBeCloseTo(1000 / 9, 5);
+  });
+
+  it('explicit throughput override wins', () => {
+    expect(
+      loadConfig({ ...base, ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '100' }).throughputWordsPerHour,
+    ).toBe(100);
+  });
+
+  it('refine: start>=end rejected when enabled', () => {
+    expect(() =>
+      loadConfig({ ...base, ACCEPT_HOURS_START: '18:00', ACCEPT_HOURS_END: '09:00' }),
+    ).toThrow();
+  });
+
+  it('refine: capacity=0 without explicit throughput rejected when enabled', () => {
+    expect(() => loadConfig({ ...base, ACCEPT_MAX_WORDS_PER_DAY: '0' })).toThrow();
+  });
+
+  it('disabled: bad values do NOT block startup (kill-switch always works)', () => {
+    expect(() =>
+      loadConfig({ ...base, ACCEPT_SCHEDULE_ENABLED: '0', ACCEPT_MAX_WORDS_PER_DAY: '0' }),
+    ).not.toThrow();
+  });
+});

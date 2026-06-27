@@ -38,13 +38,16 @@ export function renderXtmNewJob(
 
 /**
  * 🔁 A job that disappeared and came back (relisted) — keeps the original
- * first-seen. `xtmUrl` becomes the button link.
+ * first-seen. `xtmUrl` becomes the button link. `statusNote` is optional: when a
+ * relisted job is also schedule-blocked it carries the `Rejected — <reason>` text
+ * as an extra Status row so both signals show (F3); omitted for a plain relist.
  */
 export function renderXtmRelisted(
   job: XtmJobState,
   firstSeenAt: string | undefined,
   capturedAt: string,
   xtmUrl: string,
+  statusNote?: string,
 ): { cardsV2: unknown[] } {
   return buildCard({
     cardId: sanitizeCardId(`relisted-${job.jobKey}`),
@@ -57,6 +60,7 @@ export function renderXtmRelisted(
       { label: 'Due', value: formatReadableDate(dueForJob(job)) || null },
       { label: 'Words', value: wordsValue(job.words) },
       { label: 'Step', value: job.step ? `${job.step} (${job.role ?? '—'})` : null },
+      ...(statusNote ? [{ label: 'Status', value: statusNote }] : []),
       { label: 'Detected', value: formatReadableDate(capturedAt) || null },
     ],
     buttonText: 'Open in XTM',

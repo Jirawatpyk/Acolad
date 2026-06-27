@@ -13,7 +13,8 @@ export type SheetStatus =
   | 'Accept failed'
   | 'Skipped'
   | 'Closed'
-  | 'Removed';
+  | 'Removed'
+  | 'Rejected';
 
 export interface SheetRow {
   jobKey: string;
@@ -60,6 +61,7 @@ export function lifecycleToSheetStatus(s: XtmLifecycleStatus): SheetStatus {
     accept_failed: 'Accept failed',
     closed: 'Closed',
     removed: 'Removed',
+    rejected: 'Rejected',
   };
   return map[s];
 }

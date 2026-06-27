@@ -1,5 +1,6 @@
 import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
+import { parseHHMM, parseWorkdays, resolveThroughput } from '../schedule/parseSchedule.js';
 
 loadDotenv();
 
@@ -86,6 +87,59 @@ const schema = z
       }), // default ON; '0'/'false'/'off'/'no' disables
     XTM_YIELD_WINDOW_MS: z.coerce.number().int().positive().default(600_000),
     XTM_YIELD_MAX_MINUTES: z.coerce.number().int().positive().default(60),
+    // --- Accept schedule (when to accept, capacity limits, throughput) ---
+    ACCEPT_SCHEDULE_ENABLED: z
+      .string()
+      .optional()
+      .transform((v) => {
+        const s = (v ?? '').trim().toLowerCase();
+        return !['0', 'false', 'off', 'no'].includes(s);
+      }), // default ON; '0'/'false'/'off'/'no' disables
+    ACCEPT_HOURS_START: z
+      .string()
+      .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'ACCEPT_HOURS_START must be in HH:MM format (e.g. 09:00)')
+      .default('09:00'),
+    ACCEPT_HOURS_END: z
+      .string()
+      .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'ACCEPT_HOURS_END must be in HH:MM format (e.g. 18:00)')
+      .default('18:00'),
+    ACCEPT_WORKDAYS: z
+      .string()
+      .default('1-5')
+      .refine((s) => {
+        try {
+          parseWorkdays(s);
+          return true;
+        } catch {
+          return false;
+        }
+      }, 'ACCEPT_WORKDAYS must be a valid day-of-week spec (e.g. 1-5 or 1,3,5)'),
+    ACCEPT_MAX_WORDS_PER_DAY: z.coerce.number().int().min(0).default(1000),
+    // Use preprocess to distinguish "unset" from empty string — Number('') === 0 which
+    // would look like an explicit zero and not trigger the derived-throughput path.
+    ACCEPT_THROUGHPUT_WORDS_PER_HOUR: z.preprocess(
+      (v) => (v === '' || v === undefined ? undefined : v),
+      z.coerce.number().positive().optional(),
+    ),
+  })
+  // Derive schedule fields once at load so consumers never need to re-parse.
+  // Field-level regex/refines above guarantee parseHHMM/parseWorkdays won't throw here.
+  .transform((c) => {
+    const hoursStartMin = parseHHMM(c.ACCEPT_HOURS_START);
+    const hoursEndMin = parseHHMM(c.ACCEPT_HOURS_END);
+    // ReadonlySet: consumers only `.has()` it; typing it read-only stops a caller from
+    // mutating the shared derived config (Set is assignable to ReadonlySet).
+    const workdays: ReadonlySet<number> = parseWorkdays(c.ACCEPT_WORKDAYS);
+    const throughputWordsPerHour = resolveThroughput({
+      // exactOptionalPropertyTypes: only include 'explicit' when it has a number value
+      ...(c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR !== undefined
+        ? { explicit: c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR }
+        : {}),
+      maxWordsPerDay: c.ACCEPT_MAX_WORDS_PER_DAY,
+      hoursStartMin,
+      hoursEndMin,
+    });
+    return { ...c, hoursStartMin, hoursEndMin, workdays, throughputWordsPerHour };
   })
   // Only enforce the window floor when yield is ENABLED — otherwise a stale/small window
   // value would block the kill-switch (an operator must always be able to disable the
@@ -94,7 +148,24 @@ const schema = z
     path: ['XTM_YIELD_WINDOW_MS'],
     message:
       'XTM_YIELD_WINDOW_MS must be >= 3 x POLL_INTERVAL_MS (yield would otherwise be a no-op)',
-  });
+  })
+  // Schedule refines only apply when ACCEPT_SCHEDULE_ENABLED — the kill-switch must
+  // always let an operator disable without first fixing unrelated values.
+  .refine((c) => !c.ACCEPT_SCHEDULE_ENABLED || c.hoursStartMin < c.hoursEndMin, {
+    path: ['ACCEPT_HOURS_END'],
+    message: 'ACCEPT_HOURS_END must be after ACCEPT_HOURS_START',
+  })
+  .refine(
+    (c) =>
+      !c.ACCEPT_SCHEDULE_ENABLED ||
+      c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR !== undefined ||
+      c.ACCEPT_MAX_WORDS_PER_DAY > 0,
+    {
+      path: ['ACCEPT_THROUGHPUT_WORDS_PER_HOUR'],
+      message:
+        'set ACCEPT_THROUGHPUT_WORDS_PER_HOUR (>0) or ACCEPT_MAX_WORDS_PER_DAY (>0) so throughput is resolvable',
+    },
+  );
 
 export type AppConfig = z.infer<typeof schema>;
 

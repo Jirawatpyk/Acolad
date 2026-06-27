@@ -111,6 +111,163 @@ describe('outbox team channel', () => {
   });
 });
 
+describe('jobs.lifecycle_status widened for rejected', () => {
+  it('fresh db allows rejected lifecycle_status', () => {
+    const { db } = openDatabase(tmp(), NOW);
+    db.prepare(
+      `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash, lifecycle_status)
+       VALUES ('k1', 'Test Job', 'visible', ?, ?, 'h', 'rejected')`,
+    ).run(NOW, NOW);
+    const row = db.prepare(`SELECT lifecycle_status AS s FROM jobs WHERE job_key='k1'`).get() as {
+      s: string;
+    };
+    expect(row.s).toBe('rejected');
+    db.close();
+  });
+
+  it('existing db with old lifecycle_status CHECK accepts rejected after migrate()', () => {
+    const dir = tmp();
+    // Build old-schema db with lifecycle_status WITHOUT 'rejected'
+    const old = new Database(join(dir, 'acolad.db'));
+    old.exec(`
+      CREATE TABLE jobs (
+        job_key TEXT PRIMARY KEY,
+        portal_job_id TEXT,
+        title TEXT NOT NULL,
+        language_pair TEXT,
+        deadline TEXT,
+        deadline_raw TEXT,
+        fee TEXT,
+        url TEXT,
+        status TEXT NOT NULL CHECK (status IN ('visible','missing')),
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        snapshot_hash TEXT NOT NULL,
+        consecutive_misses INTEGER NOT NULL DEFAULT 0,
+        xtm_task_id TEXT,
+        project_name TEXT NOT NULL DEFAULT '',
+        file_name TEXT NOT NULL DEFAULT '',
+        source_lang TEXT,
+        target_lang TEXT,
+        due_date TEXT,
+        due_raw TEXT,
+        words INTEGER,
+        step TEXT,
+        role TEXT,
+        eligible INTEGER NOT NULL DEFAULT 0,
+        lifecycle_status TEXT CHECK (lifecycle_status IN ('new','accepted','skipped','missing','accept_failed','closed','removed')),
+        accept_status TEXT NOT NULL DEFAULT 'none' CHECK (accept_status IN ('none','accepting','accepted','failed')),
+        accepted_at TEXT,
+        sheet_synced_status TEXT
+      );
+      CREATE TABLE outbox (
+        outbox_id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,
+        channel TEXT NOT NULL CHECK (channel IN ('chat','sheets','team')),
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dead')),
+        attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL,
+        created_at TEXT NOT NULL, sent_at TEXT
+      );
+      CREATE UNIQUE INDEX idx_outbox_dedup ON outbox (event_id, channel);
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    `);
+    old
+      .prepare(
+        `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash, lifecycle_status)
+         VALUES ('existing-j', 't', 'visible', ?, ?, 'h', 'accepted')`,
+      )
+      .run(NOW, NOW);
+    old.close();
+
+    const { db } = openDatabase(dir, NOW);
+    // 'rejected' must now be accepted
+    expect(() =>
+      db.prepare("UPDATE jobs SET lifecycle_status='rejected' WHERE job_key='existing-j'").run(),
+    ).not.toThrow();
+    const row = db
+      .prepare("SELECT lifecycle_status AS s FROM jobs WHERE job_key='existing-j'")
+      .get() as { s: string };
+    expect(row.s).toBe('rejected');
+    // Existing row data preserved
+    const title = (
+      db.prepare("SELECT title FROM jobs WHERE job_key='existing-j'").get() as { title: string }
+    ).title;
+    expect(title).toBe('t');
+    db.close();
+  });
+
+  it('cleans up a stale jobs_old left by a crashed prior migration, then widens cleanly (F6)', () => {
+    const dir = tmp();
+    // Old-shape db: jobs lifecycle CHECK WITHOUT 'rejected', PLUS a leftover jobs_old
+    // table (residue from a prior migration that crashed between RENAME and DROP). The
+    // DROP TABLE IF EXISTS jobs_old guard must clear it before re-running the rebuild.
+    const crashed = new Database(join(dir, 'acolad.db'));
+    crashed.exec(`
+      CREATE TABLE jobs (
+        job_key TEXT PRIMARY KEY, portal_job_id TEXT, title TEXT NOT NULL,
+        language_pair TEXT, deadline TEXT, deadline_raw TEXT, fee TEXT, url TEXT,
+        status TEXT NOT NULL CHECK (status IN ('visible','missing')),
+        first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+        snapshot_hash TEXT NOT NULL, consecutive_misses INTEGER NOT NULL DEFAULT 0,
+        xtm_task_id TEXT, project_name TEXT NOT NULL DEFAULT '', file_name TEXT NOT NULL DEFAULT '',
+        source_lang TEXT, target_lang TEXT, due_date TEXT, due_raw TEXT, words INTEGER,
+        step TEXT, role TEXT, eligible INTEGER NOT NULL DEFAULT 0,
+        lifecycle_status TEXT CHECK (lifecycle_status IN ('new','accepted','skipped','missing','accept_failed','closed','removed')),
+        accept_status TEXT NOT NULL DEFAULT 'none' CHECK (accept_status IN ('none','accepting','accepted','failed')),
+        accepted_at TEXT, sheet_synced_status TEXT
+      );
+      -- Stale residue table from the crashed migration.
+      CREATE TABLE jobs_old (job_key TEXT PRIMARY KEY, title TEXT);
+      INSERT INTO jobs_old (job_key, title) VALUES ('stale', 'residue');
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    `);
+    crashed
+      .prepare(
+        `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash, lifecycle_status)
+         VALUES ('keep-j', 't', 'visible', ?, ?, 'h', 'accepted')`,
+      )
+      .run(NOW, NOW);
+    crashed.close();
+
+    const { db } = openDatabase(dir, NOW);
+
+    // The stale jobs_old must be gone after the guarded rebuild.
+    const leftover = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='jobs_old'")
+      .get();
+    expect(leftover).toBeUndefined();
+
+    // The rebuild preserved the real row and widened the CHECK so 'rejected' now writes.
+    expect(
+      (db.prepare("SELECT title FROM jobs WHERE job_key='keep-j'").get() as { title: string })
+        .title,
+    ).toBe('t');
+    expect(() =>
+      db.prepare("UPDATE jobs SET lifecycle_status='rejected' WHERE job_key='keep-j'").run(),
+    ).not.toThrow();
+    db.close();
+  });
+
+  it('widenLifecycleCheck is idempotent (second open does not re-rebuild or error)', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    a.db
+      .prepare(
+        `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash, lifecycle_status)
+         VALUES ('j1', 't', 'visible', ?, ?, 'h', 'rejected')`,
+      )
+      .run(NOW, NOW);
+    a.db.close();
+
+    const b = openDatabase(dir, NOW);
+    const row = b.db.prepare("SELECT lifecycle_status AS s FROM jobs WHERE job_key='j1'").get() as {
+      s: string;
+    };
+    expect(row.s).toBe('rejected');
+    b.db.close();
+  });
+});
+
 describe('db migration v1 -> v2 (existing production db)', () => {
   it('adds columns, widens outbox channel, preserves existing rows', () => {
     const dir = tmp();

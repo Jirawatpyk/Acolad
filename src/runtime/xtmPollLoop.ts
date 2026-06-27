@@ -315,9 +315,18 @@ export class XtmPollLoop {
       // is logged and swallowed so detection is never blocked (Constitution IV).
       // Meta stays unset on failure so the next cycle retries.
       if (dueDailyReport(this.clock.nowMs(), this.meta.lastDailyReportDate)) {
+        // Capture the clock + Bangkok date ONCE (E2) so the card, the word-counter read,
+        // and the meta write all key off the identical instant — no intra-block drift.
+        const nowMs = this.clock.nowMs();
+        const date = bangkokDate(nowMs);
         const held = this.store.listByLifecycle('accepted');
-        const card = buildDailyReportCard(held, this.clock.nowMs(), this.cfg.XTM_ACOLAD_OFFERS_URL);
-        const date = bangkokDate(this.clock.nowMs());
+        const card = buildDailyReportCard(
+          held,
+          nowMs,
+          this.cfg.XTM_ACOLAD_OFFERS_URL,
+          this.meta.acceptedWordsToday(date),
+          this.cfg.ACCEPT_MAX_WORDS_PER_DAY,
+        );
         try {
           this.db.transaction(() => {
             this.outbox.enqueue(`daily:${date}`, JSON.stringify(card), this.clock.nowIso(), 'team');
@@ -426,6 +435,7 @@ export class XtmPollLoop {
           jobs: snapshot.jobs.length,
           accepted: summary.accepted,
           skipped: summary.skipped,
+          scheduleBlocked: summary.scheduleBlocked,
           failed: summary.failed,
           dead: disp.dead,
         },

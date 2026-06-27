@@ -6,22 +6,39 @@ export type DB = Database.Database;
 
 const SCHEMA_VERSION = 2;
 
+interface ColumnDef {
+  name: string;
+  ddl: string;
+}
+
+/**
+ * The v1 base `jobs` columns (the 001 production shape). Source-of-truth shared by
+ * BOTH the fresh-db DDL and the lifecycle-CHECK rebuild (F13) so neither can drift.
+ */
+const JOB_BASE_COLUMNS: ColumnDef[] = [
+  { name: 'job_key', ddl: 'job_key TEXT PRIMARY KEY' },
+  { name: 'portal_job_id', ddl: 'portal_job_id TEXT' },
+  { name: 'title', ddl: 'title TEXT NOT NULL' },
+  { name: 'language_pair', ddl: 'language_pair TEXT' },
+  { name: 'deadline', ddl: 'deadline TEXT' },
+  { name: 'deadline_raw', ddl: 'deadline_raw TEXT' },
+  { name: 'fee', ddl: 'fee TEXT' },
+  { name: 'url', ddl: 'url TEXT' },
+  { name: 'status', ddl: "status TEXT NOT NULL CHECK (status IN ('visible','missing'))" },
+  { name: 'first_seen_at', ddl: 'first_seen_at TEXT NOT NULL' },
+  { name: 'last_seen_at', ddl: 'last_seen_at TEXT NOT NULL' },
+  { name: 'snapshot_hash', ddl: 'snapshot_hash TEXT NOT NULL' },
+  { name: 'consecutive_misses', ddl: 'consecutive_misses INTEGER NOT NULL DEFAULT 0' },
+];
+
+/** Render a `CREATE TABLE jobs (...)` from a column list (F13 — one generator, no drift). */
+function createJobsTableSql(columns: ColumnDef[], ifNotExists: boolean): string {
+  const head = ifNotExists ? 'CREATE TABLE IF NOT EXISTS jobs' : 'CREATE TABLE jobs';
+  return `${head} (\n${columns.map((c) => `  ${c.ddl}`).join(',\n')}\n)`;
+}
+
 const DDL = `
-CREATE TABLE IF NOT EXISTS jobs (
-  job_key TEXT PRIMARY KEY,
-  portal_job_id TEXT,
-  title TEXT NOT NULL,
-  language_pair TEXT,
-  deadline TEXT,
-  deadline_raw TEXT,
-  fee TEXT,
-  url TEXT,
-  status TEXT NOT NULL CHECK (status IN ('visible','missing')),
-  first_seen_at TEXT NOT NULL,
-  last_seen_at TEXT NOT NULL,
-  snapshot_hash TEXT NOT NULL,
-  consecutive_misses INTEGER NOT NULL DEFAULT 0
-);
+${createJobsTableSql(JOB_BASE_COLUMNS, true)};
 
 CREATE TABLE IF NOT EXISTS appearance_events (
   event_id TEXT PRIMARY KEY,
@@ -112,7 +129,7 @@ export function openDatabase(stateDir: string, nowIso: string): OpenResult {
  * shape — no drift between the two create paths. NOT NULL columns carry a
  * constant default so legacy rows migrate cleanly.
  */
-const JOB_V2_COLUMNS: { name: string; ddl: string }[] = [
+const JOB_V2_COLUMNS: ColumnDef[] = [
   { name: 'xtm_task_id', ddl: 'xtm_task_id TEXT' },
   { name: 'project_name', ddl: "project_name TEXT NOT NULL DEFAULT ''" },
   { name: 'file_name', ddl: "file_name TEXT NOT NULL DEFAULT ''" },
@@ -126,7 +143,7 @@ const JOB_V2_COLUMNS: { name: string; ddl: string }[] = [
   { name: 'eligible', ddl: 'eligible INTEGER NOT NULL DEFAULT 0' },
   {
     name: 'lifecycle_status',
-    ddl: "lifecycle_status TEXT CHECK (lifecycle_status IN ('new','accepted','skipped','missing','accept_failed','closed','removed'))",
+    ddl: "lifecycle_status TEXT CHECK (lifecycle_status IN ('new','accepted','skipped','missing','accept_failed','closed','removed','rejected'))",
   },
   {
     name: 'accept_status',
@@ -141,6 +158,7 @@ function migrate(db: DB): void {
   const tx = db.transaction(() => {
     ensureJobColumns(db);
     ensureOutboxChannel(db);
+    widenLifecycleCheck(db);
     db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
       'schema_version',
       String(SCHEMA_VERSION),
@@ -157,6 +175,41 @@ function ensureJobColumns(db: DB): void {
   for (const col of JOB_V2_COLUMNS) {
     if (!existing.has(col.name)) db.exec(`ALTER TABLE jobs ADD COLUMN ${col.ddl}`);
   }
+}
+
+/**
+ * Widen the jobs lifecycle_status CHECK to include 'rejected'. SQLite cannot
+ * ALTER a CHECK in place, so an existing jobs table (without 'rejected') is
+ * rebuilt preserving all rows and columns. A fresh db already has the widened
+ * CHECK (from JOB_V2_COLUMNS via ensureJobColumns) and is skipped.
+ *
+ * Guard: check whether `sqlite_master.sql` for `jobs` contains `'rejected'`;
+ * if yes, skip. After the rebuild it will contain it, so a second open is
+ * a no-op (idempotent).
+ *
+ * `DROP TABLE IF EXISTS jobs_old` runs first for idempotency: if a previous
+ * migration crashed between RENAME and DROP, the next open cleans up the stale
+ * jobs_old before re-running the rebuild.
+ *
+ * Must be called AFTER ensureJobColumns so that jobs_old already carries all
+ * v2 columns — the column list copied below is DERIVED from the same source-of-truth
+ * arrays (F13), so a future column added to JOB_BASE_COLUMNS/JOB_V2_COLUMNS is
+ * automatically carried through the rebuild instead of being silently dropped.
+ */
+function widenLifecycleCheck(db: DB): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'")
+    .get() as { sql: string } | undefined;
+  if (!row || row.sql.includes("'rejected'")) return;
+  const allColumns = [...JOB_BASE_COLUMNS, ...JOB_V2_COLUMNS];
+  const colNames = allColumns.map((c) => c.name).join(', ');
+  db.exec('DROP TABLE IF EXISTS jobs_old');
+  db.exec('ALTER TABLE jobs RENAME TO jobs_old');
+  // The widened lifecycle_status CHECK (with 'rejected') lives in JOB_V2_COLUMNS, so the
+  // generated table carries it automatically.
+  db.exec(createJobsTableSql(allColumns, false));
+  db.exec(`INSERT INTO jobs (${colNames}) SELECT ${colNames} FROM jobs_old`);
+  db.exec('DROP TABLE jobs_old');
 }
 
 /**
