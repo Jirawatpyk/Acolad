@@ -1227,6 +1227,29 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     ).resolves.toBeDefined();
   });
 
+  it('§9 audit trail: an accepted Malay job surfaces {day, wordsDueOn(day)} in summary.acceptedDueDays', async () => {
+    fresh();
+    // Held seed 200 due Wed, then accept a 100w-due-Wed job → the resulting Wed bucket is 300.
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 200 })]);
+    const acc = new StubAcceptor();
+    const summary = await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ fileName: 'a.docx', dueDate: dueWed18, words: 100 })], MON_10),
+    );
+    expect(only('a.docx').lifecycleStatus).toBe('accepted');
+    // The audit entry records wordsDueOn(Wed) = the resulting bucket the accept decision used.
+    expect(summary.acceptedDueDays).toEqual([
+      { day: bangkokDateString(Date.parse(dueWed18)), words: 300 },
+    ]);
+  });
+
+  it('§9 audit trail: a rejected (capacity-blocked) cycle carries an empty acceptedDueDays', async () => {
+    fresh();
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 950 })]);
+    const summary = await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10), // 950 + 100 > 1000 → blocked
+    );
+    expect(summary.acceptedDueDays).toEqual([]); // nothing advanced → no audit entries
+  });
 });
 
 describe('XtmPollCycle field-change re-sync / Bug B (sheet:fieldsync)', () => {

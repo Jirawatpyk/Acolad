@@ -82,6 +82,16 @@ export interface XtmCycleSummary {
     words: number | null;
     dueDate: string | null;
   }[];
+  /**
+   * §9 audit trail for the held-read → over-accept residual risk (deadline-bucketed capacity).
+   * One entry per deadline day an accepted group advanced this cycle, carrying `wordsDueOn(day)`
+   * — the RESULTING held + optimistically-advanced bucket the accept decision was based on. The
+   * loop logs this map so a bucket that dropped then over-filled (e.g. a transient grid 0-read
+   * mis-disappearing a held job; cf. the late-XHR bug) leaves an auditable trail. The cycle stays
+   * logger-free (like acceptLatencies/scheduleRejects). Empty on every non-accepting / disabled /
+   * early path.
+   */
+  acceptedDueDays: { day: string; words: number }[];
 }
 
 /**
@@ -161,6 +171,7 @@ export class XtmPollCycle {
       scheduleBlocked: 0,
       holidayCalendarStale: false,
       scheduleRejects: [],
+      acceptedDueDays: [],
     };
     const detectedMs = Date.parse(snapshot.capturedAt);
     // Schedule-gate state. Capacity is bucketed by DEADLINE day (held-derived), not accept
@@ -335,6 +346,10 @@ export class XtmPollCycle {
             // Advance EACH deadline day's bucket by its OWN subtotal (never lump a
             // multi-deadline group onto one day) so a later group this cycle sees them.
             for (const [day, sub] of v.subtotalsByDay) dueBuckets.set(day, bucketFor(day) + sub);
+            // §9 audit trail: record wordsDueOn(day) = the RESULTING bucket AFTER advancing, so
+            // a bucket that dropped then over-filled is auditable in the loop's structured log.
+            for (const day of v.subtotalsByDay.keys())
+              summary.acceptedDueDays.push({ day, words: bucketFor(day) });
           }
         }
         if (blockReason === null) {
