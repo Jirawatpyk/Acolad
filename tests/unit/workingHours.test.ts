@@ -86,4 +86,26 @@ describe('workingMinutesBetween', () => {
     expect(Number.isFinite(got)).toBe(true);
     expect(got).toBeGreaterThan(0);
   });
+
+  it('caps at the MAX_DAYS iteration limit — EXACT minutes, not just finite (S3)', () => {
+    // The day-walk loop bound is `days <= MAX_DAYS` (MAX_DAYS = 400) → it visits at most 401
+    // Bangkok dates. With an every-day-working calendar (no weekend/holiday skips) and `now`
+    // exactly at the 09:00 window start, every visited day contributes a full 540-min window,
+    // so a deadline FAR beyond the cap is bounded at exactly 401 × 540 minutes. This pins the
+    // safety cap precisely — a regression to the loop bound would shift this value.
+    const ALL_DAYS_CAL: WorkCalendar = {
+      workdays: new Set([1, 2, 3, 4, 5, 6, 7]), // every weekday works → isolates the day cap
+      hoursStartMin: 540, // 09:00
+      hoursEndMin: 1080, // 18:00
+      holidays: new Map(),
+    };
+    const WINDOW_MIN = 1080 - 540; // 540 working minutes per day
+    const VISITED_DAYS = 401; // MAX_DAYS(400) + 1 (loop runs days = 0..400 inclusive)
+    const got = workingMinutesBetween(
+      at('2026-06-22T09:00:00+07:00'), // exactly at the window start → full first day
+      at('2031-06-22T18:00:00+07:00'), // ~5 years out, far beyond the 401-day cap
+      ALL_DAYS_CAL,
+    );
+    expect(got).toBe(VISITED_DAYS * WINDOW_MIN); // 401 × 540 = 216540
+  });
 });

@@ -3,6 +3,7 @@ import {
   evaluateAcceptSchedule,
   type AcceptScheduleInput,
 } from '../../src/schedule/acceptSchedule.js';
+import { bangkokCalendar } from '../../src/schedule/bangkokCalendar.js';
 
 const at = (iso: string): number => Date.parse(iso);
 // Default 09:00–18:00 Mon–Fri calendar, no holidays. A test overriding a calendar field
@@ -163,5 +164,46 @@ describe('evaluateAcceptSchedule', () => {
         }),
       ),
     ).toEqual({ allow: true });
+  });
+
+  it('now AFTER the daily window end (19:00) with a same-day deadline → 0 working minutes left → block (S4)', () => {
+    // `now` 19:00 (past the 18:00 window end) on a Monday; deadline 23:00 the SAME Monday.
+    // The deadline day is a working day (so it is NOT blocked as a non-working deadline) and
+    // it has NOT passed — but there are 0 working minutes between 19:00 and 23:00 because the
+    // window closed at 18:00. The gate must block on feasibility, reporting ~0h available.
+    const v = evaluateAcceptSchedule(
+      base({
+        nowMs: at('2026-06-22T19:00:00+07:00'), // Monday, after the 18:00 close
+        dueAtMs: at('2026-06-22T23:00:00+07:00'), // same Monday, still in the future
+        words: 300, // needs ~3h, but 0h remain today
+      }),
+    );
+    expect(v.allow).toBe(false);
+    if (!v.allow) {
+      expect(v.reason).toContain('cannot finish in time');
+      expect(v.reason).toContain('have ~0h'); // 0 working minutes remain after the window closed
+    }
+  });
+
+  it('S2 (PIN): a date-only dueDate "2026-07-15" is treated as 07:00 Bangkok — before the 09:00 work start', () => {
+    // Date-only ISO strings parse as UTC midnight (ECMAScript), which in Bangkok (+07:00) is
+    // 07:00 local — BEFORE the 09:00 working-window start. Pin the current parse semantics.
+    const dueAtMs = at('2026-07-15'); // Date.parse('2026-07-15') → 2026-07-15T00:00:00Z
+    expect(bangkokCalendar(dueAtMs).minutesOfDay).toBe(7 * 60); // 07:00 Bangkok, not 00:00
+
+    // Consequence in the gate: a tiny job due "2026-07-15" (a working Wednesday) with `now` at
+    // 06:00 the SAME day is REJECTED — there are 0 working minutes before the 07:00 cutoff,
+    // even though the full 09:00–18:00 day afterward could finish it.
+    // FLAG FOR TEAM: this can FALSE-REJECT a same-day-deadline job that is actually doable — a
+    // date-only deadline arguably means end-of-day, not 07:00. Behavior pinned here, NOT changed.
+    const v = evaluateAcceptSchedule(
+      base({
+        nowMs: at('2026-07-15T06:00:00+07:00'),
+        dueAtMs,
+        words: 1,
+      }),
+    );
+    expect(v.allow).toBe(false);
+    if (!v.allow) expect(v.reason).toContain('cannot finish in time');
   });
 });
