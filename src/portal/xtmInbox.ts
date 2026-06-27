@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { XTM } from './selectors.js';
 import { LayoutChangedError, PortalTimeoutError, PaginationDetectedError } from './errors.js';
 import { computeXtmJobKey } from '../detection/jobKey.js';
+import { BKK_OFFSET_MS } from '../schedule/bangkokCalendar.js';
 import type { XtmRawJob, XtmJobSnapshot } from '../detection/types.js';
 
 /**
@@ -63,7 +64,7 @@ export function normalizeXtmDue(raw: string | null): string | null {
   if (!raw) return null;
   const t = Date.parse(raw);
   if (Number.isNaN(t)) return null;
-  const d = new Date(t + 7 * 3_600_000);
+  const d = new Date(t + BKK_OFFSET_MS);
   const p = (n: number): string => String(n).padStart(2, '0');
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}:${p(d.getUTCMinutes())}+07:00`;
 }

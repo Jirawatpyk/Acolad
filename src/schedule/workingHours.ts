@@ -28,6 +28,9 @@ export function workingMinutesBetween(
 ): number {
   if (endMs <= startMs) return 0;
   let total = 0;
+  // The end date is loop-invariant — compute it once (F12) instead of re-deriving it
+  // every iteration of the day-by-day walk.
+  const endDate = bangkokDateString(endMs);
   // Iterate Bangkok dates from the start date to the end date inclusive.
   let cursor = startMs;
   for (let days = 0; days <= MAX_DAYS; days++) {
@@ -41,7 +44,7 @@ export function workingMinutesBetween(
     }
     // Advance to the next Bangkok date (use noon to dodge any boundary edge).
     const next = bangkokEpochMs(date, 0) + DAY_MS + DAY_MS / 2;
-    if (bangkokDateString(next) > bangkokDateString(endMs)) break;
+    if (bangkokDateString(next) > endDate) break;
     cursor = next;
   }
   return total;

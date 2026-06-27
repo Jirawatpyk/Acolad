@@ -3,7 +3,7 @@
  * add 7h to the epoch ms then read UTC parts — never getHours()/process.env.TZ.
  * Shared by the schedule gate, the daily word counter, and the daily report.
  */
-const BKK_OFFSET_MS = 7 * 3_600_000;
+export const BKK_OFFSET_MS = 7 * 3_600_000;
 const p2 = (n: number): string => String(n).padStart(2, '0');
 
 export function bangkokCalendar(ms: number): {
