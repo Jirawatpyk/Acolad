@@ -42,6 +42,54 @@ describe('evaluateAcceptSchedule', () => {
   it('uncurated span year → block', () => {
     expect(evaluateAcceptSchedule(base({ holidaysCuratedForSpan: false })).allow).toBe(false);
   });
+  it('uncurated reason names the whole span, not just the (curated) deadline year — F8', () => {
+    // now in an UNCURATED year (2099); deadline in a CURATED year (2026, past relative
+    // to now). The old reason named only the deadline year ("2026") — which IS curated —
+    // confusingly suggesting the wrong year to fix. The reason must name the span so it
+    // is always correct.
+    const v = evaluateAcceptSchedule(
+      base({
+        nowMs: at('2099-06-22T10:00:00+07:00'),
+        dueAtMs: at('2026-06-22T18:00:00+07:00'),
+        holidaysCuratedForSpan: false,
+      }),
+    );
+    expect(v.allow).toBe(false);
+    if (!v.allow) {
+      expect(v.reason).toContain('2099'); // the actually-uncurated (now) year
+      expect(v.reason).toContain('2026');
+      expect(v.reason).not.toBe('holiday calendar not confirmed for 2026'); // not the old single-year form
+    }
+  });
+  it('uncurated reason collapses to a single year when now and deadline share a year — F8', () => {
+    const v = evaluateAcceptSchedule(
+      base({
+        nowMs: at('2099-01-02T10:00:00+07:00'),
+        dueAtMs: at('2099-06-22T18:00:00+07:00'),
+        holidaysCuratedForSpan: false,
+      }),
+    );
+    expect(v.allow).toBe(false);
+    if (!v.allow) {
+      expect(v.reason).toContain('2099');
+      expect(v.reason).not.toContain('–'); // single year → no en-dash range
+    }
+  });
+  it('feasibility ceil holds at an exact integer boundary under FP (derived throughput) — F10', () => {
+    // throughput = 100/9 ≈ 11.111 (cap 100 over a 9h day); 65 words →
+    // 65 / (100/9) * 60 = 351 EXACTLY, but IEEE-754 yields 351.00000000000006 → a
+    // naive Math.ceil = 352 (one spurious minute), wrongly blocking a job with
+    // exactly 351 working minutes available (09:00→14:51). The epsilon collapses it.
+    const v = evaluateAcceptSchedule(
+      base({
+        nowMs: at('2026-06-22T09:00:00+07:00'),
+        dueAtMs: at('2026-06-22T14:51:00+07:00'), // 351 working minutes (09:00→14:51)
+        words: 65,
+        throughputWordsPerHour: 100 / 9,
+      }),
+    );
+    expect(v).toEqual({ allow: true });
+  });
   it('deadline on a weekend → block', () => {
     expect(evaluateAcceptSchedule(base({ dueAtMs: at('2026-06-20T12:00:00+07:00') })).allow).toBe(
       false,

@@ -34,6 +34,17 @@ describe('resolveHolidaysForSpan', () => {
     const due2027 = Date.parse('2027-01-10T18:00:00+07:00');
     expect(resolveHolidaysForSpan(now, due2027).curated).toBe(false);
   });
+  it('includes INTERMEDIATE years in the span — merges a middle year holiday (F4)', () => {
+    // now 2025 → due 2027 spans 2026 in the MIDDLE. The merged holiday set MUST
+    // include 2026 นักขัตฤกษ์ (e.g. 2026-01-01); the old endpoints-only logic
+    // ({2025, 2027}) skipped 2026 entirely, so a 2026 deadline-day holiday would
+    // be treated as a working day (a fail-closed bypass).
+    const now = Date.parse('2025-12-20T10:00:00+07:00');
+    const due = Date.parse('2027-01-10T18:00:00+07:00');
+    const r = resolveHolidaysForSpan(now, due);
+    expect(r.holidays.get('2026-01-01')).toBeTruthy(); // intermediate year merged in
+    expect(r.curated).toBe(false); // 2025 + 2027 uncurated → still fail-closed
+  });
   it('null deadline → only the now-year', () => {
     expect(resolveHolidaysForSpan(Date.parse('2026-06-22T10:00:00+07:00'), null).curated).toBe(
       true,
