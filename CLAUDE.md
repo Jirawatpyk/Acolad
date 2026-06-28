@@ -235,8 +235,9 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
   infeasible/uncurated 1 ตัว → Malay **ทั้งรอบ**ถูก Reject (conservative all-or-nothing
   กัน owned-but-Rejected) — robustness pass ลองใหม่รอบหน้า.
 - **page เพิ่ม:** `holiday_calendar_stale` (ปีปัจจุบัน uncurated) ตอนนี้ **fail heartbeat
-  → page** (auto-accept ดับทั้งระบบ); `daily_cap_reached` = warn (Chat) แจ้งครั้งเดียว/วัน
-  Bangkok เมื่อ budget คำ/วันเต็มจริง (ไม่ใช่งานเดี่ยวใหญ่เกิน cap).
+  → page** (auto-accept ดับทั้งระบบ); `daily_cap_reached` = warn (Chat) แจ้งครั้งเดียว/**วัน DL
+  (deadline day)** ที่ budget คำเต็มจริง (dedup `daily_cap_reached:<วันDL>` — 2 วัน DL ล้นในวัน
+  Bangkok เดียวกันได้ 2 alert; PR #15); ไม่ใช่งานเดี่ยวใหญ่เกิน cap (อันนั้น = "accept manually").
 
 ## ข้อควรระวังเฉพาะโปรเจกต์
 
