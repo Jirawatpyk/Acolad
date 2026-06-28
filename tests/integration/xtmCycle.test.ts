@@ -1,10 +1,11 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, type DB } from '../../src/state/db.js';
 import { XtmPollCycle } from '../../src/runtime/xtmPollCycle.js';
 import { XtmJobStore } from '../../src/state/xtmJobStore.js';
+import { Outbox } from '../../src/state/outbox.js';
 import { MetaStore } from '../../src/state/meta.js';
 import { computeXtmJobKey } from '../../src/detection/jobKey.js';
 import { bangkokDateString } from '../../src/schedule/bangkokCalendar.js';
@@ -564,6 +565,29 @@ describe('XtmPollCycle crash recovery (review #1/#2)', () => {
       .prepare("SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key = ?")
       .all(`accept_failed:${key}`);
     expect(alerts.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('F10: a crash between the recovery record and its outbox enqueue is atomic (stays accepting)', async () => {
+    fresh();
+    const key = computeXtmJobKey(xraw());
+    const cycle = new XtmPollCycle(db, cfg(), new StubAcceptor());
+    await cycle.run(snap([xraw()], 'c1')); // accepted
+    // Strand it (a prior cycle claimed but crashed before recording the outcome).
+    db.prepare("UPDATE jobs SET accept_status='accepting' WHERE job_key = ?").run(key);
+    // Simulate a crash mid-recovery: the first outbox write (raiseAlert's enqueue) throws AFTER
+    // recordAcceptOutcome has run. Without the recovery transaction the DB would commit
+    // 'accept_failed' while Chat/Sheet never report it (the at-least-once gap, F10).
+    const spy = vi.spyOn(Outbox.prototype, 'enqueue').mockImplementationOnce(() => {
+      throw new Error('crash mid-enqueue');
+    });
+    try {
+      await expect(cycle.run(snap([xraw()], 'c2'))).rejects.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    // All-or-nothing: the record rolled back with the failed enqueue, so the job is STILL
+    // 'accepting' (it will be recovered cleanly next cycle), not silently stranded as failed.
+    expect(only().acceptStatus).toBe('accepting');
   });
 });
 
@@ -1214,7 +1238,41 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(only('tue.docx').lifecycleStatus).toBe('rejected');
     expect(only('wed.docx').lifecycleStatus).toBe('rejected');
     const note = sheetRows().find((r) => r.file === 'tue.docx')?.note ?? '';
-    expect(note).toContain(bangkokDateString(Date.parse(dueWed18))); // names the overflowing day
+    expect(note).toContain(bangkokDateString(Date.parse(dueWed18))); // names the overflowing DAY
+    // F6: a capacity block is day-level — it must NOT prefix an arbitrary file name (blaming a
+    // file that is not even on the overflowing day).
+    expect(note).not.toContain('.docx');
+  });
+
+  it('F1: a held job whose grid cell later reads blank keeps its deadline-day bucket (no over-accept)', async () => {
+    fresh();
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    // c1: accept a 600w Malay job due Wed → held (Wed bucket = 600).
+    await cycle.run(
+      snapAt([xraw({ fileName: 'held.docx', dueDate: dueWed18, words: 600 })], MON_10, 'c1'),
+    );
+    expect(only('held.docx').lifecycleStatus).toBe('accepted');
+    // c2: the held job is STILL in Active but its Due/Words cells read blank (grid race). Without
+    // the F1 lock this would persist dueDate=null/words=null, dropping it from the Wed bucket.
+    await cycle.run(
+      snapAt([xraw({ fileName: 'held.docx', dueDate: null, words: null })], MON_10, 'c2'),
+    );
+    const held = only('held.docx');
+    expect(held.dueDate).toBe(dueWed18); // committed deadline survived the blank re-read
+    expect(held.words).toBe(600);
+    // c3: a NEW 600w Malay job due Wed appears. The Wed bucket must still hold the held 600, so
+    // 600 + 600 > the 1000 cap → reject. Without F1 the bucket would be 0 → over-accept (irreversible).
+    await cycle.run(
+      snapAt(
+        [
+          xraw({ fileName: 'held.docx', dueDate: null, words: null }),
+          xraw({ fileName: 'new.docx', dueDate: dueWed18, words: 600 }),
+        ],
+        MON_10,
+        'c3',
+      ),
+    );
+    expect(only('new.docx').lifecycleStatus).toBe('rejected');
   });
 
   it('capacity seed skips a null-deadline held job without crashing', async () => {

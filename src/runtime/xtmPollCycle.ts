@@ -11,7 +11,8 @@ import { hasMaterialSheetChange } from '../reporting/sheetSync.js';
 import { evaluateAcceptSchedule, type AcceptScheduleVerdict } from '../schedule/acceptSchedule.js';
 import { decideGroupCapacity, type CapacityMember } from '../schedule/acceptCapacity.js';
 import { resolveHolidaysForSpan, getThaiHolidays } from '../schedule/thaiHolidays.js';
-import { bangkokDateString, bangkokYear } from '../schedule/bangkokCalendar.js';
+import { bangkokYear } from '../schedule/bangkokCalendar.js';
+import { deadlineDayOf, deadlineMsOf } from '../schedule/deadlineDay.js';
 import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
@@ -129,24 +130,31 @@ export class XtmPollCycle {
     // dropped, and never re-accepted (accept_status stays out of 'none').
     for (const s of prev.values()) {
       if (s.acceptStatus !== 'accepting') continue;
-      this.accept.recordAcceptOutcome(s.jobKey, 'failed', null);
       s.acceptStatus = 'failed';
       s.lifecycleStatus = 'accept_failed';
-      raiseAlert(
-        this.db,
-        this.outbox,
-        'accept_failed',
-        snapshot.capturedAt,
-        `${s.projectName} / ${s.fileName}: stuck in 'accepting' (prior cycle stopped mid-way)`,
-        {},
-        `accept_failed:${s.jobKey}`,
-      );
-      this.outbox.enqueue(
-        `sheet:stranded:${s.jobKey}:${snapshot.pollCycleId}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, 'crash mid-accept') }),
-        snapshot.capturedAt,
-        'sheets',
-      );
+      // F10: record the outcome AND enqueue the alert + Sheet row in ONE transaction (mirrors
+      // the main accept-record txn). A crash between them would otherwise commit 'accept_failed'
+      // to the DB while the alert/Sheet outbox rows are lost — the failure shows in state but
+      // never reaches Chat/Sheet (an at-least-once gap). All-or-nothing: a throw rolls the record
+      // back, so the job stays 'accepting' and is recovered cleanly next cycle.
+      this.db.transaction(() => {
+        this.accept.recordAcceptOutcome(s.jobKey, 'failed', null);
+        raiseAlert(
+          this.db,
+          this.outbox,
+          'accept_failed',
+          snapshot.capturedAt,
+          `${s.projectName} / ${s.fileName}: stuck in 'accepting' (prior cycle stopped mid-way)`,
+          {},
+          `accept_failed:${s.jobKey}`,
+        );
+        this.outbox.enqueue(
+          `sheet:stranded:${s.jobKey}:${snapshot.pollCycleId}`,
+          JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, 'crash mid-accept') }),
+          snapshot.capturedAt,
+          'sheets',
+        );
+      })();
     }
 
     const result = diffXtm(snapshot, prev, { baseline });
@@ -194,11 +202,9 @@ export class XtmPollCycle {
       }
       return v;
     };
-    // The Bangkok deadline day of a job, or null when its deadline is missing/unparseable.
-    const deadlineDateOf = (s: XtmJobState): string | null => {
-      const t = s.dueDate ? Date.parse(s.dueDate) : NaN;
-      return Number.isFinite(t) ? bangkokDateString(t) : null;
-    };
+    // The Bangkok deadline day of a job, or null when its deadline is missing/unparseable
+    // (canonical helper — same parse the store bucket + the report use, F8).
+    const deadlineDateOf = (s: XtmJobState): string | null => deadlineDayOf(s.dueDate);
     // Jobs whose decideAccept() → accept, collected from BOTH passes BEFORE the schedule
     // gate (C4 — one gate, no per-site drift). The gate then groups them per bulk-accept
     // unit and decides all-or-nothing (C1).
@@ -340,7 +346,11 @@ export class XtmPollCycle {
           }));
           const v = decideGroupCapacity(capMembers, bucketFor, cap);
           if (!v.accept) {
-            blockReason = `'${members[0]!.fileName}': ${v.reason}`;
+            // F6: a capacity block is DAY-level, not file-level — `v.reason` already names the
+            // overflowing day + numbers. Do NOT prefix an arbitrary `members[0]` file (it is not
+            // the member on the overflowing day, so it blamed the wrong file). The feasibility
+            // path below still prefixes the actual failing member.
+            blockReason = v.reason;
             capExhaustedDay = v.capExhaustedDay;
           } else {
             // Advance EACH deadline day's bucket by its OWN subtotal (never lump a
@@ -656,8 +666,7 @@ export class XtmPollCycle {
    *  Bangkok year the now→deadline span touches and feeds the pure `evaluateAcceptSchedule`.
    *  Capacity is decided separately by `decideGroupCapacity` (per deadline day) in the cycle. */
   private scheduleVerdict(s: XtmJobState, nowMs: number): AcceptScheduleVerdict {
-    const parsed = s.dueDate ? Date.parse(s.dueDate) : NaN;
-    const dueAtMs = Number.isFinite(parsed) ? parsed : null;
+    const dueAtMs = deadlineMsOf(s.dueDate); // canonical parse (F8) — same one the bucket/report use
     // The per-job fail-closed still uses the SPAN's curation (a far deadline into an
     // uncurated year blocks); the cycle-level holiday_calendar_stale alert is decided
     // separately from the CURRENT year (F1/F2) in the gate block above.

@@ -64,6 +64,39 @@ describe('decideGroupCapacity', () => {
     expect(v.accept).toBe(true);
   });
 
+  it('F3: a later subtotal>cap (permanent) day wins over an earlier budget-filled (retryable) day', () => {
+    // Earlier day 06-23: bucket 900 + subtotal 200 = 1100 > cap, but subtotal(200) ≤ cap →
+    // the retryable "daily word cap reached" case. Later day 06-24: subtotal 1500 alone > cap →
+    // the PERMANENT "exceed the daily cap — accept manually" case. The permanent case must win:
+    // an early return on the retryable day would silently re-reject the over-cap job forever and
+    // never tell ops to accept it manually.
+    const v = decideGroupCapacity(
+      [m('a', 200, '2026-06-23'), m('b', 1500, '2026-06-24')],
+      (d) => (d === '2026-06-23' ? 900 : 0),
+      1000,
+    );
+    expect(v.accept).toBe(false);
+    if (!v.accept) {
+      expect(v.reason).toContain('exceed the daily cap');
+      expect(v.reason).toContain('accept manually');
+      expect(v.reason).toContain('2026-06-24'); // names the over-cap (permanent) day
+      expect(v.capExhaustedDay).toBeUndefined(); // NOT the retryable budget-reached verdict
+    }
+  });
+
+  it('F3: names the EARLIEST subtotal>cap day when multiple days are over-cap', () => {
+    const v = decideGroupCapacity(
+      [m('a', 1500, '2026-06-25'), m('b', 1200, '2026-06-24')],
+      empty,
+      1000,
+    );
+    expect(v.accept).toBe(false);
+    if (!v.accept) {
+      expect(v.reason).toContain('2026-06-24'); // earliest over-cap day, regardless of insertion order
+      expect(v.capExhaustedDay).toBeUndefined();
+    }
+  });
+
   it('names the EARLIEST overflowing day when multiple days overflow (deadline order)', () => {
     // Members supplied in DESCENDING date order so insertion order ≠ deadline order.
     // Both days overflow (bucket 700 + subtotal 400 = 1100 > 1000); the blocked reason
