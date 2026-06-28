@@ -11,7 +11,8 @@ import { hasMaterialSheetChange } from '../reporting/sheetSync.js';
 import { evaluateAcceptSchedule, type AcceptScheduleVerdict } from '../schedule/acceptSchedule.js';
 import { decideGroupCapacity, type CapacityMember } from '../schedule/acceptCapacity.js';
 import { resolveHolidaysForSpan, getThaiHolidays } from '../schedule/thaiHolidays.js';
-import { bangkokDateString, bangkokYear } from '../schedule/bangkokCalendar.js';
+import { bangkokYear } from '../schedule/bangkokCalendar.js';
+import { deadlineDayOf } from '../schedule/deadlineDay.js';
 import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
@@ -194,11 +195,9 @@ export class XtmPollCycle {
       }
       return v;
     };
-    // The Bangkok deadline day of a job, or null when its deadline is missing/unparseable.
-    const deadlineDateOf = (s: XtmJobState): string | null => {
-      const t = s.dueDate ? Date.parse(s.dueDate) : NaN;
-      return Number.isFinite(t) ? bangkokDateString(t) : null;
-    };
+    // The Bangkok deadline day of a job, or null when its deadline is missing/unparseable
+    // (canonical helper — same parse the store bucket + the report use, F8).
+    const deadlineDateOf = (s: XtmJobState): string | null => deadlineDayOf(s.dueDate);
     // Jobs whose decideAccept() → accept, collected from BOTH passes BEFORE the schedule
     // gate (C4 — one gate, no per-site drift). The gate then groups them per bulk-accept
     // unit and decides all-or-nothing (C1).
@@ -340,7 +339,11 @@ export class XtmPollCycle {
           }));
           const v = decideGroupCapacity(capMembers, bucketFor, cap);
           if (!v.accept) {
-            blockReason = `'${members[0]!.fileName}': ${v.reason}`;
+            // F6: a capacity block is DAY-level, not file-level — `v.reason` already names the
+            // overflowing day + numbers. Do NOT prefix an arbitrary `members[0]` file (it is not
+            // the member on the overflowing day, so it blamed the wrong file). The feasibility
+            // path below still prefixes the actual failing member.
+            blockReason = v.reason;
             capExhaustedDay = v.capExhaustedDay;
           } else {
             // Advance EACH deadline day's bucket by its OWN subtotal (never lump a

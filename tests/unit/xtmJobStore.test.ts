@@ -204,7 +204,9 @@ describe('XtmJobStore', () => {
       const store = freshStore();
       // After F1, a held (accepted) job always carries a parseable committed deadline, so it
       // must always land in its deadline-day bucket — never silently dropped/under-counted.
-      store.upsertMany([accepted({ jobKey: 'h', dueDate: '2026-06-24T18:00:00+07:00', words: 600 })]);
+      store.upsertMany([
+        accepted({ jobKey: 'h', dueDate: '2026-06-24T18:00:00+07:00', words: 600 }),
+      ]);
       const m = store.wordsDueByDeadline();
       expect(m.get('2026-06-24')).toBe(600);
       expect(m.size).toBe(1);

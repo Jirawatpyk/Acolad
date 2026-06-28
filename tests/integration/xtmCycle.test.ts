@@ -1214,7 +1214,10 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(only('tue.docx').lifecycleStatus).toBe('rejected');
     expect(only('wed.docx').lifecycleStatus).toBe('rejected');
     const note = sheetRows().find((r) => r.file === 'tue.docx')?.note ?? '';
-    expect(note).toContain(bangkokDateString(Date.parse(dueWed18))); // names the overflowing day
+    expect(note).toContain(bangkokDateString(Date.parse(dueWed18))); // names the overflowing DAY
+    // F6: a capacity block is day-level — it must NOT prefix an arbitrary file name (blaming a
+    // file that is not even on the overflowing day).
+    expect(note).not.toContain('.docx');
   });
 
   it('F1: a held job whose grid cell later reads blank keeps its deadline-day bucket (no over-accept)', async () => {

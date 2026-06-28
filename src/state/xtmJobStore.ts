@@ -1,6 +1,6 @@
 import type { DB } from './db.js';
 import type { XtmJobState, XtmLifecycleStatus, XtmAcceptStatus } from '../detection/types.js';
-import { bangkokDateString } from '../schedule/bangkokCalendar.js';
+import { deadlineDayOf } from '../schedule/deadlineDay.js';
 
 interface XtmJobRow {
   job_key: string;
@@ -64,9 +64,8 @@ export class XtmJobStore {
   wordsDueByDeadline(): Map<string, number> {
     const out = new Map<string, number>();
     for (const s of this.listByLifecycle('accepted')) {
-      const t = s.dueDate ? Date.parse(s.dueDate) : NaN;
-      if (!Number.isFinite(t)) continue;
-      const d = bangkokDateString(t);
+      const d = deadlineDayOf(s.dueDate); // canonical parse + null handling (F8)
+      if (d === null) continue;
       out.set(d, (out.get(d) ?? 0) + (s.words ?? 0));
     }
     return out;

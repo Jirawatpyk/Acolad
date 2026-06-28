@@ -10,6 +10,7 @@ import { buildCard, type CardRow } from './chatCard.js';
 import { formatReadableDate } from './dateFormat.js';
 import { dash } from './cardText.js';
 import { bangkokCalendar, bangkokDateString } from '../schedule/bangkokCalendar.js';
+import { deadlineMsOf } from '../schedule/deadlineDay.js';
 import { isNonWorkingDay } from '../schedule/workingHours.js';
 import type { XtmJobState } from '../detection/types.js';
 
@@ -19,9 +20,8 @@ import type { XtmJobState } from '../detection/types.js';
 
 /**
  * Returns the Bangkok calendar date as 'YYYY-MM-DD' for the given epoch ms.
- * Delegates to the canonical `bangkokDateString` (F5/F7) so the daily-report read
- * and the meta word-counter write key off the IDENTICAL "Bangkok date" function —
- * eliminating the latent key-divergence that could silently bypass the daily cap.
+ * Thin delegate to the canonical `bangkokDateString` so every Bangkok-date read keys off
+ * one function. (It once also fed the meta word-counter, which was removed in PR #15.)
  */
 export function bangkokDate(nowMs: number): string {
   return bangkokDateString(nowMs);
@@ -82,10 +82,8 @@ export function buildDailyReportCard(
   const today = bangkokDate(nowMs);
 
   // Returns the deadline as epoch ms, or +Infinity for null/unparseable (sorts last).
-  const dueMs = (j: XtmJobState): number => {
-    const t = j.dueDate ? Date.parse(j.dueDate) : NaN;
-    return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
-  };
+  // Canonical parse (F8) — same one the capacity gate + store bucket use.
+  const dueMs = (j: XtmJobState): number => deadlineMsOf(j.dueDate) ?? Number.POSITIVE_INFINITY;
 
   // Pass 1: compute "Due today" word bucket and collect overdue jobs.
   // Only jobs with a parseable finite deadline contribute to either metric.
@@ -123,10 +121,9 @@ export function buildDailyReportCard(
   const more = sorted.length - top.length;
   if (more > 0) rows.push({ label: '—', value: `(+${more} more)` });
 
-  // Header date: YYYY-MM-DD → DD/MM/YYYY via formatReadableDate (TZ-safe, same helper).
-  // formatReadableDate is non-nullable (returns '' for empty, the input for unparseable),
-  // and `${today}T00:00:00+07:00` is always parseable, so no fallback is reachable here.
-  const headerDate = formatReadableDate(`${today}T00:00:00+07:00`).slice(0, 10);
+  // Header date: `today` is already a Bangkok 'YYYY-MM-DD' (from bangkokDate), so reverse its
+  // parts to 'DD/MM/YYYY' — no parse round-trip / slice fragility.
+  const headerDate = today.split('-').reverse().join('/');
 
   return buildCard({
     cardId: `daily-${today}`,
