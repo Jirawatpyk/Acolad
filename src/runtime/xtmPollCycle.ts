@@ -12,7 +12,7 @@ import { evaluateAcceptSchedule, type AcceptScheduleVerdict } from '../schedule/
 import { decideGroupCapacity, type CapacityMember } from '../schedule/acceptCapacity.js';
 import { resolveHolidaysForSpan, getThaiHolidays } from '../schedule/thaiHolidays.js';
 import { bangkokYear } from '../schedule/bangkokCalendar.js';
-import { deadlineDayOf } from '../schedule/deadlineDay.js';
+import { deadlineDayOf, deadlineMsOf } from '../schedule/deadlineDay.js';
 import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
@@ -666,8 +666,7 @@ export class XtmPollCycle {
    *  Bangkok year the now→deadline span touches and feeds the pure `evaluateAcceptSchedule`.
    *  Capacity is decided separately by `decideGroupCapacity` (per deadline day) in the cycle. */
   private scheduleVerdict(s: XtmJobState, nowMs: number): AcceptScheduleVerdict {
-    const parsed = s.dueDate ? Date.parse(s.dueDate) : NaN;
-    const dueAtMs = Number.isFinite(parsed) ? parsed : null;
+    const dueAtMs = deadlineMsOf(s.dueDate); // canonical parse (F8) — same one the bucket/report use
     // The per-job fail-closed still uses the SPAN's curation (a far deadline into an
     // uncurated year blocks); the cycle-level holiday_calendar_stale alert is decided
     // separately from the CURRENT year (F1/F2) in the gate block above.
