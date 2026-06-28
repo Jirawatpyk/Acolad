@@ -124,7 +124,9 @@ export function buildDailyReportCard(
   if (more > 0) rows.push({ label: '—', value: `(+${more} more)` });
 
   // Header date: YYYY-MM-DD → DD/MM/YYYY via formatReadableDate (TZ-safe, same helper).
-  const headerDate = formatReadableDate(`${today}T00:00:00+07:00`)?.slice(0, 10) ?? today;
+  // formatReadableDate is non-nullable (returns '' for empty, the input for unparseable),
+  // and `${today}T00:00:00+07:00` is always parseable, so no fallback is reachable here.
+  const headerDate = formatReadableDate(`${today}T00:00:00+07:00`).slice(0, 10);
 
   return buildCard({
     cardId: `daily-${today}`,

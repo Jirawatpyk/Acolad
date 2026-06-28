@@ -199,5 +199,18 @@ describe('XtmJobStore', () => {
       expect(m.get('2026-06-25')).toBe(50);
       expect(m.size).toBe(2);
     });
+
+    it('treats a null-words held job as 0 (no NaN, does not change a co-day sum)', () => {
+      const store = freshStore();
+      store.upsertMany([
+        accepted({ jobKey: 'a', dueDate: '2026-06-24T18:00:00+07:00', words: 100 }),
+        accepted({ jobKey: 'n', dueDate: '2026-06-24T09:00:00+07:00', words: null }), // null → 0
+        accepted({ jobKey: 'z', dueDate: '2026-06-26T18:00:00+07:00', words: null }), // null → 0
+      ]);
+      const m = store.wordsDueByDeadline();
+      expect(m.get('2026-06-24')).toBe(100); // null co-day job adds 0, not NaN
+      expect(Number.isNaN(m.get('2026-06-24'))).toBe(false);
+      expect(m.get('2026-06-26')).toBe(0); // a day with only a null-words job sums to 0
+    });
   });
 });

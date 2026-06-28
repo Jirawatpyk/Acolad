@@ -57,4 +57,26 @@ describe('decideGroupCapacity', () => {
     expect(v.accept).toBe(false);
     if (!v.accept) expect(v.reason).toContain('2026-06-24');
   });
+
+  it('accepts at the exact cap boundary (bucket + subtotal === cap, not > cap)', () => {
+    // bucketFor=600, member words=400, cap=1000 → 600+400=1000 is NOT over cap → accept.
+    const v = decideGroupCapacity([m('a', 400, '2026-06-23')], () => 600, 1000);
+    expect(v.accept).toBe(true);
+  });
+
+  it('names the EARLIEST overflowing day when multiple days overflow (deadline order)', () => {
+    // Members supplied in DESCENDING date order so insertion order ≠ deadline order.
+    // Both days overflow (bucket 700 + subtotal 400 = 1100 > 1000); the blocked reason
+    // must name the earliest day (2026-06-24), not whichever was inserted first.
+    const v = decideGroupCapacity(
+      [m('a', 400, '2026-06-25'), m('b', 400, '2026-06-24')],
+      () => 700,
+      1000,
+    );
+    expect(v.accept).toBe(false);
+    if (!v.accept) {
+      expect(v.capExhaustedDay).toBe('2026-06-24');
+      expect(v.reason).toContain('2026-06-24');
+    }
+  });
 });
