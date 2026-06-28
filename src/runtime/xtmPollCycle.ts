@@ -130,24 +130,31 @@ export class XtmPollCycle {
     // dropped, and never re-accepted (accept_status stays out of 'none').
     for (const s of prev.values()) {
       if (s.acceptStatus !== 'accepting') continue;
-      this.accept.recordAcceptOutcome(s.jobKey, 'failed', null);
       s.acceptStatus = 'failed';
       s.lifecycleStatus = 'accept_failed';
-      raiseAlert(
-        this.db,
-        this.outbox,
-        'accept_failed',
-        snapshot.capturedAt,
-        `${s.projectName} / ${s.fileName}: stuck in 'accepting' (prior cycle stopped mid-way)`,
-        {},
-        `accept_failed:${s.jobKey}`,
-      );
-      this.outbox.enqueue(
-        `sheet:stranded:${s.jobKey}:${snapshot.pollCycleId}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, 'crash mid-accept') }),
-        snapshot.capturedAt,
-        'sheets',
-      );
+      // F10: record the outcome AND enqueue the alert + Sheet row in ONE transaction (mirrors
+      // the main accept-record txn). A crash between them would otherwise commit 'accept_failed'
+      // to the DB while the alert/Sheet outbox rows are lost — the failure shows in state but
+      // never reaches Chat/Sheet (an at-least-once gap). All-or-nothing: a throw rolls the record
+      // back, so the job stays 'accepting' and is recovered cleanly next cycle.
+      this.db.transaction(() => {
+        this.accept.recordAcceptOutcome(s.jobKey, 'failed', null);
+        raiseAlert(
+          this.db,
+          this.outbox,
+          'accept_failed',
+          snapshot.capturedAt,
+          `${s.projectName} / ${s.fileName}: stuck in 'accepting' (prior cycle stopped mid-way)`,
+          {},
+          `accept_failed:${s.jobKey}`,
+        );
+        this.outbox.enqueue(
+          `sheet:stranded:${s.jobKey}:${snapshot.pollCycleId}`,
+          JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, 'crash mid-accept') }),
+          snapshot.capturedAt,
+          'sheets',
+        );
+      })();
     }
 
     const result = diffXtm(snapshot, prev, { baseline });

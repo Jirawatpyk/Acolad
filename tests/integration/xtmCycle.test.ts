@@ -1,10 +1,11 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, type DB } from '../../src/state/db.js';
 import { XtmPollCycle } from '../../src/runtime/xtmPollCycle.js';
 import { XtmJobStore } from '../../src/state/xtmJobStore.js';
+import { Outbox } from '../../src/state/outbox.js';
 import { MetaStore } from '../../src/state/meta.js';
 import { computeXtmJobKey } from '../../src/detection/jobKey.js';
 import { bangkokDateString } from '../../src/schedule/bangkokCalendar.js';
@@ -564,6 +565,29 @@ describe('XtmPollCycle crash recovery (review #1/#2)', () => {
       .prepare("SELECT 1 FROM system_events WHERE event_type='system_alert' AND dedup_key = ?")
       .all(`accept_failed:${key}`);
     expect(alerts.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('F10: a crash between the recovery record and its outbox enqueue is atomic (stays accepting)', async () => {
+    fresh();
+    const key = computeXtmJobKey(xraw());
+    const cycle = new XtmPollCycle(db, cfg(), new StubAcceptor());
+    await cycle.run(snap([xraw()], 'c1')); // accepted
+    // Strand it (a prior cycle claimed but crashed before recording the outcome).
+    db.prepare("UPDATE jobs SET accept_status='accepting' WHERE job_key = ?").run(key);
+    // Simulate a crash mid-recovery: the first outbox write (raiseAlert's enqueue) throws AFTER
+    // recordAcceptOutcome has run. Without the recovery transaction the DB would commit
+    // 'accept_failed' while Chat/Sheet never report it (the at-least-once gap, F10).
+    const spy = vi.spyOn(Outbox.prototype, 'enqueue').mockImplementationOnce(() => {
+      throw new Error('crash mid-enqueue');
+    });
+    try {
+      await expect(cycle.run(snap([xraw()], 'c2'))).rejects.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    // All-or-nothing: the record rolled back with the failed enqueue, so the job is STILL
+    // 'accepting' (it will be recovered cleanly next cycle), not silently stranded as failed.
+    expect(only().acceptStatus).toBe('accepting');
   });
 });
 
