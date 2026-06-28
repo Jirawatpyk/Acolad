@@ -52,7 +52,15 @@ export class XtmJobStore {
 
   /** Σ words of held (lifecycle 'accepted') jobs grouped by Bangkok deadline date.
    *  Null/unparseable deadlines are skipped (never a NaN key). Single source of truth
-   *  for the per-deadline-day capacity cap. */
+   *  for the per-deadline-day capacity cap.
+   *
+   *  INVARIANT (F1): a held job's committed dueDate/words are locked by `detection/xtmDiff`
+   *  against a transient blank grid re-read, so a held job ALWAYS keeps a valid deadline once
+   *  accepted. The skip below therefore only ever applies to the gate-OFF path
+   *  (`ACCEPT_SCHEDULE_ENABLED=0`), where a null-deadline job can be held without going through
+   *  the gate — never to a gate-ON held job. If that skip ever fires on a gate-ON held job it
+   *  is an anomaly (would silently under-count the bucket → risk over-accept); see the §9 audit
+   *  trail (`summary.acceptedDueDays`) logged by the loop for the breadcrumb. */
   wordsDueByDeadline(): Map<string, number> {
     const out = new Map<string, number>();
     for (const s of this.listByLifecycle('accepted')) {

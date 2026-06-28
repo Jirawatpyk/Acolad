@@ -1217,6 +1217,37 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(note).toContain(bangkokDateString(Date.parse(dueWed18))); // names the overflowing day
   });
 
+  it('F1: a held job whose grid cell later reads blank keeps its deadline-day bucket (no over-accept)', async () => {
+    fresh();
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    // c1: accept a 600w Malay job due Wed → held (Wed bucket = 600).
+    await cycle.run(
+      snapAt([xraw({ fileName: 'held.docx', dueDate: dueWed18, words: 600 })], MON_10, 'c1'),
+    );
+    expect(only('held.docx').lifecycleStatus).toBe('accepted');
+    // c2: the held job is STILL in Active but its Due/Words cells read blank (grid race). Without
+    // the F1 lock this would persist dueDate=null/words=null, dropping it from the Wed bucket.
+    await cycle.run(
+      snapAt([xraw({ fileName: 'held.docx', dueDate: null, words: null })], MON_10, 'c2'),
+    );
+    const held = only('held.docx');
+    expect(held.dueDate).toBe(dueWed18); // committed deadline survived the blank re-read
+    expect(held.words).toBe(600);
+    // c3: a NEW 600w Malay job due Wed appears. The Wed bucket must still hold the held 600, so
+    // 600 + 600 > the 1000 cap → reject. Without F1 the bucket would be 0 → over-accept (irreversible).
+    await cycle.run(
+      snapAt(
+        [
+          xraw({ fileName: 'held.docx', dueDate: null, words: null }),
+          xraw({ fileName: 'new.docx', dueDate: dueWed18, words: 600 }),
+        ],
+        MON_10,
+        'c3',
+      ),
+    );
+    expect(only('new.docx').lifecycleStatus).toBe('rejected');
+  });
+
   it('capacity seed skips a null-deadline held job without crashing', async () => {
     fresh();
     new XtmJobStore(db).upsertMany([accepted({ jobKey: 'nul', dueDate: null, words: 999 })]);

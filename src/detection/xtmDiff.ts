@@ -11,6 +11,41 @@ import type {
 
 const wordsStr = (w: number | null): string | null => (w === null ? null : String(w));
 
+/**
+ * A job is "held" once accepted — its words sit in the per-deadline-day capacity bucket
+ * (`XtmJobStore.wordsDueByDeadline`, keyed off `lifecycle_status='accepted'`) until it
+ * finishes. acceptStatus and lifecycleStatus are written together, but check BOTH so the
+ * lock holds regardless of which one the orchestration mutates first.
+ */
+const isHeld = (s: XtmJobState): boolean =>
+  s.acceptStatus === 'accepted' || s.lifecycleStatus === 'accepted';
+
+const parseableDate = (v: string | null): boolean =>
+  v != null && v !== '' && Number.isFinite(Date.parse(v));
+const usableWords = (w: number | null): boolean => w != null && Number.isFinite(w);
+
+/**
+ * F1 (over-accept guard): the `dueDate`/`words` a still-visible/relisted job commits this
+ * cycle. Normally the fresh grid values, BUT a HELD (accepted) job stays visible in Active
+ * and the grid re-syncs its cells every cycle — a transient blank/unparseable read must NOT
+ * erase the committed deadline/words. Erasing them would drop the job from (or zero it in)
+ * its deadline-day capacity bucket, under-counting that day's load and over-accepting a later
+ * same-deadline Malay job on the IRREVERSIBLE bulk-claim path. So for a held job a null/empty/
+ * unparseable incoming value keeps the existing one; a genuine non-null value is still taken
+ * (deadline extensions still apply). Non-held jobs are untouched (their cells are not load-
+ * bearing for capacity, and they are re-evaluated by the gate every cycle anyway).
+ */
+function lockedDisplayFields(
+  existing: XtmJobState,
+  raw: XtmRawJob,
+): { dueDate: string | null; words: number | null } {
+  if (!isHeld(existing)) return { dueDate: raw.dueDate, words: raw.words };
+  return {
+    dueDate: parseableDate(raw.dueDate) ? raw.dueDate : (existing.dueDate ?? raw.dueDate),
+    words: usableWords(raw.words) ? raw.words : (existing.words ?? raw.words),
+  };
+}
+
 function buildXtmState(key: string, raw: XtmRawJob, at: string, hash: string): XtmJobState {
   return {
     jobKey: key,
@@ -45,6 +80,7 @@ function buildXtmState(key: string, raw: XtmRawJob, at: string, hash: string): X
  * — those are owned by the orchestration, so diff must preserve whatever it set.
  */
 function applyXtmState(existing: XtmJobState, raw: XtmRawJob, hash: string): XtmJobState {
+  const { dueDate, words } = lockedDisplayFields(existing, raw);
   return {
     ...existing,
     xtmTaskId: raw.xtmTaskId,
@@ -52,9 +88,9 @@ function applyXtmState(existing: XtmJobState, raw: XtmRawJob, hash: string): Xtm
     fileName: raw.fileName,
     sourceLang: raw.sourceLang,
     targetLang: raw.targetLang,
-    dueDate: raw.dueDate,
+    dueDate,
     dueRaw: raw.dueRaw,
-    words: raw.words,
+    words,
     step: raw.step,
     role: raw.role,
     snapshotHash: hash,
@@ -62,15 +98,19 @@ function applyXtmState(existing: XtmJobState, raw: XtmRawJob, hash: string): Xtm
 }
 
 function xtmFieldChanges(prev: XtmJobState, raw: XtmRawJob): DetailsChange['changes'] {
+  // Compare against the EFFECTIVE (post-lock) dueDate/words so a held job whose grid cell
+  // read blank does not report a spurious "dueDate → null" change (which would re-sync the
+  // Sheet with the same locked value every cycle). A genuine change still surfaces.
+  const { dueDate, words } = lockedDisplayFields(prev, raw);
   const compare: [string, string | null, string | null][] = [
     ['projectName', prev.projectName, raw.projectName],
     ['fileName', prev.fileName, raw.fileName],
     ['sourceLang', prev.sourceLang, raw.sourceLang],
     ['targetLang', prev.targetLang, raw.targetLang],
-    ['dueDate', prev.dueDate, raw.dueDate],
+    ['dueDate', prev.dueDate, dueDate],
     ['step', prev.step, raw.step],
     ['role', prev.role, raw.role],
-    ['words', wordsStr(prev.words), wordsStr(raw.words)],
+    ['words', wordsStr(prev.words), wordsStr(words)],
   ];
   const fields: { field: string; from: string | null; to: string | null }[] = [];
   for (const [field, from, to] of compare) {

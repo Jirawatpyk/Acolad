@@ -93,3 +93,61 @@ describe('diffXtm (XTM appearance algorithm via generic diff)', () => {
     expect(second.detailsChanges).toHaveLength(1);
   });
 });
+
+describe('diffXtm — held-job dueDate/words lock (F1, over-accept guard)', () => {
+  const DUE = '2026-06-24T18:00:00+07:00'; // TZ-explicit (must pass under TZ=UTC)
+  // Mark every state in a diff result as held (accepted) — mirrors what the
+  // orchestration does after a successful accept.
+  const heldFrom = (states: Map<string, XtmJobState>): Map<string, XtmJobState> => {
+    const m = new Map<string, XtmJobState>();
+    for (const [k, s] of states)
+      m.set(k, { ...s, lifecycleStatus: 'accepted', acceptStatus: 'accepted', eligible: true });
+    return m;
+  };
+
+  it('(a) keeps a held job committed dueDate/words when the grid re-reads them blank', () => {
+    const first = diffXtm(snap([xraw({ dueDate: DUE, words: 800 })], 'c1'), new Map());
+    const prev = heldFrom(first.nextStates);
+    // Next cycle: the Due/Words cells read blank (transient grid race / late XHR).
+    const second = diffXtm(snap([xraw({ dueDate: null, words: null })], 'c2'), prev);
+    const s = [...second.nextStates.values()][0];
+    expect(s?.dueDate).toBe(DUE); // locked — a null re-sync must NOT erase it
+    expect(s?.words).toBe(800);
+  });
+
+  it('(a) does not emit a spurious dueDate/words change for the locked held job', () => {
+    const first = diffXtm(snap([xraw({ dueDate: DUE, words: 800 })], 'c1'), new Map());
+    const prev = heldFrom(first.nextStates);
+    const second = diffXtm(snap([xraw({ dueDate: null, words: null })], 'c2'), prev);
+    const fields = second.detailsChanges.flatMap((d) => d.changes.map((c) => c.field));
+    // The committed values are unchanged (locked), so no Sheet-material re-sync should fire.
+    expect(fields).not.toContain('dueDate');
+    expect(fields).not.toContain('words');
+  });
+
+  it('(a) treats an unparseable (non-null) incoming dueDate as a blank and keeps the committed one', () => {
+    const first = diffXtm(snap([xraw({ dueDate: DUE, words: 800 })], 'c1'), new Map());
+    const prev = heldFrom(first.nextStates);
+    const second = diffXtm(snap([xraw({ dueDate: 'not-a-date', words: 800 })], 'c2'), prev);
+    expect([...second.nextStates.values()][0]?.dueDate).toBe(DUE);
+  });
+
+  it('(b) still takes a genuine non-null dueDate/words change on a held job (deadline extended)', () => {
+    const due2 = '2026-06-26T18:00:00+07:00';
+    const first = diffXtm(snap([xraw({ dueDate: DUE, words: 800 })], 'c1'), new Map());
+    const prev = heldFrom(first.nextStates);
+    const second = diffXtm(snap([xraw({ dueDate: due2, words: 900 })], 'c2'), prev);
+    const s = [...second.nextStates.values()][0];
+    expect(s?.dueDate).toBe(due2); // legitimate update honored
+    expect(s?.words).toBe(900);
+  });
+
+  it('(c) does NOT lock for a non-accepted job (a null re-sync still nulls)', () => {
+    const first = diffXtm(snap([xraw({ dueDate: DUE, words: 800 })], 'c1'), new Map());
+    // stays 'new' / 'none' (never accepted)
+    const second = diffXtm(snap([xraw({ dueDate: null, words: null })], 'c2'), first.nextStates);
+    const s = [...second.nextStates.values()][0];
+    expect(s?.dueDate).toBeNull();
+    expect(s?.words).toBeNull();
+  });
+});
