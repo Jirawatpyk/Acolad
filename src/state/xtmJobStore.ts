@@ -1,5 +1,6 @@
 import type { DB } from './db.js';
 import type { XtmJobState, XtmLifecycleStatus, XtmAcceptStatus } from '../detection/types.js';
+import { bangkokDateString } from '../schedule/bangkokCalendar.js';
 
 interface XtmJobRow {
   job_key: string;
@@ -47,6 +48,20 @@ export class XtmJobStore {
       .prepare("SELECT * FROM jobs WHERE lifecycle_status = ? AND file_name <> ''")
       .all(status) as XtmJobRow[];
     return rows.map(rowToState);
+  }
+
+  /** Σ words of held (lifecycle 'accepted') jobs grouped by Bangkok deadline date.
+   *  Null/unparseable deadlines are skipped (never a NaN key). Single source of truth
+   *  for the per-deadline-day capacity cap. */
+  wordsDueByDeadline(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const s of this.listByLifecycle('accepted')) {
+      const t = s.dueDate ? Date.parse(s.dueDate) : NaN;
+      if (!Number.isFinite(t)) continue;
+      const d = bangkokDateString(t);
+      out.set(d, (out.get(d) ?? 0) + (s.words ?? 0));
+    }
+    return out;
   }
 
   /** Upsert by job_key (no duplicate rows, Constitution VII). Runs in one txn. */

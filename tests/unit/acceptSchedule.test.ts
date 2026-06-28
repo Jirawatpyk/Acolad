@@ -25,8 +25,6 @@ const base = (
     nowMs: at('2026-06-22T15:00:00+07:00'), // Monday 15:00
     dueAtMs: at('2026-06-22T18:00:00+07:00'),
     words: 300,
-    acceptedWordsToday: 0,
-    maxWordsPerDay: 1000,
     throughputWordsPerHour: 100, // round so requiredMin = words * 0.6
     holidaysCuratedForSpan: true,
     ...rest,
@@ -38,12 +36,6 @@ describe('evaluateAcceptSchedule', () => {
   it('disabled → always allow', () => {
     expect(evaluateAcceptSchedule(base({ enabled: false, dueAtMs: null }))).toEqual({
       allow: true,
-    });
-  });
-  it('capacity reached → block', () => {
-    expect(evaluateAcceptSchedule(base({ acceptedWordsToday: 1000 }))).toEqual({
-      allow: false,
-      reason: 'daily word cap reached (1000/1000)',
     });
   });
   it('deadline unknown → block', () => {
@@ -139,20 +131,6 @@ describe('evaluateAcceptSchedule', () => {
     expect(v.allow).toBe(false);
     if (!v.allow)
       expect(v.reason).toBe('throughput not configured (throughputWordsPerHour must be positive)');
-  });
-  it('maxWordsPerDay=0 means unlimited — allow even with a large accepted total (F5)', () => {
-    // cap 0 = no cap: the `maxWordsPerDay > 0` guard short-circuits the cap check, so a
-    // huge acceptedWordsToday must NOT block a feasible job.
-    expect(
-      evaluateAcceptSchedule(base({ maxWordsPerDay: 0, acceptedWordsToday: 5000 })).allow,
-    ).toBe(true);
-  });
-  it('cap check precedes the words check — words=0 at the cap still blocks (F5)', () => {
-    // words=0 would otherwise allow instantly; proving the cap (acceptedWordsToday >=
-    // maxWordsPerDay) is evaluated FIRST and short-circuits with the cap reason.
-    expect(
-      evaluateAcceptSchedule(base({ words: 0, acceptedWordsToday: 1000, maxWordsPerDay: 1000 })),
-    ).toEqual({ allow: false, reason: 'daily word cap reached (1000/1000)' });
   });
   it('far-deadline weekend job is feasible → allow', () => {
     expect(

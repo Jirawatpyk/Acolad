@@ -41,6 +41,10 @@ const xstate = (over: Partial<XtmJobState> = {}): XtmJobState => ({
   ...over,
 });
 
+// An accepted (held) job — mirrors xstate() with the accepted lifecycle set.
+const accepted = (over: Partial<XtmJobState> = {}): XtmJobState =>
+  xstate({ lifecycleStatus: 'accepted', acceptStatus: 'accepted', acceptedAt: NOW, ...over });
+
 afterEach(() => {
   db?.close();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -177,6 +181,23 @@ describe('XtmJobStore', () => {
       const store = freshStore();
       store.upsertMany([xstate({ jobKey: 'n1', fileName: 'n1.docx', lifecycleStatus: 'new' })]);
       expect(store.listByLifecycle('accepted')).toEqual([]);
+    });
+  });
+
+  describe('wordsDueByDeadline', () => {
+    it('buckets held words by Bangkok deadline date and skips null/unparseable', () => {
+      const store = freshStore();
+      store.upsertMany([
+        accepted({ jobKey: 'a', dueDate: '2026-06-24T18:00:00+07:00', words: 100 }),
+        accepted({ jobKey: 'b', dueDate: '2026-06-24T09:00:00+07:00', words: 200 }),
+        accepted({ jobKey: 'c', dueDate: '2026-06-25T18:00:00+07:00', words: 50 }),
+        accepted({ jobKey: 'd', dueDate: null, words: 999 }), // skipped
+        accepted({ jobKey: 'e', dueDate: 'garbage', words: 999 }), // skipped
+      ]);
+      const m = store.wordsDueByDeadline();
+      expect(m.get('2026-06-24')).toBe(300);
+      expect(m.get('2026-06-25')).toBe(50);
+      expect(m.size).toBe(2);
     });
   });
 });
