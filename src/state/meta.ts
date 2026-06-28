@@ -62,29 +62,4 @@ export class MetaStore {
   setYieldEpisodeStartedMs(ms: number): void {
     this.set('yield_episode_started_ms', String(ms));
   }
-
-  // --- daily accepted-words counter (reset on Bangkok date roll) ---
-  /**
-   * Read the running auto-accepted word total for `dateStr` — a Bangkok `YYYY-MM-DD`
-   * supplied by the caller (the cap resets at the Bangkok date roll, NOT a rolling
-   * 24 h window). Returns 0 when the stored counter belongs to a different date.
-   */
-  acceptedWordsToday(dateStr: string): number {
-    return this.get('accepted_words_date') === dateStr ? this.getNumber('accepted_words_count', 0) : 0;
-  }
-
-  /**
-   * Add `n` words to today's counter (`dateStr` = a Bangkok `YYYY-MM-DD` from the
-   * caller), resetting the count first when the stored date differs. Wrapped in a
-   * better-sqlite3 transaction; called inside an outer transaction it nests as a
-   * SAVEPOINT, so the read-modify-write stays atomic with the caller's accept-outcome
-   * record — preserving the I1 invariant (the counter can never under- or double-count).
-   */
-  addAcceptedWords(dateStr: string, n: number): void {
-    this.db.transaction(() => {
-      const cur = this.get('accepted_words_date') === dateStr ? this.getNumber('accepted_words_count', 0) : 0;
-      this.set('accepted_words_date', dateStr);
-      this.set('accepted_words_count', String(cur + n));
-    })();
-  }
 }

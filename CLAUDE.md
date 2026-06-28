@@ -190,10 +190,10 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   re-read ว่าง = grid race → ตัดเป็น failed (ไม่ใช่ missing); probe ไม่เจอ target → log loud
 - เฝ้า latency V16/V16b: `npm run report:latency` + heartbeat เขียว
 
-## accept-scheduling gate (live — PR #7/#8)
+## accept-scheduling gate (live — PR #7/#8; capacity re-keyed to deadline-day + held-derived workload report — PR #14)
 
 `src/schedule/` กรองการ **"กดรับ"** เพิ่มอีกชั้นหลัง `decideAccept()` (detect+notify ยัง
-24/7 ไม่แตะ). กดรับงานมาเลย์ก็ต่อเมื่อครบทุกข้อ: ไม่เกิน **capacity** (คำ/วัน) · รู้ DL ·
+24/7 ไม่แตะ). กดรับงานมาเลย์ก็ต่อเมื่อครบทุกข้อ: ไม่เกิน **capacity** (≤`ACCEPT_MAX_WORDS_PER_DAY` คำ **due/วันครบกำหนด** — PR #14, ดูด้านล่าง) · รู้ DL ·
 รู้คำ · **DL ไม่ตรงวันหยุด/เสาร์-อาทิตย์** · **ทำทันในเวลางาน** (`ชม.ทำงานถึง DL ×
 throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejected'` → Sheet status **`Rejected`** +
 เหตุผลใน Note + Chat; `accept_status` คง `'none'` (robustness pass ลองใหม่ได้).
@@ -213,9 +213,16 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
   (ไม่อยู่ใน `CURATED_YEARS`) → accept **fail-closed** (Reject + `holiday_calendar_stale`),
   report **fail-open** (ส่งปกติ). **2026 แก้ in-lieu + 2027 เพิ่ม+curated แล้ว (PR #11)** — เหลือ
   reconfirm วันจันทรคติ 2027 (มาฆ/วิสาข/อาสาฬห/เข้าพรรษา) กับประกาศราชกิจจาฯ ทางการเมื่อออก
-- daily report 09:00 (`dailyReport.ts`) ส่ง **เฉพาะวันทำการ** (ข้ามเสาร์-อาทิตย์+วันหยุด,
-  PR #8); ตัวนับคำต่อวันใน `state/meta.ts` reset เที่ยงคืน Bangkok, เพิ่มใน txn เดียวกับ
-  `recordAcceptOutcome`. ทุกวันที่ Bangkok คำนวณผ่าน `schedule/bangkokCalendar.ts` (canonical)
+- **capacity = held-derived per deadline day (PR #14):** cap = ≤`ACCEPT_MAX_WORDS_PER_DAY` คำที่
+  **DL ตรงวันเดียวกัน** อ่านจาก held list (`XtmJobStore.wordsDueByDeadline()`) **ไม่ใช่วันกดรับ**
+  → **งาน finish คืนโควต้า** (source เดียว = held; ไม่มี meta word-counter แล้ว). ตัดสินด้วย pure
+  helper `schedule/acceptCapacity.ts` (`decideGroupCapacity`, all-or-nothing per bulk-group **ครอบทั้ง
+  feasibility + capacity** กัน owned-but-Rejected); seed จาก held ครั้งเดียว/รอบ **ก่อน** record
+  (memoize, advance per-DL-day). audit: `XtmCycleSummary.acceptedDueDays` log `wordsDueOn` ตอน accept
+- daily report 09:00 (`dailyReport.ts`) ส่ง **เฉพาะวันทำการ** (PR #8) — **`📋 Daily Report`:
+  Due today (Σ คำ held ที่ DL=วันนี้) / ⚠️ Overdue (instant `dueAtMs<now`) / In progress top-5 by
+  deadline** สร้างจาก held list, **throw-safe + อยู่ใน try/catch ของ loop** (bug รายงานไม่ page; PR
+  #14). ทุกวันที่ Bangkok ผ่าน `schedule/bangkokCalendar.ts` (canonical)
 
 **runbook ของ gate:**
 

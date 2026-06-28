@@ -379,7 +379,9 @@ export class XtmPollLoop {
               action: 'daily_report',
               outcome: 'error',
               date,
-              err: String(e),
+              // Pass the error object through pino's `err` serializer so the stack/type
+              // survive (String(e) collapsed them to a bare message). Constitution V.
+              err: e,
             },
             'daily report enqueue failed — will retry next cycle',
           );

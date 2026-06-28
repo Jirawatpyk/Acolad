@@ -204,6 +204,32 @@ it('In-progress shows top 5 by deadline asc; "(+N more)" only when N>0', () => {
   expect(text(buildDailyReportCard(six, NOW, 'http://x', 1000))).toContain('1 more');
 });
 
+it('with 6 held jobs the In-progress list shows the 5 EARLIEST; the LATEST is dropped', () => {
+  // Distinct filenames so a substring can't accidentally match another row.
+  const six = [
+    job({ fileName: 'early0', dueDate: '2026-06-25T18:00:00+07:00', words: 10 }),
+    job({ fileName: 'early1', dueDate: '2026-06-26T18:00:00+07:00', words: 10 }),
+    job({ fileName: 'early2', dueDate: '2026-06-27T18:00:00+07:00', words: 10 }),
+    job({ fileName: 'early3', dueDate: '2026-06-28T18:00:00+07:00', words: 10 }),
+    job({ fileName: 'early4', dueDate: '2026-06-29T18:00:00+07:00', words: 10 }),
+    job({ fileName: 'latest', dueDate: '2026-06-30T18:00:00+07:00', words: 10 }),
+  ];
+  const card = text(buildDailyReportCard(six, NOW, 'http://x', 1000));
+  for (const f of ['early0', 'early1', 'early2', 'early3', 'early4']) expect(card).toContain(f);
+  expect(card).not.toContain('latest'); // latest deadline → dropped past the top-5 slice
+  expect(card).toContain('1 more');
+});
+
+it('a held job with a non-finite deadline sorts LAST (after a finite-deadline job)', () => {
+  // 'bad' has an unparseable deadline → +Infinity → must sort after the finite 'fin' job.
+  const held = [
+    job({ fileName: 'bad', dueDate: 'garbage', words: 10 }),
+    job({ fileName: 'fin', dueDate: '2026-06-25T18:00:00+07:00', words: 10 }),
+  ];
+  const card = text(buildDailyReportCard(held, NOW, 'http://x', 1000));
+  expect(card.indexOf('fin')).toBeLessThan(card.indexOf('bad')); // finite renders first
+});
+
 it('cap=0 → "(no cap)" headline', () => {
   expect(
     text(
