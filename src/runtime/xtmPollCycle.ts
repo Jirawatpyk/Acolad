@@ -199,19 +199,13 @@ export class XtmPollCycle {
     // gate is disabled the kill-switch path seeds nothing. A null/unparseable deadline is
     // already skipped by wordsDueByDeadline (no NaN key).
     const scheduleEnabled = this.cfg.ACCEPT_SCHEDULE_ENABLED;
-    const dueSeed = scheduleEnabled ? this.store.wordsDueByDeadline() : new Map<string, number>();
-    const dueBuckets = new Map<string, number>(); // memoized running buckets for THIS cycle
-    // Current words due on a Bangkok deadline day, MEMOIZING the seed default into the map on
-    // first miss (write `dueSeed.get(d) ?? 0`, don't re-read the seed each call) so a later
-    // optimistic advance via dueBuckets.set(d, …) is never lost behind a stale `?? 0`.
-    const bucketFor = (d: string): number => {
-      let v = dueBuckets.get(d);
-      if (v === undefined) {
-        v = dueSeed.get(d) ?? 0;
-        dueBuckets.set(d, v);
-      }
-      return v;
-    };
+    // Running per-deadline-day buckets for THIS cycle: a shallow copy of the held seed (`new
+    // Map(...)` so optimistic advances below mutate OUR map, never the store's read-only one), or
+    // empty when the gate is off (the kill-switch enforces no cap).
+    const dueBuckets = scheduleEnabled
+      ? new Map<string, number>(this.store.wordsDueByDeadline())
+      : new Map<string, number>();
+    const bucketFor = (d: string): number => dueBuckets.get(d) ?? 0;
     // I1 (fail loud, never silent on the irreversible accept path): a held (accepted) job with a
     // null/unparseable deadline contributes NOTHING to the per-deadline-day seed above
     // (wordsDueByDeadline skips it), so its deadline day under-counts and a later same-day Malay
@@ -397,13 +391,14 @@ export class XtmPollCycle {
               // not. Switch on the explicit discriminant, not a presence test of an optional field.
               if (v.kind === 'budget_reached') capExhaustedDay = v.capExhaustedDay;
             } else {
-              // Advance EACH deadline day's bucket by its OWN subtotal (never lump a
-              // multi-deadline group onto one day) so a later group this cycle sees them.
-              for (const [day, sub] of v.subtotalsByDay) dueBuckets.set(day, bucketFor(day) + sub);
-              // §9 audit trail: record the RESULTING bucket AFTER advancing, so a bucket that
-              // dropped then over-filled is auditable in the loop's structured log.
-              for (const day of v.subtotalsByDay.keys())
+              // Advance EACH deadline day's bucket by its OWN subtotal (never lump a multi-
+              // deadline group onto one day) so a later group this cycle sees them, and record the
+              // RESULTING bucket AFTER the advance (§9 audit) in the SAME pass — distinct days are
+              // independent, so reading day d right after setting it yields its final value.
+              for (const [day, sub] of v.subtotalsByDay) {
+                dueBuckets.set(day, bucketFor(day) + sub);
                 summary.acceptedDueDays.push({ day, resultingBucketWords: bucketFor(day) });
+              }
             }
           }
         }
