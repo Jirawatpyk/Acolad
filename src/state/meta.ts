@@ -20,9 +20,12 @@ export class MetaStore {
   getNumber(key: string, fallback = 0): number {
     const v = this.get(key);
     if (v === undefined) return fallback;
-    // Guard NaN/Infinity: a corrupt/non-numeric meta value must not flow into the
-    // daily-cap comparison (NaN >= cap is always false → silent cap bypass) and must
-    // not self-perpetuate via String(NaN)='NaN'. Fall back to the safe default instead.
+    // Guard NaN/Infinity: getNumber now backs only the yield-state reads (lastAuthSuccessMs,
+    // yieldUntilMs, yieldEpisodeStartedMs) + the baseline cursor — a corrupt/non-numeric value
+    // must not flow into the yield-window math (e.g. a corrupt yield_until_ms would make the
+    // inCooldown/yieldStuck comparisons misbehave — NaN comparisons are always false, collapsing
+    // the cooldown window) and must not self-perpetuate via String(NaN)='NaN'. Fall back to the
+    // safe default instead.
     const n = Number(v);
     return Number.isFinite(n) ? n : fallback;
   }
