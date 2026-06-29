@@ -473,7 +473,7 @@ export class XtmPollLoop {
           skipped: summary.skipped,
           scheduleBlocked: summary.scheduleBlocked,
           holidayCalendarStale: summary.holidayCalendarStale,
-          // §9 audit trail: an array of {day, words} entries (wordsDueOn(day) — the bucket the
+          // §9 audit trail: an array of {day, resultingBucketWords} entries (wordsDueOn(day) — the bucket the
           // accept decisions used this cycle) so a held-read drift that over-fills a bucket leaves
           // a grep-able trail.
           acceptedDueDays: summary.acceptedDueDays,
