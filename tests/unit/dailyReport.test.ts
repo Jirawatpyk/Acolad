@@ -1,26 +1,24 @@
 import { describe, it, expect } from 'vitest';
-import {
-  bangkokDate,
-  dueDailyReport,
-  buildDailyReportCard,
-} from '../../src/reporting/dailyReport.js';
+import { dueDailyReport, buildDailyReportCard } from '../../src/reporting/dailyReport.js';
+import { bangkokDateString } from '../../src/schedule/bangkokCalendar.js';
 import type { XtmJobState } from '../../src/detection/types.js';
 
 // ---------------------------------------------------------------------------
-// bangkokDate — TZ-independence via +7h shift on UTC arithmetic
+// bangkokDateString — TZ-independence via +7h shift on UTC arithmetic. (The daily report's
+// internal date keying now uses bangkokDateString directly; the old bangkokDate delegate is gone.)
 // ---------------------------------------------------------------------------
-describe('bangkokDate', () => {
+describe('bangkokDateString (daily-report date keying)', () => {
   it('UTC 18:00 on 24 Jun is Bangkok 01:00 on 25 Jun (next day)', () => {
     // 2026-06-24T18:00:00Z → +7 → 2026-06-25T01:00:00 local → date '2026-06-25'
-    expect(bangkokDate(Date.parse('2026-06-24T18:00:00Z'))).toBe('2026-06-25');
+    expect(bangkokDateString(Date.parse('2026-06-24T18:00:00Z'))).toBe('2026-06-25');
   });
 
   it('UTC 00:00 on 25 Jun is Bangkok 07:00 on 25 Jun (same day)', () => {
-    expect(bangkokDate(Date.parse('2026-06-25T00:00:00Z'))).toBe('2026-06-25');
+    expect(bangkokDateString(Date.parse('2026-06-25T00:00:00Z'))).toBe('2026-06-25');
   });
 
   it('UTC 16:59 on 24 Jun is Bangkok 23:59 on 24 Jun (still same day)', () => {
-    expect(bangkokDate(Date.parse('2026-06-24T16:59:59Z'))).toBe('2026-06-24');
+    expect(bangkokDateString(Date.parse('2026-06-24T16:59:59Z'))).toBe('2026-06-24');
   });
 });
 
@@ -193,6 +191,12 @@ it('is TOTAL: a null and an unparseable deadline + null words never throw and so
   expect(() => buildDailyReportCard(held, NOW, 'http://x', 1000)).not.toThrow();
   const card = text(buildDailyReportCard(held, NOW, 'http://x', 1000));
   expect(card).toContain('100 words'); // bad/nul excluded from the sum
+});
+
+it('empty held → an explicit "No jobs in progress" row (not just a bare Due-today line)', () => {
+  const card = text(buildDailyReportCard([], NOW, 'http://x', 1000));
+  expect(card).toContain('No jobs in progress'); // operators can tell empty from a broken card
+  expect(card).toContain('0 words');
 });
 
 it('In-progress shows top 5 by deadline asc; "(+N more)" only when N>0', () => {

@@ -11,7 +11,7 @@ import { hasMaterialSheetChange } from '../reporting/sheetSync.js';
 import { evaluateAcceptSchedule, type AcceptScheduleVerdict } from '../schedule/acceptSchedule.js';
 import { decideGroupCapacity, type CapacityMember } from '../schedule/acceptCapacity.js';
 import { resolveHolidaysForSpan, getThaiHolidays } from '../schedule/thaiHolidays.js';
-import { bangkokYear } from '../schedule/bangkokCalendar.js';
+import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { deadlineDayOf, deadlineMsOf } from '../schedule/deadlineDay.js';
 import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
 import {
@@ -46,6 +46,16 @@ export interface AcceptLatencySample {
   clickLatencyMs: number | null;
   /** detection → FR-024-confirmed outcome (V16b/SC-003, ≤ 60 s). */
   outcomeLatencyMs: number;
+}
+
+/**
+ * One §9 audit entry: a deadline day on which an accepted group advanced this cycle, paired with
+ * the RESULTING per-deadline-day bucket the accept decision was based on (held + this cycle's
+ * optimistic advances) — NOT "words accepted". Named so the loop log / tests read unambiguously.
+ */
+export interface AcceptedDueDay {
+  day: string;
+  resultingBucketWords: number;
 }
 
 export interface XtmCycleSummary {
@@ -87,12 +97,12 @@ export interface XtmCycleSummary {
    * §9 audit trail for the held-read → over-accept residual risk (deadline-bucketed capacity).
    * One entry per deadline day an accepted group advanced this cycle, carrying `wordsDueOn(day)`
    * — the RESULTING held + optimistically-advanced bucket the accept decision was based on. The
-   * loop logs this map so a bucket that dropped then over-filled (e.g. a transient grid 0-read
-   * mis-disappearing a held job; cf. the late-XHR bug) leaves an auditable trail. The cycle stays
-   * logger-free (like acceptLatencies/scheduleRejects). Empty on every non-accepting / disabled /
-   * early path.
+   * loop logs this array of {day, resultingBucketWords} entries so a bucket that dropped then
+   * over-filled (e.g. a transient grid 0-read mis-disappearing a held job; cf. the late-XHR bug)
+   * leaves an auditable trail. The cycle stays logger-free (like acceptLatencies/scheduleRejects).
+   * Empty on every non-accepting / disabled / early path.
    */
-  acceptedDueDays: { day: string; words: number }[];
+  acceptedDueDays: AcceptedDueDay[];
 }
 
 /**
@@ -189,22 +199,36 @@ export class XtmPollCycle {
     // gate is disabled the kill-switch path seeds nothing. A null/unparseable deadline is
     // already skipped by wordsDueByDeadline (no NaN key).
     const scheduleEnabled = this.cfg.ACCEPT_SCHEDULE_ENABLED;
-    const dueSeed = scheduleEnabled ? this.store.wordsDueByDeadline() : new Map<string, number>();
-    const dueBuckets = new Map<string, number>(); // memoized running buckets for THIS cycle
-    // Current words due on a Bangkok deadline day, MEMOIZING the seed default into the map on
-    // first miss (write `dueSeed.get(d) ?? 0`, don't re-read the seed each call) so a later
-    // optimistic advance via dueBuckets.set(d, …) is never lost behind a stale `?? 0`.
-    const bucketFor = (d: string): number => {
-      let v = dueBuckets.get(d);
-      if (v === undefined) {
-        v = dueSeed.get(d) ?? 0;
-        dueBuckets.set(d, v);
+    // Running per-deadline-day buckets for THIS cycle: a shallow copy of the held seed (`new
+    // Map(...)` so optimistic advances below mutate OUR map, never the store's read-only one), or
+    // empty when the gate is off (the kill-switch enforces no cap).
+    const dueBuckets = scheduleEnabled
+      ? new Map<string, number>(this.store.wordsDueByDeadline())
+      : new Map<string, number>();
+    const bucketFor = (d: string): number => dueBuckets.get(d) ?? 0;
+    // I1 (fail loud, never silent on the irreversible accept path): a held (accepted) job with a
+    // null/unparseable deadline contributes NOTHING to the per-deadline-day seed above
+    // (wordsDueByDeadline skips it), so its deadline day under-counts and a later same-day Malay
+    // group could over-accept past the cap on the bulk-claim path. The §9 audit trail does NOT
+    // cover this (it only logs days a NEW group advanced), so surface it explicitly: a deduped
+    // warn alert (once per Bangkok day). Only meaningful while the gate is ON (the cap is
+    // enforced); the gate-OFF kill-switch has no cap, so a missing deadline cannot over-accept.
+    // Normally zero — the F1 lock keeps a held job's deadline; a non-zero count means a
+    // deadline-less job was held on the gate-OFF path (or the lock was bypassed) — investigate.
+    if (scheduleEnabled) {
+      const heldNoDeadline = this.store.heldJobsMissingDeadline();
+      if (heldNoDeadline.length > 0) {
+        raiseAlert(
+          this.db,
+          this.outbox,
+          'held_job_no_deadline',
+          snapshot.capturedAt,
+          `${heldNoDeadline.length} accepted job(s) have no parseable deadline — the per-deadline-day capacity may under-count; accept same-day jobs manually / fix the due date`,
+          {},
+          `held_job_no_deadline:${bangkokDateString(detectedMs)}`,
+        );
       }
-      return v;
-    };
-    // The Bangkok deadline day of a job, or null when its deadline is missing/unparseable
-    // (canonical helper — same parse the store bucket + the report use, F8).
-    const deadlineDateOf = (s: XtmJobState): string | null => deadlineDayOf(s.dueDate);
+    }
     // Jobs whose decideAccept() → accept, collected from BOTH passes BEFORE the schedule
     // gate (C4 — one gate, no per-site drift). The gate then groups them per bulk-accept
     // unit and decides all-or-nothing (C1).
@@ -334,32 +358,48 @@ export class XtmPollCycle {
         }
         // Capacity decision (group-level, per DEADLINE day) — gated behind feasibility so an
         // infeasible job reads "can't finish", never "cap reached" (§3). Buckets are the held
-        // words due on each member's deadline day (held-derived), advanced optimistically per
-        // day. Skipping a null deadlineDateOf is defensive: when ON every member already
-        // passed feasibility (deadline known), so deadlineDateOf is non-null here.
+        // words due on each member's deadline day (held-derived), advanced optimistically per day.
         let capExhaustedDay: string | undefined;
         if (blockReason === null && cap > 0) {
-          const capMembers: CapacityMember[] = members.map((s) => ({
-            jobKey: s.jobKey,
-            words: s.words ?? 0,
-            deadlineDate: deadlineDateOf(s)!,
-          }));
-          const v = decideGroupCapacity(capMembers, bucketFor, cap);
-          if (!v.accept) {
-            // F6: a capacity block is DAY-level, not file-level — `v.reason` already names the
-            // overflowing day + numbers. Do NOT prefix an arbitrary `members[0]` file (it is not
-            // the member on the overflowing day, so it blamed the wrong file). The feasibility
-            // path below still prefixes the actual failing member.
-            blockReason = v.reason;
-            capExhaustedDay = v.capExhaustedDay;
+          // I2 (fail loud, never guess): feasibility ran first and rejects a null deadline, so
+          // every member here has a known deadline day. That invariant is enforced by ordering,
+          // not the type — so if a deadline IS null at this point, do NOT `!`-assert it (a null
+          // would become a 'null' bucket key, silently corrupting the per-day cap → over-accept on
+          // the irreversible bulk path). Instead block the WHOLE group with a loud internal reason.
+          const capMembers: CapacityMember[] = [];
+          let nullDeadlineMember: XtmJobState | undefined;
+          for (const s of members) {
+            const day = deadlineDayOf(s.dueDate); // S4: inlined (the deadlineDateOf wrapper is gone)
+            if (day === null) {
+              nullDeadlineMember = s;
+              break;
+            }
+            capMembers.push({ words: s.words ?? 0, deadlineDate: day });
+          }
+          if (nullDeadlineMember) {
+            blockReason = `'${nullDeadlineMember.fileName}': internal: held member has no deadline at capacity stage`;
           } else {
-            // Advance EACH deadline day's bucket by its OWN subtotal (never lump a
-            // multi-deadline group onto one day) so a later group this cycle sees them.
-            for (const [day, sub] of v.subtotalsByDay) dueBuckets.set(day, bucketFor(day) + sub);
-            // §9 audit trail: record wordsDueOn(day) = the RESULTING bucket AFTER advancing, so
-            // a bucket that dropped then over-filled is auditable in the loop's structured log.
-            for (const day of v.subtotalsByDay.keys())
-              summary.acceptedDueDays.push({ day, words: bucketFor(day) });
+            const v = decideGroupCapacity(capMembers, bucketFor, cap);
+            if (!v.accept) {
+              // F6: a capacity block is DAY-level, not file-level — `v.reason` already names the
+              // overflowing day + numbers. Do NOT prefix an arbitrary `members[0]` file (it is not
+              // the member on the overflowing day, so it blamed the wrong file). The feasibility
+              // path below still prefixes the actual failing member.
+              blockReason = v.reason;
+              // T1: only the retryable 'budget_reached' verdict carries an exhausted day (and so
+              // raises daily_cap_reached below); 'over_cap_permanent' (a single over-cap job) does
+              // not. Switch on the explicit discriminant, not a presence test of an optional field.
+              if (v.kind === 'budget_reached') capExhaustedDay = v.capExhaustedDay;
+            } else {
+              // Advance EACH deadline day's bucket by its OWN subtotal (never lump a multi-
+              // deadline group onto one day) so a later group this cycle sees them, and record the
+              // RESULTING bucket AFTER the advance (§9 audit) in the SAME pass — distinct days are
+              // independent, so reading day d right after setting it yields its final value.
+              for (const [day, sub] of v.subtotalsByDay) {
+                dueBuckets.set(day, bucketFor(day) + sub);
+                summary.acceptedDueDays.push({ day, resultingBucketWords: bucketFor(day) });
+              }
+            }
           }
         }
         if (blockReason === null) {

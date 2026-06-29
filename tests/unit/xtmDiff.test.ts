@@ -150,4 +150,29 @@ describe('diffXtm — held-job dueDate/words lock (F1, over-accept guard)', () =
     expect(s?.dueDate).toBeNull();
     expect(s?.words).toBeNull();
   });
+
+  // isHeld is `acceptStatus==='accepted' || lifecycleStatus==='accepted'`. The (a)/(b) cases
+  // above set BOTH fields, so they would still pass under an `&&`. These two single-field cases
+  // prove the `||`: a job held by EITHER field alone must lock against a blank re-read.
+  it('(d) locks when held by lifecycleStatus=accepted ALONE (acceptStatus none) — proves the ||', () => {
+    const first = diffXtm(snap([xraw({ dueDate: DUE, words: 800 })], 'c1'), new Map());
+    const prev = new Map<string, XtmJobState>();
+    for (const [k, s] of first.nextStates)
+      prev.set(k, { ...s, lifecycleStatus: 'accepted', acceptStatus: 'none' });
+    const second = diffXtm(snap([xraw({ dueDate: null, words: null })], 'c2'), prev);
+    const s = [...second.nextStates.values()][0];
+    expect(s?.dueDate).toBe(DUE); // held by lifecycle alone → committed deadline kept (not &&)
+    expect(s?.words).toBe(800);
+  });
+
+  it('(d) locks when held by acceptStatus=accepted ALONE (lifecycle not accepted) — proves the ||', () => {
+    const first = diffXtm(snap([xraw({ dueDate: DUE, words: 800 })], 'c1'), new Map());
+    const prev = new Map<string, XtmJobState>();
+    for (const [k, s] of first.nextStates)
+      prev.set(k, { ...s, lifecycleStatus: 'new', acceptStatus: 'accepted' });
+    const second = diffXtm(snap([xraw({ dueDate: null, words: null })], 'c2'), prev);
+    const s = [...second.nextStates.values()][0];
+    expect(s?.dueDate).toBe(DUE); // held by acceptStatus alone → committed deadline kept (not &&)
+    expect(s?.words).toBe(800);
+  });
 });

@@ -799,6 +799,32 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(note).not.toContain('exceed the daily cap'); // distinct from the over-cap case
   });
 
+  it('I5: feasibility binds BEFORE capacity — an infeasible job on a near-cap day reads "cannot finish", not "cap reached"', async () => {
+    fresh();
+    // Held seed near the Mon cap (950 of 1000 due 2026-06-22). The new job is due the SAME day but
+    // its deadline is too tight to finish — so if capacity ran first it would read "cap reached"
+    // (950 + 100 > 1000). Feasibility runs FIRST, so the binding reason must be the infeasibility,
+    // and no daily_cap_reached alert may fire (capacity was never evaluated). Guards the runbook
+    // reason precedence (§3).
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueMon12, words: 950 })]);
+    const tightDue = '2026-06-22T10:05:00+07:00'; // 5 working-min after now → infeasible for 100w
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: tightDue, words: 100 })], MON_10),
+    );
+    expect(acc.calls.flat()).toHaveLength(0);
+    expect(only('a.docx').lifecycleStatus).toBe('rejected');
+    const note = sheetRows().find((r) => r.file === 'a.docx')?.note ?? '';
+    expect(note).toContain('cannot finish in time'); // feasibility's reason binds first
+    expect(note).not.toContain('cap reached'); // NOT the capacity reason (capacity never ran)
+    const capAlerts = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key LIKE 'daily_cap_reached%'",
+      )
+      .get() as { n: number };
+    expect(capAlerts.n).toBe(0); // no daily_cap_reached row exists
+  });
+
   it('I3b: a genuine cap-reached block raises daily_cap_reached once per DEADLINE day (deduped)', async () => {
     fresh();
     // Held seed: 900 words already due Wed (100 left for that deadline day).
@@ -880,6 +906,11 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), acc).run(
       snapAt([xraw({ dueDate: dueWed18, words: 300 })], MON_10),
     );
+    // I5 (non-vacuous): prove gate-OFF actually ACCEPTS even though the Wed bucket would overflow
+    // (held 900 + 300 > the 1000 cap). The kill-switch must bypass capacity byte-for-byte, not
+    // merely skip the alert.
+    expect(acc.calls.flat()).toHaveLength(1); // clicked despite the would-be overflow
+    expect(only('a.docx').lifecycleStatus).toBe('accepted'); // and recorded accepted
     const alerts = db
       .prepare(
         "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key LIKE 'daily_cap_reached%'",
@@ -1285,6 +1316,48 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     ).resolves.toBeDefined();
   });
 
+  const activeHeldNoDeadlineAlerts = (): number =>
+    (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key LIKE 'held_job_no_deadline:%' AND resolved_at IS NULL",
+        )
+        .get() as { n: number }
+    ).n;
+
+  it('I1: a held job with a null deadline raises a deduped held_job_no_deadline warn alert (fail loud)', async () => {
+    fresh();
+    // A held (accepted) job with no parseable deadline drops out of the per-deadline-day seed —
+    // it must FAIL LOUD (deduped warn), never silently under-count the bucket → over-accept.
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'nul', dueDate: null, words: 999 })]);
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    await cycle.run(
+      snapAt([xraw({ fileName: 'ok.docx', dueDate: dueTue18, words: 100 })], MON_10, 'c1'),
+    );
+    expect(activeHeldNoDeadlineAlerts()).toBe(1); // raised for the deadline-less held job
+    await cycle.run(
+      snapAt([xraw({ fileName: 'ok.docx', dueDate: dueTue18, words: 100 })], MON_10, 'c2'),
+    );
+    expect(activeHeldNoDeadlineAlerts()).toBe(1); // deduped — at most once per Bangkok day
+  });
+
+  it('I1: no held_job_no_deadline alert when every held job has a parseable deadline', async () => {
+    fresh();
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'ok', dueDate: dueWed18, words: 100 })]);
+    await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(snapAt([], MON_10));
+    expect(activeHeldNoDeadlineAlerts()).toBe(0);
+  });
+
+  it('I1: the held_job_no_deadline alert is guarded behind scheduleEnabled (gate OFF never raises it)', async () => {
+    fresh();
+    // Gate OFF = no cap enforced = a missing deadline cannot over-accept, so no alert.
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'nul', dueDate: null, words: 999 })]);
+    await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), new StubAcceptor()).run(
+      snapAt([xraw({ fileName: 'ok.docx', dueDate: dueTue18, words: 100 })], MON_10),
+    );
+    expect(activeHeldNoDeadlineAlerts()).toBe(0);
+  });
+
   it('§9 audit trail: an accepted Malay job surfaces {day, wordsDueOn(day)} in summary.acceptedDueDays', async () => {
     fresh();
     // Held seed 200 due Wed, then accept a 100w-due-Wed job → the resulting Wed bucket is 300.
@@ -1294,9 +1367,9 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
       snapAt([xraw({ fileName: 'a.docx', dueDate: dueWed18, words: 100 })], MON_10),
     );
     expect(only('a.docx').lifecycleStatus).toBe('accepted');
-    // The audit entry records wordsDueOn(Wed) = the resulting bucket the accept decision used.
+    // The audit entry records the resulting Wed bucket the accept decision used (held + advance).
     expect(summary.acceptedDueDays).toEqual([
-      { day: bangkokDateString(Date.parse(dueWed18)), words: 300 },
+      { day: bangkokDateString(Date.parse(dueWed18)), resultingBucketWords: 300 },
     ]);
   });
 

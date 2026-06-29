@@ -27,7 +27,8 @@ export type TriggerKind =
   | 'xtm_yielding'
   | 'yield_stuck'
   | 'holiday_calendar_stale'
-  | 'daily_cap_reached';
+  | 'daily_cap_reached'
+  | 'held_job_no_deadline';
 
 interface TriggerSpec {
   severity: 'warn' | 'critical';
@@ -161,6 +162,20 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     impact: 'No more Malay jobs are auto-accepted until the Bangkok-day counter resets at midnight',
     action:
       'Accept further jobs manually if needed; the cap resets at Bangkok midnight. To raise it, set ACCEPT_MAX_WORDS_PER_DAY in .env then npm run deploy',
+    hasRecovered: false,
+  },
+  // Raised (deduped once per Bangkok day, dedupKey `held_job_no_deadline:<date>`) when a HELD
+  // (accepted) job has a null/unparseable deadline so it drops out of the per-deadline-day
+  // capacity seed — that day under-counts and a later same-deadline Malay group could over-accept
+  // past the cap on the IRREVERSIBLE bulk path. warn (not critical): auto-accept still runs; ops
+  // should accept the affected same-day job(s) manually / fix the due date. hasRecovered:false
+  // (like daily_cap_reached) — it never auto-resolves; the next Bangkok day's dedupKey re-arms it.
+  held_job_no_deadline: {
+    severity: 'warn',
+    title: 'Accepted job has no deadline — capacity may under-count',
+    impact: 'A later job due the same day could be over-accepted past the daily word cap',
+    action:
+      'Open XTM, find the accepted job(s) missing a due date, and accept further same-day jobs manually until the due date is fixed',
     hasRecovered: false,
   },
 };

@@ -19,15 +19,6 @@ import type { XtmJobState } from '../detection/types.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the Bangkok calendar date as 'YYYY-MM-DD' for the given epoch ms.
- * Thin delegate to the canonical `bangkokDateString` so every Bangkok-date read keys off
- * one function. (It once also fed the meta word-counter, which was removed in PR #15.)
- */
-export function bangkokDate(nowMs: number): string {
-  return bangkokDateString(nowMs);
-}
-
-/**
  * Returns true when the daily report is due: today is a working day (not a weekend
  * or Thai holiday), Bangkok time has reached `hour` (default 9 = 09:00), and
  * today's Bangkok date has not already been sent.
@@ -79,7 +70,7 @@ export function buildDailyReportCard(
   xtmUrl: string,
   maxWordsPerDay: number,
 ): { cardsV2: unknown[] } {
-  const today = bangkokDate(nowMs);
+  const today = bangkokDateString(nowMs);
 
   // Returns the deadline as epoch ms, or +Infinity for null/unparseable (sorts last).
   // Canonical parse (F8) — same one the capacity gate + store bucket use.
@@ -93,7 +84,7 @@ export function buildDailyReportCard(
     const ms = dueMs(j);
     if (!Number.isFinite(ms)) continue;
     if (ms < nowMs) overdue.push(j);
-    if (bangkokDate(ms) === today) dueTodayWords += j.words ?? 0; // day-bucket (not instant)
+    if (bangkokDateString(ms) === today) dueTodayWords += j.words ?? 0; // day-bucket (not instant)
   }
 
   const usage =
@@ -118,10 +109,13 @@ export function buildDailyReportCard(
     // Use a ternary rather than `emoji: undefined` — exactOptionalPropertyTypes forbids the latter.
     rows.push(overdueSet.has(j.jobKey) ? { emoji: '⚠️', label, value } : { label, value });
   }
+  // Explicit empty-state row so operators can tell "nothing in progress" apart from a broken /
+  // truncated card (the old card carried this; the held-derived rewrite had dropped it).
+  if (held.length === 0) rows.push({ label: '—', value: 'No jobs in progress' });
   const more = sorted.length - top.length;
   if (more > 0) rows.push({ label: '—', value: `(+${more} more)` });
 
-  // Header date: `today` is already a Bangkok 'YYYY-MM-DD' (from bangkokDate), so reverse its
+  // Header date: `today` is already a Bangkok 'YYYY-MM-DD' (from bangkokDateString), so reverse its
   // parts to 'DD/MM/YYYY' — no parse round-trip / slice fragility.
   const headerDate = today.split('-').reverse().join('/');
 

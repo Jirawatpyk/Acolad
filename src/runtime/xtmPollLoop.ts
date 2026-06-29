@@ -7,9 +7,9 @@ import { Dispatcher } from '../reporting/dispatcher.js';
 import { GoogleChatSender, type ChatSender } from '../reporting/googleChat.js';
 import type { SheetSender } from '../reporting/sheets.js';
 import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
-import { bangkokDate, buildDailyReportCard, dueDailyReport } from '../reporting/dailyReport.js';
+import { buildDailyReportCard, dueDailyReport } from '../reporting/dailyReport.js';
 import { getThaiHolidays } from '../schedule/thaiHolidays.js';
-import { bangkokYear } from '../schedule/bangkokCalendar.js';
+import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { Heartbeat, type HeartbeatPinger } from '../monitoring/heartbeat.js';
 import type { XtmPortalClient } from '../portal/xtmClient.js';
 import { XtmPollCycle } from './xtmPollCycle.js';
@@ -345,7 +345,7 @@ export class XtmPollLoop {
           getThaiHolidays(bangkokYear(nowMs)).holidays,
         )
       ) {
-        const date = bangkokDate(nowMs);
+        const date = bangkokDateString(nowMs);
         try {
           // Build INSIDE the try so a DB-read or render throw becomes "no report this
           // cycle, retry next" — never an outer-catch heartbeat.fail() page (Constitution
@@ -473,8 +473,9 @@ export class XtmPollLoop {
           skipped: summary.skipped,
           scheduleBlocked: summary.scheduleBlocked,
           holidayCalendarStale: summary.holidayCalendarStale,
-          // §9 audit trail: deadline-day → wordsDueOn(day) the accept decisions used this cycle,
-          // so a held-read drift that over-fills a bucket leaves a grep-able trail.
+          // §9 audit trail: an array of {day, resultingBucketWords} entries (wordsDueOn(day) — the bucket the
+          // accept decisions used this cycle) so a held-read drift that over-fills a bucket leaves
+          // a grep-able trail.
           acceptedDueDays: summary.acceptedDueDays,
           failed: summary.failed,
           dead: disp.dead,
