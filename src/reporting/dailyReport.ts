@@ -118,6 +118,9 @@ export function buildDailyReportCard(
     // Use a ternary rather than `emoji: undefined` — exactOptionalPropertyTypes forbids the latter.
     rows.push(overdueSet.has(j.jobKey) ? { emoji: '⚠️', label, value } : { label, value });
   }
+  // Explicit empty-state row so operators can tell "nothing in progress" apart from a broken /
+  // truncated card (the old card carried this; the held-derived rewrite had dropped it).
+  if (held.length === 0) rows.push({ label: '—', value: 'No jobs in progress' });
   const more = sorted.length - top.length;
   if (more > 0) rows.push({ label: '—', value: `(+${more} more)` });
 

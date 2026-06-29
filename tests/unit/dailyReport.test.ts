@@ -195,6 +195,12 @@ it('is TOTAL: a null and an unparseable deadline + null words never throw and so
   expect(card).toContain('100 words'); // bad/nul excluded from the sum
 });
 
+it('empty held → an explicit "No jobs in progress" row (not just a bare Due-today line)', () => {
+  const card = text(buildDailyReportCard([], NOW, 'http://x', 1000));
+  expect(card).toContain('No jobs in progress'); // operators can tell empty from a broken card
+  expect(card).toContain('0 words');
+});
+
 it('In-progress shows top 5 by deadline asc; "(+N more)" only when N>0', () => {
   const five = Array.from({ length: 5 }, (_, i) =>
     job({ fileName: `f${i}`, dueDate: `2026-06-2${5 + i}T18:00:00+07:00`, words: 10 }),
