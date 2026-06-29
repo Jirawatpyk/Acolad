@@ -16,7 +16,11 @@ describe('decideGroupCapacity', () => {
   });
 
   it("blocks the whole group with kind 'budget_reached' when one day fills the budget", () => {
-    const v = decideGroupCapacity([m(300, '2026-06-23')], (d) => (d === '2026-06-23' ? 800 : 0), 1000);
+    const v = decideGroupCapacity(
+      [m(300, '2026-06-23')],
+      (d) => (d === '2026-06-23' ? 800 : 0),
+      1000,
+    );
     // T1: the reject discriminant is explicit; capExhaustedDay is non-optional on this kind.
     expect(v).toEqual({
       accept: false,

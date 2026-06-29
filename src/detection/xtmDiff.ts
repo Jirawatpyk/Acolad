@@ -20,8 +20,7 @@ const wordsStr = (w: number | null): string | null => (w === null ? null : Strin
 const isHeld = (s: XtmJobState): boolean =>
   s.acceptStatus === 'accepted' || s.lifecycleStatus === 'accepted';
 
-const parseableDate = (v: string | null): boolean =>
-  v != null && Number.isFinite(Date.parse(v)); // Date.parse('') is NaN → already caught
+const parseableDate = (v: string | null): boolean => v != null && Number.isFinite(Date.parse(v)); // Date.parse('') is NaN → already caught
 const usableWords = (w: number | null): boolean => w != null && Number.isFinite(w);
 
 /**
