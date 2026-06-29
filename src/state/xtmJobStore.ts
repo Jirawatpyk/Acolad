@@ -52,21 +52,37 @@ export class XtmJobStore {
 
   /** Σ words of held (lifecycle 'accepted') jobs grouped by Bangkok deadline date.
    *  Null/unparseable deadlines are skipped (never a NaN key). Single source of truth
-   *  for the per-deadline-day capacity cap.
+   *  for the per-deadline-day capacity cap. Read-only to callers (the cycle copies it into
+   *  its own mutable bucket map before advancing).
    *
    *  INVARIANT (F1): a held job's committed dueDate/words are locked by `detection/xtmDiff`
    *  against a transient blank grid re-read, so a held job ALWAYS keeps a valid deadline once
    *  accepted. The skip below therefore only ever applies to the gate-OFF path
    *  (`ACCEPT_SCHEDULE_ENABLED=0`), where a null-deadline job can be held without going through
-   *  the gate — never to a gate-ON held job. If that skip ever fires on a gate-ON held job it
-   *  is an anomaly (would silently under-count the bucket → risk over-accept); see the §9 audit
-   *  trail (`summary.acceptedDueDays`) logged by the loop for the breadcrumb. */
-  wordsDueByDeadline(): Map<string, number> {
+   *  the gate — never to a gate-ON held job. A skip on a gate-ON held job is an anomaly that
+   *  would silently under-count the bucket → risk over-accept; it is NOT covered by the §9 audit
+   *  trail (`summary.acceptedDueDays`, which only records days a NEW group advanced).
+   *  `heldJobsMissingDeadline()` exposes exactly which held jobs were skipped so the cycle can
+   *  FAIL LOUD (I1: a deduped warn alert) instead of silently dropping them. */
+  wordsDueByDeadline(): ReadonlyMap<string, number> {
     const out = new Map<string, number>();
     for (const s of this.listByLifecycle('accepted')) {
       const d = deadlineDayOf(s.dueDate); // canonical parse + null handling (F8)
       if (d === null) continue;
       out.set(d, (out.get(d) ?? 0) + (s.words ?? 0));
+    }
+    return out;
+  }
+
+  /** Job keys of held (lifecycle 'accepted') jobs whose deadline is null/unparseable — exactly
+   *  the jobs `wordsDueByDeadline()` skips (they contribute NOTHING to the per-deadline-day
+   *  capacity seed). Normally empty (see the F1 invariant above); a non-empty result is the
+   *  over-accept anomaly the cycle alerts on (I1). Reads the same held list as the bucket so the
+   *  two can never disagree about which jobs are held. */
+  heldJobsMissingDeadline(): string[] {
+    const out: string[] = [];
+    for (const s of this.listByLifecycle('accepted')) {
+      if (deadlineDayOf(s.dueDate) === null) out.push(s.jobKey);
     }
     return out;
   }

@@ -1285,6 +1285,48 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     ).resolves.toBeDefined();
   });
 
+  const activeHeldNoDeadlineAlerts = (): number =>
+    (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key LIKE 'held_job_no_deadline:%' AND resolved_at IS NULL",
+        )
+        .get() as { n: number }
+    ).n;
+
+  it('I1: a held job with a null deadline raises a deduped held_job_no_deadline warn alert (fail loud)', async () => {
+    fresh();
+    // A held (accepted) job with no parseable deadline drops out of the per-deadline-day seed —
+    // it must FAIL LOUD (deduped warn), never silently under-count the bucket → over-accept.
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'nul', dueDate: null, words: 999 })]);
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    await cycle.run(
+      snapAt([xraw({ fileName: 'ok.docx', dueDate: dueTue18, words: 100 })], MON_10, 'c1'),
+    );
+    expect(activeHeldNoDeadlineAlerts()).toBe(1); // raised for the deadline-less held job
+    await cycle.run(
+      snapAt([xraw({ fileName: 'ok.docx', dueDate: dueTue18, words: 100 })], MON_10, 'c2'),
+    );
+    expect(activeHeldNoDeadlineAlerts()).toBe(1); // deduped — at most once per Bangkok day
+  });
+
+  it('I1: no held_job_no_deadline alert when every held job has a parseable deadline', async () => {
+    fresh();
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'ok', dueDate: dueWed18, words: 100 })]);
+    await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(snapAt([], MON_10));
+    expect(activeHeldNoDeadlineAlerts()).toBe(0);
+  });
+
+  it('I1: the held_job_no_deadline alert is guarded behind scheduleEnabled (gate OFF never raises it)', async () => {
+    fresh();
+    // Gate OFF = no cap enforced = a missing deadline cannot over-accept, so no alert.
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'nul', dueDate: null, words: 999 })]);
+    await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), new StubAcceptor()).run(
+      snapAt([xraw({ fileName: 'ok.docx', dueDate: dueTue18, words: 100 })], MON_10),
+    );
+    expect(activeHeldNoDeadlineAlerts()).toBe(0);
+  });
+
   it('§9 audit trail: an accepted Malay job surfaces {day, wordsDueOn(day)} in summary.acceptedDueDays', async () => {
     fresh();
     // Held seed 200 due Wed, then accept a 100w-due-Wed job → the resulting Wed bucket is 300.

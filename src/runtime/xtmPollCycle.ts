@@ -11,7 +11,7 @@ import { hasMaterialSheetChange } from '../reporting/sheetSync.js';
 import { evaluateAcceptSchedule, type AcceptScheduleVerdict } from '../schedule/acceptSchedule.js';
 import { decideGroupCapacity, type CapacityMember } from '../schedule/acceptCapacity.js';
 import { resolveHolidaysForSpan, getThaiHolidays } from '../schedule/thaiHolidays.js';
-import { bangkokYear } from '../schedule/bangkokCalendar.js';
+import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { deadlineDayOf, deadlineMsOf } from '../schedule/deadlineDay.js';
 import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
 import {
@@ -205,6 +205,29 @@ export class XtmPollCycle {
     // The Bangkok deadline day of a job, or null when its deadline is missing/unparseable
     // (canonical helper — same parse the store bucket + the report use, F8).
     const deadlineDateOf = (s: XtmJobState): string | null => deadlineDayOf(s.dueDate);
+    // I1 (fail loud, never silent on the irreversible accept path): a held (accepted) job with a
+    // null/unparseable deadline contributes NOTHING to the per-deadline-day seed above
+    // (wordsDueByDeadline skips it), so its deadline day under-counts and a later same-day Malay
+    // group could over-accept past the cap on the bulk-claim path. The §9 audit trail does NOT
+    // cover this (it only logs days a NEW group advanced), so surface it explicitly: a deduped
+    // warn alert (once per Bangkok day). Only meaningful while the gate is ON (the cap is
+    // enforced); the gate-OFF kill-switch has no cap, so a missing deadline cannot over-accept.
+    // Normally zero — the F1 lock keeps a held job's deadline; a non-zero count means a
+    // deadline-less job was held on the gate-OFF path (or the lock was bypassed) — investigate.
+    if (scheduleEnabled) {
+      const heldNoDeadline = this.store.heldJobsMissingDeadline();
+      if (heldNoDeadline.length > 0) {
+        raiseAlert(
+          this.db,
+          this.outbox,
+          'held_job_no_deadline',
+          snapshot.capturedAt,
+          `${heldNoDeadline.length} accepted job(s) have no parseable deadline — the per-deadline-day capacity may under-count; accept same-day jobs manually / fix the due date`,
+          {},
+          `held_job_no_deadline:${bangkokDateString(detectedMs)}`,
+        );
+      }
+    }
     // Jobs whose decideAccept() → accept, collected from BOTH passes BEFORE the schedule
     // gate (C4 — one gate, no per-site drift). The gate then groups them per bulk-accept
     // unit and decides all-or-nothing (C1).

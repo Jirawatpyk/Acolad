@@ -225,4 +225,24 @@ describe('XtmJobStore', () => {
       expect(m.get('2026-06-26')).toBe(0); // a day with only a null-words job sums to 0
     });
   });
+
+  describe('heldJobsMissingDeadline (I1 — fail-loud over-accept guard)', () => {
+    it('returns the keys of held jobs with a null/unparseable deadline (those wordsDueByDeadline skips)', () => {
+      const store = freshStore();
+      store.upsertMany([
+        accepted({ jobKey: 'ok', dueDate: '2026-06-24T18:00:00+07:00', words: 100 }), // bucketed
+        accepted({ jobKey: 'nul', dueDate: null, words: 999 }), // missing
+        accepted({ jobKey: 'bad', dueDate: 'garbage', words: 999 }), // unparseable → missing
+      ]);
+      expect(store.heldJobsMissingDeadline().sort()).toEqual(['bad', 'nul']);
+    });
+
+    it('is empty when every held job has a parseable deadline', () => {
+      const store = freshStore();
+      store.upsertMany([
+        accepted({ jobKey: 'a', dueDate: '2026-06-24T18:00:00+07:00', words: 100 }),
+      ]);
+      expect(store.heldJobsMissingDeadline()).toEqual([]);
+    });
+  });
 });
