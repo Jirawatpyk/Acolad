@@ -1336,9 +1336,9 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
       snapAt([xraw({ fileName: 'a.docx', dueDate: dueWed18, words: 100 })], MON_10),
     );
     expect(only('a.docx').lifecycleStatus).toBe('accepted');
-    // The audit entry records wordsDueOn(Wed) = the resulting bucket the accept decision used.
+    // The audit entry records the resulting Wed bucket the accept decision used (held + advance).
     expect(summary.acceptedDueDays).toEqual([
-      { day: bangkokDateString(Date.parse(dueWed18)), words: 300 },
+      { day: bangkokDateString(Date.parse(dueWed18)), resultingBucketWords: 300 },
     ]);
   });
 

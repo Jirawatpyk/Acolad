@@ -1,16 +1,23 @@
 export interface CapacityMember {
-  jobKey: string;
   words: number;
   deadlineDate: string;
 }
 export type GroupCapacityVerdict =
-  | { accept: true; subtotalsByDay: Map<string, number> }
-  | { accept: false; reason: string; capExhaustedDay?: string };
+  | { accept: true; subtotalsByDay: ReadonlyMap<string, number> }
+  | { accept: false; kind: 'over_cap_permanent'; reason: string }
+  | { accept: false; kind: 'budget_reached'; reason: string; capExhaustedDay: string };
 
 /** Decide a whole bulk group all-or-nothing, bucketed by deadline day. `bucketFor(d)` =
  *  words already due on day d (held + this cycle's optimistic advances).
  *  PRECONDITION: `bucketFor` returns a NON-NEGATIVE count (a negative bucket would
- *  understate per-day load and let an over-cap group slip through). */
+ *  understate per-day load and let an over-cap group slip through).
+ *
+ *  A reject carries an explicit `kind` discriminant (not an optional flag), so the caller never
+ *  infers meaning from the presence/absence of a field:
+ *   - 'over_cap_permanent': a day's group subtotal ALONE exceeds the cap — no amount of waiting
+ *     clears it, so ops must accept it manually. Carries NO `capExhaustedDay` (nothing re-arms it).
+ *   - 'budget_reached': the day fits alone but the running bucket + subtotal overflows — retryable
+ *     as held jobs finish. Carries the overflowing `capExhaustedDay` (drives the deduped alert). */
 export function decideGroupCapacity(
   members: CapacityMember[],
   bucketFor: (deadlineDate: string) => number,
@@ -33,6 +40,7 @@ export function decideGroupCapacity(
       if (subtotal > cap)
         return {
           accept: false,
+          kind: 'over_cap_permanent',
           reason: `group words due ${day} (${subtotal}) exceed the daily cap (${cap}) — accept manually`,
         };
     }
@@ -44,6 +52,7 @@ export function decideGroupCapacity(
       if (bucket + subtotal > cap)
         return {
           accept: false,
+          kind: 'budget_reached',
           reason: `daily word cap reached for ${day} (${bucket}+${subtotal} > ${cap})`,
           capExhaustedDay: day,
         };
