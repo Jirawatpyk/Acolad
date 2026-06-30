@@ -51,9 +51,12 @@ export class XtmJobStore {
     return rows.map(rowToState);
   }
 
-  /** Σ words of held (lifecycle 'accepted') jobs grouped by Bangkok deadline date.
-   *  Null/unparseable deadlines are skipped (never a NaN key). Single source of truth
-   *  for the per-deadline-day capacity cap. Read-only to callers (the cycle copies it into
+  /** Σ words of held (lifecycle 'accepted') jobs grouped by the day a `dayOf` mapper assigns each
+   *  deadline to. The cycle injects an EFFECTIVE-deadline-day mapper (the working day the work
+   *  lands on) so the bucket key matches feasibility; the default is the raw Bangkok deadline date
+   *  (`deadlineDayOf`) so the store stays usable standalone (ops/tests) without a work calendar.
+   *  A `dayOf` returning null (null/unparseable deadline) is skipped (never a NaN key). Single
+   *  source of truth for the per-day capacity cap. Read-only to callers (the cycle copies it into
    *  its own mutable bucket map before advancing).
    *
    *  INVARIANT (F1): a held job's committed dueDate/words are locked by `detection/xtmDiff`
@@ -65,10 +68,12 @@ export class XtmJobStore {
    *  trail (`summary.acceptedDueDays`, which only records days a NEW group advanced).
    *  `heldJobsMissingDeadline()` exposes exactly which held jobs were skipped so the cycle can
    *  FAIL LOUD (I1: a deduped warn alert) instead of silently dropping them. */
-  wordsDueByDeadline(): ReadonlyMap<string, number> {
+  wordsDueByDeadline(
+    dayOf: (dueDate: string | null) => string | null = deadlineDayOf,
+  ): ReadonlyMap<string, number> {
     const out = new Map<string, number>();
     for (const s of this.listByLifecycle('accepted')) {
-      const d = deadlineDayOf(s.dueDate); // canonical parse + null handling (F8)
+      const d = dayOf(s.dueDate); // null = null/unparseable deadline (skipped, surfaced by heldJobsMissingDeadline)
       if (d === null) continue;
       out.set(d, (out.get(d) ?? 0) + (s.words ?? 0));
     }
