@@ -114,7 +114,13 @@ export function lifecycleToSheetStatus(s: XtmLifecycleStatus): SheetStatus {
   return map[s];
 }
 
-/** Lifecycle statuses that mean the job has left the Active grid. */
+/**
+ * Lifecycle statuses that mean the job has left the Active grid (the "terminal-absent" set). This is
+ * the exact COMPLEMENT of the non-terminal enum in db.ts's `backfillProjectQualifiedKey`
+ * (`new`/`accepted`/`skipped`/`accept_failed`/`rejected`). There is no shared canonical constant, so
+ * if a new `XtmLifecycleStatus` is ever added, update BOTH this set and that db.ts predicate together
+ * (Finding #14).
+ */
 const TERMINAL_ABSENT: ReadonlySet<XtmLifecycleStatus> = new Set(['missing', 'closed', 'removed']);
 
 /**
@@ -128,7 +134,14 @@ export function resolveSheetStatusAndNote(
   state: Pick<XtmJobState, 'lifecycleStatus' | 'acceptStatus' | 'rejectReason'>,
   opts: { note: string | null; lastSeenAtMs: number },
 ): { status: SheetStatus; note: string | null } {
-  if (state.rejectReason !== null && state.acceptStatus !== 'accepted') {
+  // Finding #10: a TRUTHY guard — an empty-string rejectReason carries no diagnostic value, so it
+  // must NOT enter the Rejected branch (which would render Status 'Rejected' with an empty note);
+  // it falls through to the real lifecycle status instead. Accepted always overrides a reject reason.
+  if (
+    state.rejectReason != null &&
+    state.rejectReason !== '' &&
+    state.acceptStatus !== 'accepted'
+  ) {
     // Finding #9: the "(left Active …)" suffix is the job's LAST-SEEN time (the last cycle it was
     // actually present), NOT the missing-DETECTION time — a job leaves Active ~MISSING_THRESHOLD ×
     // poll-interval before we notice. The suffix needs a finite ms — `new Date(NaN).toISOString()`

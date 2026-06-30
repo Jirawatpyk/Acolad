@@ -397,6 +397,18 @@ describe('resolveSheetStatusAndNote', () => {
     ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
   });
 
+  it('Finding #10: rejectReason "" (empty string) falls through to the lifecycle status, NOT a bare Rejected', () => {
+    // An empty-string reason carries no diagnostic value — it must NOT enter the Rejected branch
+    // (which would render Status 'Rejected' with an empty/meaningless note). The guard is truthy, so
+    // '' falls through to the real lifecycle status.
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'missing', acceptStatus: 'none', rejectReason: '' },
+        { note: 'gone', lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Missing', note: 'gone' });
+  });
+
   it('rejected + accepting (mid-accept) → still Rejected (sticky until accepted, not just none)', () => {
     // Lock the condition `acceptStatus !== 'accepted'` (not `=== 'none'`): a job whose accept
     // is mid-flight must stay Rejected so a future refactor of the condition cannot silently
