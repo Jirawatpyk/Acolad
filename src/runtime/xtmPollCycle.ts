@@ -17,7 +17,7 @@ import {
 } from '../schedule/thaiHolidays.js';
 import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { deadlineMsOf, makeEffectiveDayOf } from '../schedule/deadlineDay.js';
-import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
+import { resolveSheetStatusAndNote, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
   renderXtmRelisted,
@@ -164,7 +164,10 @@ export class XtmPollCycle {
         );
         this.outbox.enqueue(
           `sheet:stranded:${s.jobKey}:${snapshot.pollCycleId}`,
-          JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, 'crash mid-accept') }),
+          JSON.stringify({
+            op: 'upsert',
+            row: this.toSheetRow(s, 'crash mid-accept', snapshot.capturedAt),
+          }),
           snapshot.capturedAt,
           'sheets',
         );
@@ -277,6 +280,14 @@ export class XtmPollCycle {
         continue;
       }
 
+      // Sticky-Rejected clear (Task 7): this is a PRESENT job (the missing branch above already
+      // `continue`d), so it is re-decided by the gate this cycle — wipe any stale persisted reject
+      // reason FIRST; the gate re-sets it below if the job is still blocked. Placement is
+      // load-bearing: it MUST sit AFTER the missing-branch `continue` so a rejected job that just
+      // LEFT Active keeps its reason and the Sheet stays sticky 'Rejected' (resolveSheetStatusAndNote
+      // appends "(left Active …)") instead of flipping to a bare 'Missing'.
+      s.rejectReason = null;
+
       // first_seen / relisted / cold_start (FR-005 accepts still-acceptable pre-existing).
       const decision = decideAccept({
         targetLang: s.targetLang,
@@ -331,6 +342,9 @@ export class XtmPollCycle {
     for (const s of result.nextStates.values()) {
       if (eventKeys.has(s.jobKey) || !presentKeys.has(s.jobKey)) continue;
       if (!s.eligible || s.acceptStatus !== 'none') continue;
+      // Sticky-Rejected clear (Task 7): same as the event pass — a present, re-decidable job's
+      // stale reject reason is wiped before the gate; the gate re-sets it below if still blocked.
+      s.rejectReason = null;
       const decision = decideAccept({
         targetLang: s.targetLang,
         words: s.words,
@@ -428,6 +442,10 @@ export class XtmPollCycle {
           const note = `group blocked: ${blockReason}`;
           for (const s of members) {
             s.lifecycleStatus = 'rejected';
+            // Sticky-Rejected SET (Task 7): persist the SAME binding reason so the Sheet keeps
+            // 'Rejected' across this job's disappearance (resolveSheetStatusAndNote reads it),
+            // even on cycles where blockNotes is empty (e.g. the missing transition).
+            s.rejectReason = note;
             blockNotes.set(s.jobKey, note);
             summary.scheduleBlocked++;
             // I1: surface the binding reason per member so the loop can log WHY (the reason
@@ -605,7 +623,7 @@ export class XtmPollCycle {
       }
       this.outbox.enqueue(
         `sheet:${base}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, note) }),
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, note, snapshot.capturedAt) }),
         snapshot.capturedAt,
         'sheets',
       );
@@ -657,15 +675,15 @@ export class XtmPollCycle {
       const s = result.nextStates.get(dc.jobKey);
       if (!s) continue;
       reported.add(dc.jobKey);
-      // I3: a still-'rejected' job's silent field re-sync must NOT wipe the reject note.
-      // The gate already re-ran this cycle (robustness pass) — if the new Due/Words made it
-      // feasible it is now 'accepted' and was reported above (skipped here); otherwise it is
-      // still 'rejected' and we preserve the binding reason instead of overwriting with null.
-      const syncNote =
-        s.lifecycleStatus === 'rejected' ? (blockNotes.get(dc.jobKey) ?? null) : null;
+      // I3 (Task 7): a still-'rejected' job's silent field re-sync must NOT wipe the reject note.
+      // resolveSheetStatusAndNote now owns this precedence via the PERSISTED `rejectReason`: a
+      // still-'rejected' job renders Status 'Rejected' + its binding reason; any other status
+      // carries no note. So pass `note: null` and let the helper fill the reason from rejectReason
+      // (the gate already re-ran this cycle via the robustness pass — a now-feasible job is
+      // 'accepted' and was reported above, skipped here).
       this.outbox.enqueue(
         `sheet:fieldsync:${dc.jobKey}|${snapshot.pollCycleId}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, syncNote) }),
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, null, snapshot.capturedAt) }),
         snapshot.capturedAt,
         'sheets',
       );
@@ -689,11 +707,23 @@ export class XtmPollCycle {
     return summary;
   }
 
-  private toSheetRow(s: XtmJobState, note: string | null): SheetRow {
+  /**
+   * Build the Sheet row for a job, routing Status + Note through `resolveSheetStatusAndNote`
+   * (Task 7) so the sticky-Rejected precedence is applied in ONE place: a gate-Rejected job
+   * (persisted `rejectReason`, not yet accepted) keeps Status 'Rejected' — gaining a
+   * "(left Active …)" suffix once it leaves Active — instead of flipping to Missing/Closed. The
+   * passed `note` is used only when the job is NOT sticky-Rejected. `capturedAt` is the cycle's
+   * snapshot time, the basis for the "left Active" timestamp.
+   */
+  private toSheetRow(s: XtmJobState, note: string | null, capturedAt: string): SheetRow {
+    const { status, note: resolvedNote } = resolveSheetStatusAndNote(s, {
+      note,
+      capturedAtMs: Date.parse(capturedAt),
+    });
     return {
       jobKey: s.jobKey,
       receivedDate: s.firstSeenAt,
-      status: lifecycleToSheetStatus(s.lifecycleStatus),
+      status,
       projectName: s.projectName,
       fileName: s.fileName,
       sourceLang: s.sourceLang,
@@ -704,7 +734,7 @@ export class XtmPollCycle {
       step: s.step,
       role: s.role,
       acceptedAt: s.acceptedAt,
-      note,
+      note: resolvedNote,
     };
   }
 
