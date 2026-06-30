@@ -67,6 +67,34 @@ export function malayRow(over: Partial<XtmRowSpec> = {}): string {
   });
 }
 
+/**
+ * A HYPOTHETICAL Closed-grid row with the File WWC column (Active col 3) OMITTED — used to
+ * document and exercise the readClosedKeys layout-drift detector (finding #2). NOT recon-
+ * confirmed: the live Closed-grid column set is unknown (see selectors.ts `closed.cell` VERIFY
+ * note). With File WWC gone the trailing columns shift LEFT by one, so the borrowed Active
+ * selectors land off the row — `closed.cell.file` (td:5) reads Source, and step (td:9) / role
+ * (td:11) fall PAST the last cell → null. That "non-empty file but null step AND role across all
+ * rows" signature is exactly the systematic-drift signal the detector watches for. Columns here:
+ * kebab(1) project(2) customer(3) file(4) source(5) target(6) due(7) step(8).
+ */
+export function xtmClosedRowNoWwc(over: Partial<XtmRowSpec> = {}): string {
+  const kebab = over.kebab ?? true;
+  const td1 = kebab
+    ? '<td><button data-testid="context-menu-button" aria-label="More actions">⋮</button></td>'
+    : '<td></td>';
+  return (
+    `<tr class="listingTable__tableRow--nG61D">${td1}` +
+    `<td>${over.project ?? 'Newswire Release 4712942'}</td>` +
+    `<td>${over.customer ?? 'Acme'}</td>` +
+    `<td>${over.file ?? '4712942-1-21 (ID-1b270f065098)_captions.json'}</td>` +
+    `<td>${over.source ?? 'English (USA)'}</td>` +
+    `<td>${over.target ?? 'Malay (Malaysia)'}</td>` +
+    `<td><span data-testid="dueDate-fullDate">${over.due ?? '18-Jun-2026 19:25'}</span></td>` +
+    `<td>${over.step ?? 'Post-Editing (PE) 1'}</td>` +
+    `</tr>`
+  );
+}
+
 /** A non-Malay row (must be parsed but is not eligible). */
 export function thaiRow(over: Partial<XtmRowSpec> = {}): string {
   return xtmRow({
