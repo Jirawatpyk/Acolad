@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { dueDailyReport, buildDailyReportCard } from '../../src/reporting/dailyReport.js';
 import { bangkokDateString } from '../../src/schedule/bangkokCalendar.js';
+import { makeEffectiveDayOf } from '../../src/schedule/deadlineDay.js';
 import type { XtmJobState } from '../../src/detection/types.js';
 
 // ---------------------------------------------------------------------------
@@ -232,6 +233,59 @@ it('a held job with a non-finite deadline sorts LAST (after a finite-deadline jo
   ];
   const card = text(buildDailyReportCard(held, NOW, 'http://x', 1000));
   expect(card.indexOf('fin')).toBeLessThan(card.indexOf('bad')); // finite renders first
+});
+
+// ---------------------------------------------------------------------------
+// "Due today" by EFFECTIVE deadline day (the cutoff fix): the report's headline must
+// match the capacity cap, which buckets by the working day the work lands on. A held job
+// due tomorrow BEFORE 09:00 is really today's work; due tomorrow AFTER 09:00 is not.
+// ---------------------------------------------------------------------------
+describe('buildDailyReportCard — Due-today uses the effective deadline day', () => {
+  // now = Tuesday 2026-06-30 09:00 Bangkok (a working day). 07-01 = Wed.
+  const NOW_TUE = Date.parse('2026-06-30T09:00:00+07:00');
+  const effDay = makeEffectiveDayOf(9 * 60, new Set([1, 2, 3, 4, 5]), new Map<string, string>());
+
+  it('a held job due tomorrow BEFORE 09:00 counts toward today (its work lands today)', () => {
+    // Wed 06:00 < 09:00 → effective day = Tue 30/06 = today → included in Due-today.
+    const card = text(
+      buildDailyReportCard(
+        [job({ fileName: 'early', dueDate: '2026-07-01T06:00:00+07:00', words: 250 })],
+        NOW_TUE,
+        'http://x',
+        1000,
+        effDay,
+      ),
+    );
+    expect(card).toContain('250 words');
+  });
+
+  it('a held job due tomorrow AFTER 09:00 does NOT count toward today', () => {
+    // Wed 14:00 ≥ 09:00 → effective day = Wed 01/07 ≠ today → excluded from Due-today.
+    const card = text(
+      buildDailyReportCard(
+        [job({ fileName: 'later', dueDate: '2026-07-01T14:00:00+07:00', words: 250 })],
+        NOW_TUE,
+        'http://x',
+        1000,
+        effDay,
+      ),
+    );
+    expect(card).toContain('0 words');
+  });
+
+  it('without a mapper, Due-today falls back to the raw deadline date (byte-for-byte legacy)', () => {
+    // No mapper passed → raw-date bucketing: the tomorrow-early-morning job buckets to 01/07,
+    // NOT today, so it is excluded — proving the default preserves the pre-fix behaviour.
+    const card = text(
+      buildDailyReportCard(
+        [job({ fileName: 'early', dueDate: '2026-07-01T06:00:00+07:00', words: 250 })],
+        NOW_TUE,
+        'http://x',
+        1000,
+      ),
+    );
+    expect(card).toContain('0 words');
+  });
 });
 
 it('cap=0 → "(no cap)" headline', () => {

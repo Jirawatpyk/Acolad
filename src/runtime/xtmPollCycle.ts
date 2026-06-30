@@ -10,9 +10,13 @@ import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
 import { hasMaterialSheetChange } from '../reporting/sheetSync.js';
 import { evaluateAcceptSchedule, type AcceptScheduleVerdict } from '../schedule/acceptSchedule.js';
 import { decideGroupCapacity, type CapacityMember } from '../schedule/acceptCapacity.js';
-import { resolveHolidaysForSpan, getThaiHolidays } from '../schedule/thaiHolidays.js';
+import {
+  resolveHolidaysForSpan,
+  getThaiHolidays,
+  holidaysForEffectiveDay,
+} from '../schedule/thaiHolidays.js';
 import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
-import { deadlineDayOf, deadlineMsOf } from '../schedule/deadlineDay.js';
+import { deadlineMsOf, makeEffectiveDayOf } from '../schedule/deadlineDay.js';
 import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
@@ -192,18 +196,30 @@ export class XtmPollCycle {
       acceptedDueDays: [],
     };
     const detectedMs = Date.parse(snapshot.capturedAt);
-    // Schedule-gate state. Capacity is bucketed by DEADLINE day (held-derived), not accept
-    // day: seed the per-deadline-day buckets ONCE from the held list (lifecycle 'accepted')
+    const currentYear = bangkokYear(detectedMs);
+    // Effective-deadline-day mapper (the "cutoff" fix): the capacity cap buckets a held/would-
+    // accept job by the WORKING DAY its work lands on, not the raw deadline calendar date — a
+    // deadline before the 09:00 work-start belongs to the previous working day (feasibility
+    // already counts it that way). Built once from cfg + the curated holidays spanning the
+    // current + next Bangkok year (the reach of any near-future deadline + its walk-back). Used
+    // for BOTH the held seed and the per-member bucket key so they bucket identically.
+    const effDayOf = makeEffectiveDayOf(
+      this.cfg.hoursStartMin,
+      this.cfg.workdays,
+      holidaysForEffectiveDay(detectedMs),
+    );
+    // Schedule-gate state. Capacity is bucketed by EFFECTIVE deadline day (held-derived), not
+    // accept day: seed the per-day buckets ONCE from the held list (lifecycle 'accepted')
     // BEFORE this cycle records any new 'accepted' row — otherwise a job accepted this cycle
     // would be counted both in the seed and the optimistic advance (design §3). When the
     // gate is disabled the kill-switch path seeds nothing. A null/unparseable deadline is
     // already skipped by wordsDueByDeadline (no NaN key).
     const scheduleEnabled = this.cfg.ACCEPT_SCHEDULE_ENABLED;
-    // Running per-deadline-day buckets for THIS cycle: a shallow copy of the held seed (`new
-    // Map(...)` so optimistic advances below mutate OUR map, never the store's read-only one), or
-    // empty when the gate is off (the kill-switch enforces no cap).
+    // Running per-day buckets for THIS cycle: a shallow copy of the held seed (`new Map(...)` so
+    // optimistic advances below mutate OUR map, never the store's read-only one), or empty when
+    // the gate is off (the kill-switch enforces no cap).
     const dueBuckets = scheduleEnabled
-      ? new Map<string, number>(this.store.wordsDueByDeadline())
+      ? new Map<string, number>(this.store.wordsDueByDeadline(effDayOf))
       : new Map<string, number>();
     const bucketFor = (d: string): number => dueBuckets.get(d) ?? 0;
     // I1 (fail loud, never silent on the irreversible accept path): a held (accepted) job with a
@@ -369,7 +385,7 @@ export class XtmPollCycle {
           const capMembers: CapacityMember[] = [];
           let nullDeadlineMember: XtmJobState | undefined;
           for (const s of members) {
-            const day = deadlineDayOf(s.dueDate); // S4: inlined (the deadlineDateOf wrapper is gone)
+            const day = effDayOf(s.dueDate); // EFFECTIVE day = the working day the work lands on
             if (day === null) {
               nullDeadlineMember = s;
               break;
@@ -443,8 +459,7 @@ export class XtmPollCycle {
       // conflates it with a per-job capacity/feasibility block. A far deadline into an
       // uncurated NEXT year still fail-closes per-job via `scheduleVerdict`'s `resolveHolidaysForSpan` span-curation check above — it
       // just no longer raises this SYSTEM alert. Guarded behind ENABLED — a disabled feature
-      // never resolves holidays or pages.
-      const currentYear = bangkokYear(detectedMs);
+      // never resolves holidays or pages. (currentYear is hoisted to the top of run().)
       if (!getThaiHolidays(currentYear).curated) {
         // C1: a total auto-accept outage — surface it to the loop so the heartbeat fails
         // and Healthchecks pages on-call (not just a Chat card).
