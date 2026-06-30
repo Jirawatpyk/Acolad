@@ -53,6 +53,7 @@ const xraw = (over: Partial<XtmRawJob> = {}): XtmRawJob => ({
   dueDate: null,
   dueRaw: null,
   words: 100,
+  fileWwc: 17,
   step: 'PE 1',
   role: 'Corrector',
   acceptAvailable: true,

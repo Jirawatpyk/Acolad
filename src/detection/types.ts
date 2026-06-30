@@ -23,6 +23,8 @@ export interface XtmRawJob {
   dueDate: string | null;
   dueRaw: string | null;
   words: number | null;
+  /** File WWC (Weighted Word Count) — logged to the Sheet only; null when absent. */
+  fileWwc: number | null;
   step: string | null;
   role: string | null;
   /** Whether the Accept menu is still actionable (distinguishes free vs taken). */
@@ -100,6 +102,8 @@ export interface XtmJobState extends BaseJobState {
   dueDate: string | null;
   dueRaw: string | null;
   words: number | null;
+  /** File WWC (Weighted Word Count) — logged to the Sheet only; null when absent. */
+  fileWwc: number | null;
   step: string | null;
   role: string | null;
   eligible: boolean;

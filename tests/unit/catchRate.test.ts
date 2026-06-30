@@ -2,12 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { computeCatchRate } from '../../src/runtime/catchRateReport.js';
 
 const MALAY = ['Malay (Malaysia)'];
-// Columns: A..M; B(1)=Status, F(5)=Target, M(12)=_job_key. Data rows only (no header).
+// Columns: A..N (v3); B(1)=Status, F(5)=Target, N(13)=_job_key. Data rows only (no header).
 const r = (status: string, target: string, key = 'k'): string[] => {
-  const row = Array<string>(13).fill('');
+  const row = Array<string>(14).fill('');
   row[1] = status;
   row[5] = target;
-  row[12] = key;
+  row[13] = key;
   return row;
 };
 

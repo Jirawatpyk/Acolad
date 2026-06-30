@@ -27,6 +27,7 @@ const NEW_COLS = [
   'due_date',
   'due_raw',
   'words',
+  'file_wwc',
   'step',
   'role',
   'eligible',
@@ -93,6 +94,59 @@ describe('db migration v2 (fresh db)', () => {
     ).value;
     expect(v).toBe('2');
     expect(cols(b.db, 'jobs')).toContain('lifecycle_status');
+    b.db.close();
+  });
+
+  it('adds file_wwc to an existing jobs table that predates it, idempotently', () => {
+    const dir = tmp();
+    // A db whose jobs table has the v2 columns EXCEPT file_wwc (an earlier deploy). The ADD COLUMN
+    // migration must add it without error, and a second open must not re-add/throw.
+    const old = new Database(join(dir, 'acolad.db'));
+    old.exec(`
+      CREATE TABLE jobs (
+        job_key TEXT PRIMARY KEY, portal_job_id TEXT, title TEXT NOT NULL,
+        language_pair TEXT, deadline TEXT, deadline_raw TEXT, fee TEXT, url TEXT,
+        status TEXT NOT NULL CHECK (status IN ('visible','missing')),
+        first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+        snapshot_hash TEXT NOT NULL, consecutive_misses INTEGER NOT NULL DEFAULT 0,
+        xtm_task_id TEXT, project_name TEXT NOT NULL DEFAULT '', file_name TEXT NOT NULL DEFAULT '',
+        source_lang TEXT, target_lang TEXT, due_date TEXT, due_raw TEXT, words INTEGER,
+        step TEXT, role TEXT, eligible INTEGER NOT NULL DEFAULT 0,
+        lifecycle_status TEXT CHECK (lifecycle_status IN ('new','accepted','skipped','missing','accept_failed','closed','removed','rejected')),
+        accept_status TEXT NOT NULL DEFAULT 'none' CHECK (accept_status IN ('none','accepting','accepted','failed')),
+        accepted_at TEXT, sheet_synced_status TEXT
+      );
+      CREATE TABLE outbox (
+        outbox_id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,
+        channel TEXT NOT NULL CHECK (channel IN ('chat','sheets','team')), payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dead')),
+        attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL,
+        created_at TEXT NOT NULL, sent_at TEXT
+      );
+      CREATE UNIQUE INDEX idx_outbox_dedup ON outbox (event_id, channel);
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    `);
+    old
+      .prepare(
+        "INSERT INTO jobs (job_key, title, file_name, status, first_seen_at, last_seen_at, snapshot_hash, words) VALUES ('j','t','j.docx','visible',?,?,'h',500)",
+      )
+      .run(NOW, NOW);
+    old.close();
+
+    const a = openDatabase(dir, NOW);
+    expect(cols(a.db, 'jobs')).toContain('file_wwc');
+    // Existing row preserved; new column is NULL for it.
+    const r = a.db.prepare("SELECT words, file_wwc FROM jobs WHERE job_key='j'").get() as {
+      words: number;
+      file_wwc: number | null;
+    };
+    expect(r.words).toBe(500);
+    expect(r.file_wwc).toBeNull();
+    a.db.close();
+
+    // Idempotent: a second open does not error or duplicate the column.
+    const b = openDatabase(dir, NOW);
+    expect(cols(b.db, 'jobs').filter((c) => c === 'file_wwc')).toHaveLength(1);
     b.db.close();
   });
 });

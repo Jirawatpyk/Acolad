@@ -20,6 +20,7 @@ const xstate = (over: Partial<XtmJobState> = {}): XtmJobState => ({
   dueDate: null,
   dueRaw: '18-Jun-2026 19:25',
   words: 120,
+  fileWwc: null,
   step: 'Post-Editing (PE) 1',
   role: 'Corrector',
   eligible: true,

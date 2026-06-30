@@ -12,8 +12,8 @@ export interface CatchRate {
 /**
  * SC-001 catch rate from the Sheet data rows (no header). Counts only bot-managed
  * Malay rows (those with a `_job_key`, FR-026) whose status is one of the decided
- * outcomes. Pure — the runner supplies the rows. Column layout (0-based):
- * B(1)=Status, F(5)=Target, M(12)=_job_key (contracts/sheets.md).
+ * outcomes. Pure — the runner supplies the rows. Column layout (0-based, v3 schema):
+ * B(1)=Status, F(5)=Target, N(13)=_job_key — File WWC at I shifted `_job_key` M→N.
  */
 export function computeCatchRate(rows: string[][], acceptLanguages: string[]): CatchRate {
   const norm = (s: string | undefined): string => (s ?? '').trim().toLowerCase();
@@ -22,7 +22,7 @@ export function computeCatchRate(rows: string[][], acceptLanguages: string[]): C
   let missing = 0;
   let failed = 0;
   for (const row of rows) {
-    const key = row[12];
+    const key = row[13];
     if (!key || key === '') continue; // historical / non-bot row (FR-026)
     if (!langs.includes(norm(row[5]))) continue; // non-Malay
     const status = row[1];
@@ -47,7 +47,7 @@ async function main(): Promise<void> {
   const sheets = google.sheets({ version: 'v4', auth });
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: cfg.GOOGLE_SHEETS_ID,
-    range: `${cfg.SHEETS_TAB_NAME}!A:M`,
+    range: `${cfg.SHEETS_TAB_NAME}!A:N`,
   });
   const all = (res.data.values ?? []) as string[][];
   const cr = computeCatchRate(all.slice(1), cfg.ACCEPT_LANGUAGES); // slice off the header

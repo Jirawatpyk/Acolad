@@ -11,6 +11,7 @@ const xraw = (over: Partial<XtmRawJob> = {}): XtmRawJob => ({
   dueDate: null,
   dueRaw: '18-Jun-2026 19:25',
   words: 100,
+  fileWwc: 50,
   step: 'Post-Editing (PE) 1',
   role: 'Corrector',
   acceptAvailable: true,
@@ -174,5 +175,51 @@ describe('diffXtm — held-job dueDate/words lock (F1, over-accept guard)', () =
     const s = [...second.nextStates.values()][0];
     expect(s?.dueDate).toBe(DUE); // held by acceptStatus alone → committed deadline kept (not &&)
     expect(s?.words).toBe(800);
+  });
+});
+
+describe('diffXtm — held-job fileWwc lock (Sheet-committed display field, mirrors words)', () => {
+  const heldFrom = (states: Map<string, XtmJobState>): Map<string, XtmJobState> => {
+    const m = new Map<string, XtmJobState>();
+    for (const [k, s] of states)
+      m.set(k, { ...s, lifecycleStatus: 'accepted', acceptStatus: 'accepted', eligible: true });
+    return m;
+  };
+
+  it('(a) keeps a held job committed fileWwc when the grid re-reads it blank, with no spurious change', () => {
+    const first = diffXtm(snap([xraw({ fileWwc: 800 })], 'c1'), new Map());
+    const prev = heldFrom(first.nextStates);
+    const second = diffXtm(snap([xraw({ fileWwc: null })], 'c2'), prev);
+    expect([...second.nextStates.values()][0]?.fileWwc).toBe(800); // locked — null must NOT erase it
+    const fields = second.detailsChanges.flatMap((d) => d.changes.map((c) => c.field));
+    expect(fields).not.toContain('fileWwc'); // committed value unchanged → no Sheet re-sync
+  });
+
+  it('(b) still takes a genuine fileWwc change on a held job (a real re-weight)', () => {
+    const first = diffXtm(snap([xraw({ fileWwc: 800 })], 'c1'), new Map());
+    const prev = heldFrom(first.nextStates);
+    const second = diffXtm(snap([xraw({ fileWwc: 900 })], 'c2'), prev);
+    expect([...second.nextStates.values()][0]?.fileWwc).toBe(900);
+  });
+
+  it('(b2) keeps a committed value of 0 as a real value (locks only on null/NaN)', () => {
+    const first = diffXtm(snap([xraw({ fileWwc: 0 })], 'c1'), new Map());
+    const prev = heldFrom(first.nextStates);
+    const second = diffXtm(snap([xraw({ fileWwc: null })], 'c2'), prev);
+    expect([...second.nextStates.values()][0]?.fileWwc).toBe(0); // 0 preserved, not treated as blank
+  });
+
+  it('(c) does NOT lock fileWwc for a non-accepted job (a null re-read still nulls)', () => {
+    const first = diffXtm(snap([xraw({ fileWwc: 800 })], 'c1'), new Map());
+    const second = diffXtm(snap([xraw({ fileWwc: null })], 'c2'), first.nextStates); // stays new/none
+    expect([...second.nextStates.values()][0]?.fileWwc).toBeNull();
+  });
+
+  it('(c) a non-held job syncs a changed fileWwc normally and reports it as a material change', () => {
+    const first = diffXtm(snap([xraw({ fileWwc: 100 })], 'c1'), new Map());
+    const second = diffXtm(snap([xraw({ fileWwc: 250 })], 'c2'), first.nextStates);
+    expect([...second.nextStates.values()][0]?.fileWwc).toBe(250);
+    const fields = second.detailsChanges.flatMap((d) => d.changes.map((c) => c.field));
+    expect(fields).toContain('fileWwc');
   });
 });

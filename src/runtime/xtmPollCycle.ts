@@ -680,6 +680,7 @@ export class XtmPollCycle {
       targetLang: s.targetLang,
       dueDate: s.dueDate ?? s.dueRaw,
       words: s.words,
+      fileWwc: s.fileWwc,
       step: s.step,
       role: s.role,
       acceptedAt: s.acceptedAt,

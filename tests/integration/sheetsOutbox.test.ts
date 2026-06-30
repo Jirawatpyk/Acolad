@@ -38,6 +38,7 @@ const sheetRow = (): SheetRow => ({
   targetLang: 'Malay (Malaysia)',
   dueDate: null,
   words: 10,
+  fileWwc: 5,
   step: null,
   role: null,
   acceptedAt: null,

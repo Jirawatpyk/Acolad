@@ -67,6 +67,7 @@ const xjob = (over: Partial<XtmRawJob> = {}): XtmRawJob => ({
   dueDate: '2026-06-20T17:00+07:00',
   dueRaw: null,
   words: 1200,
+  fileWwc: 1100,
   step: 'Post-Editing (PE) 1',
   role: 'Corrector',
   acceptAvailable: true,
@@ -119,6 +120,12 @@ describe('computeXtmSnapshotHash', () => {
   it('changes when acceptAvailable flips (taken vs free)', () => {
     expect(computeXtmSnapshotHash(xjob({ acceptAvailable: true }))).not.toBe(
       computeXtmSnapshotHash(xjob({ acceptAvailable: false })),
+    );
+  });
+
+  it('changes when fileWwc changes (so a File WWC update re-syncs the Sheet)', () => {
+    expect(computeXtmSnapshotHash(xjob({ fileWwc: 100 }))).not.toBe(
+      computeXtmSnapshotHash(xjob({ fileWwc: 250 })),
     );
   });
 });

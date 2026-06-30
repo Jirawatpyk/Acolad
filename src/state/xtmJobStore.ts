@@ -12,6 +12,7 @@ interface XtmJobRow {
   due_date: string | null;
   due_raw: string | null;
   words: number | null;
+  file_wwc: number | null;
   step: string | null;
   role: string | null;
   eligible: number;
@@ -91,18 +92,18 @@ export class XtmJobStore {
   upsertMany(states: Iterable<XtmJobState>): void {
     const stmt = this.db.prepare(`
       INSERT INTO jobs (job_key, title, xtm_task_id, project_name, file_name, source_lang,
-        target_lang, due_date, due_raw, words, step, role, eligible, lifecycle_status,
+        target_lang, due_date, due_raw, words, file_wwc, step, role, eligible, lifecycle_status,
         accept_status, accepted_at, status, first_seen_at, last_seen_at, snapshot_hash,
         consecutive_misses)
       VALUES (@jobKey, @title, @xtmTaskId, @projectName, @fileName, @sourceLang,
-        @targetLang, @dueDate, @dueRaw, @words, @step, @role, @eligible, @lifecycleStatus,
+        @targetLang, @dueDate, @dueRaw, @words, @fileWwc, @step, @role, @eligible, @lifecycleStatus,
         @acceptStatus, @acceptedAt, @status, @firstSeenAt, @lastSeenAt, @snapshotHash,
         @consecutiveMisses)
       ON CONFLICT(job_key) DO UPDATE SET
         xtm_task_id=excluded.xtm_task_id, project_name=excluded.project_name,
         file_name=excluded.file_name, source_lang=excluded.source_lang,
         target_lang=excluded.target_lang, due_date=excluded.due_date, due_raw=excluded.due_raw,
-        words=excluded.words, step=excluded.step, role=excluded.role,
+        words=excluded.words, file_wwc=excluded.file_wwc, step=excluded.step, role=excluded.role,
         eligible=excluded.eligible, lifecycle_status=excluded.lifecycle_status,
         accept_status=excluded.accept_status, accepted_at=excluded.accepted_at,
         status=excluded.status, last_seen_at=excluded.last_seen_at,
@@ -121,6 +122,7 @@ export class XtmJobStore {
           dueDate: s.dueDate,
           dueRaw: s.dueRaw,
           words: s.words,
+          fileWwc: s.fileWwc,
           step: s.step,
           role: s.role,
           eligible: s.eligible ? 1 : 0,
@@ -150,6 +152,7 @@ function rowToState(r: XtmJobRow): XtmJobState {
     dueDate: r.due_date,
     dueRaw: r.due_raw,
     words: r.words,
+    fileWwc: r.file_wwc,
     step: r.step,
     role: r.role,
     eligible: r.eligible === 1,

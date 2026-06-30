@@ -55,10 +55,26 @@ describe('readActiveSnapshot (XTM Active grid)', () => {
     expect(malay?.step).toBe('Post-Editing (PE) 1');
     expect(malay?.role).toBe('Corrector');
     expect(malay?.words).toBe(37);
+    expect(malay?.fileWwc).toBe(17); // File WWC column (td:nth-child(3))
     expect(malay?.dueRaw).toBe('18-Jun-2026 19:25');
     expect(thai?.targetLang).toBe('Thai');
+    expect(thai?.fileWwc).toBe(21);
     expect(snap.malformed).toHaveLength(0);
     expect(snap.emptyListConfirmed).toBe(false);
+  });
+
+  it('parses File WWC like Words: digits "427", blank → null, grouped "1,200" → 1200', async () => {
+    const snap = await snapshotOf(
+      xtmActivePage([
+        malayRow({ file: 'a.json', fileWwc: '427' }),
+        malayRow({ file: 'b.json', fileWwc: '' }), // blank cell → null
+        malayRow({ file: 'c.json', fileWwc: '1,200' }), // thousands separator tolerated
+      ]),
+    );
+    expect(snap.jobs).toHaveLength(3);
+    expect(snap.jobs[0]?.fileWwc).toBe(427);
+    expect(snap.jobs[1]?.fileWwc).toBeNull();
+    expect(snap.jobs[2]?.fileWwc).toBe(1200);
   });
 
   it('ignores the header row (no kebab) — only data rows become jobs', async () => {
