@@ -10,6 +10,10 @@ describe('hasMaterialSheetChange', () => {
     expect(hasMaterialSheetChange([{ field: 'words' }])).toBe(true);
   });
 
+  it('returns true when fileWwc changed (logged to the Sheet)', () => {
+    expect(hasMaterialSheetChange([{ field: 'fileWwc' }])).toBe(true);
+  });
+
   it('returns false for non-material fields (projectName, role)', () => {
     expect(hasMaterialSheetChange([{ field: 'projectName' }, { field: 'role' }])).toBe(false);
   });
