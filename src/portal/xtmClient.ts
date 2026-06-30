@@ -47,8 +47,13 @@ export interface XtmPortalClient {
   captureAcceptMenu?(targets: AcceptTarget[]): Promise<string | undefined>;
   /** Diagnostic (DIAG): capture the bot's own rendered inbox (HTML + iframe + screenshot). */
   captureDiag?(): Promise<string | undefined>;
-  /** Job keys in the Closed tab (FR-014 Closed-vs-Removed; only on disappearance). */
-  readClosedKeys(): Promise<Set<string>>;
+  /**
+   * Job keys in the Closed tab (FR-014 Closed-vs-Removed; only on disappearance). `activeKeys`
+   * (the disappeared-accepted keys being classified) feeds the Closed grid's #2b cross-keying
+   * drift guard — when supplied and no recomputed Closed key matches, the read throws
+   * `LayoutChangedError` instead of returning a mis-keyed Set.
+   */
+  readClosedKeys(activeKeys?: Set<string>): Promise<Set<string>>;
   /** Recycle the browser if its scheduled lifetime elapsed (Constitution VIII). */
   maybeRecycle(): Promise<void>;
   dispose(): Promise<void>;
@@ -195,7 +200,15 @@ export class PlaywrightXtmClient implements XtmPortalClient {
         // D6: the grid does not expose acceptability — read it from each target row's
         // menu (Accept-task item present = still claimable; absent = we own it now) and
         // override the placeholder, so determineAcceptOutcomes tells accepted from failed.
-        const availability = await readAcceptAvailability(freshFrame, page, targetKeys);
+        // #13: forward the SAME observers used by the Active scrape / accept evidence so an
+        // empty-project row on the re-read emits the structured drift WARN + evidence AT SOURCE
+        // (instead of only the downstream `probe_miss` below). Reuses the in-scope `evidence`
+        // sink + this.logger — mirrors the Closed-grid drift wiring. Logger spread guarded by
+        // exactOptionalPropertyTypes (this.logger is Logger | undefined).
+        const availability = await readAcceptAvailability(freshFrame, page, targetKeys, {
+          ...(this.logger ? { logger: this.logger } : {}),
+          captureEvidence: evidence,
+        });
         const keyed = snap.jobs.map((j) => ({ job: j, key: computeXtmJobKey(j) }));
         // A target PRESENT in the re-read but unresolved by the probe keeps the optimistic
         // grid placeholder (true) and would be reported as a FALSE accept_failed — surface
@@ -274,7 +287,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     }
   }
 
-  async readClosedKeys(): Promise<Set<string>> {
+  async readClosedKeys(activeKeys?: Set<string>): Promise<Set<string>> {
     const page = await this.browser.page();
     const frame = await this.activeFrame(page);
     this.rate.record(this.clock.nowMs()); // FR-027: the Closed read counts against the budget
@@ -295,9 +308,14 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     // drift WARN/evidence would be DORMANT in production (observers default to no-op).
     const secrets = secretValues(this.cfg);
     const keys = await readClosedKeysFromGrid(frame, {
-      // Spread the logger only when present — exactOptionalPropertyTypes forbids an explicit
-      // `logger: undefined` on the optional property (this.logger is Logger | undefined).
+      // Spread the logger/activeKeys only when present — exactOptionalPropertyTypes forbids an
+      // explicit `undefined` on these optional properties (this.logger is Logger | undefined;
+      // activeKeys is omitted by callers that don't cross-key, e.g. older tests).
       ...(this.logger ? { logger: this.logger } : {}),
+      // #2b/#3: when the cycle hands us the disappeared-accepted keys, the grid read can detect a
+      // wrong-but-non-null project-column drift (zero cross-key match → LayoutChangedError) and
+      // fail loud instead of returning a mis-keyed Set. Empty/undefined → cross-keying stays off.
+      ...(activeKeys ? { activeKeys } : {}),
       captureEvidence: (reason) =>
         captureEvidence(page, this.cfg.STATE_DIR, reason, this.clock.nowIso(), secrets),
     });

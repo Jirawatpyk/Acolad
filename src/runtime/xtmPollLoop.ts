@@ -83,7 +83,10 @@ export class XtmPollLoop {
     this.store = new XtmJobStore(db);
     this.meta = new MetaStore(db);
     this.cycle = new XtmPollCycle(db, cfg, client, {
-      readClosedKeys: () => client.readClosedKeys(),
+      // Forward the disappeared-accepted keys (#2b/#3) so the Closed read's cross-keying drift
+      // guard activates; a LayoutChangedError it throws propagates through cycle.run() to this
+      // loop's handleError (layout_changed alert + heartbeat.fail).
+      readClosedKeys: (activeKeys) => client.readClosedKeys(activeKeys),
     });
     this.heartbeat =
       deps.heartbeat ??

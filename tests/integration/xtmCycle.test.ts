@@ -10,6 +10,7 @@ import { Outbox } from '../../src/state/outbox.js';
 import { MetaStore } from '../../src/state/meta.js';
 import { computeXtmJobKey } from '../../src/detection/jobKey.js';
 import { bangkokDateString } from '../../src/schedule/bangkokCalendar.js';
+import { LayoutChangedError } from '../../src/portal/errors.js';
 import type { AppConfig } from '../../src/config/index.js';
 import type { XtmRawJob, XtmJobSnapshot, XtmJobState } from '../../src/detection/types.js';
 import type { AcceptTarget, AcceptResult } from '../../src/portal/errors.js';
@@ -420,6 +421,33 @@ describe('XtmPollCycle Closed/Removed (FR-014, T042)', () => {
     fresh();
     await acceptThenDisappear(new Set<string>());
     expect(only().lifecycleStatus).toBe('removed');
+  });
+
+  it('#2b/#3: hands the disappeared-accepted keys to the Closed read, and a Closed-grid identity drift (LayoutChangedError) is raised LOUD — never a silent Removed', async () => {
+    fresh();
+    // Simulate the real readClosedKeysFromGrid #2b cross-keying throw: Closed rows are present
+    // but ZERO recomputed keys match any disappeared-accepted key (a wrong-but-non-null project
+    // column drift). The reader records the activeKeys it was handed so we can prove the cross-
+    // keying INPUT is now wired by the cycle.
+    let received: Set<string> | undefined;
+    const reader = {
+      async readClosedKeys(activeKeys?: Set<string>): Promise<Set<string>> {
+        received = activeKeys;
+        throw new LayoutChangedError('Closed grid identity drift (cross-key zero match)');
+      },
+    };
+    const cycle = new XtmPollCycle(db, cfg(), new StubAcceptor(), reader);
+    await cycle.run(snap([xraw()], 'c1')); // accept
+    await cycle.run(snap([], 'c2')); // absent once (flicker)
+    // absent twice → disappeared-accepted → Closed read throws → must PROPAGATE (the loop's
+    // handleError routes LayoutChangedError → layout_changed alert + heartbeat.fail), NOT be
+    // swallowed into a silent 'removed' classification.
+    await expect(cycle.run(snap([], 'c3'))).rejects.toBeInstanceOf(LayoutChangedError);
+    // The cycle passed exactly the disappeared-accepted job's key as the cross-keying input.
+    expect(received).toEqual(new Set([computeXtmJobKey(xraw())]));
+    // The throw aborted before persisting any reclassification → the job is NOT silently Removed.
+    expect(only().lifecycleStatus).not.toBe('removed');
+    expect(only().lifecycleStatus).toBe('accepted');
   });
 });
 
