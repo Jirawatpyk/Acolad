@@ -5,6 +5,7 @@ import {
   effectiveDeadlineDay,
   makeEffectiveDayOf,
 } from '../../src/schedule/deadlineDay.js';
+import { holidaysForEffectiveDay } from '../../src/schedule/thaiHolidays.js';
 
 // All literals TZ-explicit (+07:00 / Z) so the Bangkok day is identical under TZ=UTC.
 describe('deadlineDay helpers (F8 — canonical parse + null handling)', () => {
@@ -79,6 +80,19 @@ describe('effectiveDeadlineDay (the "cutoff" — the WORKING DAY the work lands 
     // Tue 06:00 < 09:00 → walk back: Mon 06-01 is a real in-lieu holiday, Sun, Sat → Fri 05-29.
     const holidays = new Map([['2026-06-01', 'Visakha Bucha Day (in lieu)']]);
     expect(dayOf('2026-06-02T06:00:00+07:00', holidays)).toBe('2026-05-29');
+  });
+
+  it('back-walks into the PREVIOUS year using the real holidaysForEffectiveDay map (New-Year edge)', () => {
+    // 2027-01-01 06:00 (Fri New Year's Day, before 09:00) → walk back. The previous calendar day
+    // 2026-12-31 (Thu) is New Year's Eve — a curated holiday in the PRIOR year, so the walk must
+    // skip it and land on 2026-12-30 (Wed). Built with the SAME holidaysForEffectiveDay map the
+    // cycle uses, so this guards that the prior year is merged in (else 12-31 reads as a working
+    // day → bucket under-counts → over-accept, the irreversible direction).
+    const dueMs = Date.parse('2027-01-01T06:00:00+07:00');
+    const holidays = holidaysForEffectiveDay(dueMs); // built from a year-2027 instant
+    expect(effectiveDeadlineDay(dueMs, 9 * 60, new Set([1, 2, 3, 4, 5]), holidays)).toBe(
+      '2026-12-30',
+    );
   });
 });
 
