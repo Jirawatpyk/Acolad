@@ -350,12 +350,14 @@ export async function readClosedKeys(
   const keys = new Set<string>();
   let candidateCount = 0;
   let allStepRoleNull = true;
+  let allProjectNull = true;
   for (const r of scraped) {
     // A Closed row with no file cell is malformed — never key on an empty file
     // (a degenerate '' key could falsely match another empty-file row).
     if (!r.file || r.file.trim() === '') continue;
     candidateCount++;
     if (r.step !== null || r.role !== null) allStepRoleNull = false;
+    if (r.project !== null) allProjectNull = false;
     keys.add(
       computeXtmJobKey({
         projectName: r.project ?? '',
@@ -365,12 +367,16 @@ export async function readClosedKeys(
       }),
     );
   }
-  // Systematic selector drift (e.g. live Closed grid omits File WWC col 3 → step/role shift left):
-  // candidate rows exist but EVERY one reads null step AND null role. Fail loud-but-soft —
-  // evidence + WARN, never throw — so a misclassified Closed→Removed is DIAGNOSABLE without
-  // paging on a cosmetic mismatch. The real fix needs a live Closed-grid recon (the column set is
-  // unconfirmed — see selectors.ts `closed.cell` VERIFY note).
-  if (candidateCount > 0 && allStepRoleNull) {
+  // Systematic selector drift — two signatures to watch for:
+  //   (a) step AND role both null on every candidate row: the Closed grid may have dropped
+  //       File WWC (col 3), shifting step/role left by one so the borrowed Active selectors
+  //       land off the row (e.g. td:9/td:11 fall past the last cell).
+  //   (b) project null on every candidate row: the project column (td:2) may have moved or
+  //       been omitted, so every key is computed with an empty project string and will never
+  //       match the Active _job_key (which carries the real project name).
+  // Both cases cause recomputed Closed keys to diverge from Active keys → finished jobs
+  // would misclassify as "removed". Fail loud-but-soft: evidence + WARN, never throw.
+  if (candidateCount > 0 && (allStepRoleNull || allProjectNull)) {
     const evidencePath = await observers.captureEvidence?.('closed_layout_drift');
     observers.logger?.warn(
       {
@@ -378,11 +384,14 @@ export async function readClosedKeys(
         action: 'readClosedKeys',
         outcome: 'layout_drift',
         rows: candidateCount,
+        allStepRoleNull,
+        allProjectNull,
         evidencePath,
       },
-      'Closed rows present but step AND role read null across ALL rows — the Closed grid layout ' +
-        'may have drifted (e.g. File WWC column omitted), so recomputed keys will not match ' +
-        'Active. VERIFY closed.cell selectors against live Closed-grid HTML.',
+      'Closed rows present but key columns read null across ALL rows — the Closed grid layout ' +
+        'may have drifted (step/role all null: File WWC column likely omitted; project all null: ' +
+        'project column moved or missing). Recomputed keys will not match Active. ' +
+        'VERIFY closed.cell selectors against live Closed-grid HTML.',
     );
   }
   return keys;

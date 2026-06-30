@@ -245,4 +245,41 @@ describe('readClosedKeys (Closed-vs-Removed disambiguation)', () => {
     expect(warn).not.toHaveBeenCalled();
     expect(captureEvidence).not.toHaveBeenCalled();
   });
+
+  it('emits a layout-drift WARN + evidence when ALL Closed rows have a null project cell', async () => {
+    // Project-null drift: malayRow({ project: '' }) → project cell textContent is empty
+    // so cell() returns null; but step/role columns remain populated (File WWC at col 3 keeps
+    // step=col9/role=col11 aligned). Therefore allStepRoleNull stays false, but allProjectNull
+    // stays true → the new branch of the drift condition must fire the WARN.
+    const warn = vi.fn();
+    const captureEvidence = vi.fn(async () => 'evidence/closed_project_drift.html');
+    await page.setContent(xtmActivePage([malayRow({ project: '' })]));
+    const keys = await readClosedKeys(page, { logger: { warn }, captureEvidence });
+
+    expect(keys.size).toBe(1); // key is still emitted (project defaults to '' in computeXtmJobKey)
+    expect(captureEvidence).toHaveBeenCalledWith('closed_layout_drift');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toMatchObject({
+      module: 'xtmInbox',
+      action: 'readClosedKeys',
+      outcome: 'layout_drift',
+    });
+  });
+
+  it('does NOT include an Active-job key when the Closed grid has a different project for the same file/step/role (negative match)', async () => {
+    // With projectName in the key (Task 1), a Closed row keyed projectB|file|step|role
+    // must NOT match an Active job keyed projectA|file|step|role — ensuring a cross-project
+    // file-name collision never causes a finished job from one project to suppress a Removed
+    // alert from another.
+    const activeKey = computeXtmJobKey({
+      projectName: 'Project Alpha',
+      fileName: '4712942-1-21 (ID-1b270f065098)_captions.json',
+      step: 'Post-Editing (PE) 1',
+      role: 'Corrector',
+    });
+    // Closed grid contains the same file/step/role but under "Project Beta".
+    await page.setContent(xtmActivePage([malayRow({ project: 'Project Beta' })]));
+    const keys = await readClosedKeys(page);
+    expect(keys.has(activeKey)).toBe(false);
+  });
 });
