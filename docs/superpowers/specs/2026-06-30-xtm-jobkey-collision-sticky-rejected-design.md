@@ -138,6 +138,6 @@ Making `projectName` a **required** member of the `Pick` makes the compiler flag
 
 ---
 
-## 8. Pre-implementation recon (one item)
+## 8. Pre-implementation recon — DONE (verified 2026-06-30)
 
-Before (or during) implementation, verify on the live XTM (via the user's authenticated browser) that the **project cell `td:nth-child(2)` textContent is byte-identical after `.trim()` between the Active and Closed grids for the same job**. The Active side is already proven (the incident recorded "…EMAIL" vs "…EMAIL_1" distinctly from the Active grid); only the Closed side is unverified. If they differ, normalize further or choose a project anchor before relying on the closed↔accepted join. Not a blocker for the plan (blast radius is Sheet-status, and the drift guard catches a systematic mismatch), but cheap to confirm.
+Live recon (user's authenticated browser, 2026-06-30): the Closed grid renders the project at `td:nth-child(2)` as **plain, full, untruncated text** — `<td class="…">PR Newswire Release 4721974-1-3 (DXC…) Affiliate EMAIL</td>` — with **no `title` attribute and no child nodes** (`childTags: []`). Extraction is therefore byte-identical to the Active grid (`td:nth-child(2)`.textContent.trim(), already proven from the incident), so the closed↔accepted join is **safe** after Fix 1. The drift guard (§2) remains as the runtime safety net for any future XTM layout change. (Corroboration: the Closed grid showed job 4721900 as "…Affiliate **EMAIL**" = the accepted-then-finished Job A; Job B "…EMAIL_1" was rejected and never reached Closed — consistent with §1.1.)
