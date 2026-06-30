@@ -3,6 +3,17 @@ import { XTM } from './selectors.js';
 import { AcceptUnconfirmedError, type AcceptTarget, type AcceptResult } from './errors.js';
 import type { XtmRawJob } from '../detection/types.js';
 import { computeXtmJobKey } from '../detection/jobKey.js';
+import type { Logger } from '../monitoring/logger.js';
+
+/**
+ * Optional observers for {@link readAcceptAvailability} (finding #13). Both optional so the
+ * production caller (xtmClient.reReadActive) compiles unchanged; the empty-project drift signal
+ * is no-op until a logger/evidence sink is wired in (mirrors {@link ReadClosedKeysObservers}).
+ */
+export interface ReadAcceptAvailabilityObservers {
+  logger?: Pick<Logger, 'warn'>;
+  captureEvidence?: (reason: string) => Promise<string | undefined>;
+}
 
 type Scope = Frame | Page;
 
@@ -200,6 +211,7 @@ export async function readAcceptAvailability(
   scope: Scope,
   page: Page,
   jobKeys: Set<string>,
+  observers: ReadAcceptAvailabilityObservers = {},
 ): Promise<Map<string, boolean>> {
   const result = new Map<string, boolean>();
   if (jobKeys.size === 0) return result;
@@ -215,6 +227,29 @@ export async function readAcceptAvailability(
     const role = (await row.locator(XTM.active.cell.role).first().textContent())?.trim() || null;
     const project =
       (await row.locator(XTM.active.cell.project).first().textContent())?.trim() ?? '';
+    // #13: a row with a real file/step/role but an EMPTY project cell (transient render /
+    // positional drift) would produce the mismatched key '|file|step|role', which matches no
+    // real target → the target is silently treated as snatched and re-accepted. Since projectName
+    // is part of the job KEY, never emit a mismatched key: surface the drift (WARN + evidence,
+    // consistent with #2) and SKIP the row so it is LOUD, not a silent false 'missing'.
+    if (!project) {
+      const evidencePath = await observers.captureEvidence?.('accept_reread_empty_project');
+      observers.logger?.warn(
+        {
+          module: 'xtmAccept',
+          action: 'readAcceptAvailability',
+          outcome: 'empty_project_drift',
+          fileName,
+          step,
+          role,
+          evidencePath,
+        },
+        'Accept re-read row has a real file/step/role but an EMPTY project cell — refusing to ' +
+          'emit a mismatched key (which would falsely read the target as snatched and re-accept ' +
+          'it). Skipping the row. VERIFY active.cell.project against live grid HTML.',
+      );
+      continue;
+    }
     const key = computeXtmJobKey({ projectName: project, fileName, step, role });
     if (!jobKeys.has(key) || result.has(key)) continue;
     await kebab.click({ timeout: ACCEPT_TIMEOUT_MS });
