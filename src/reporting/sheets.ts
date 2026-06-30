@@ -34,8 +34,8 @@ export interface SheetRow {
 }
 
 /**
- * Column schema v2 (contracts/sheets.md). `_job_key` (M) is the hidden upsert key.
- * Retained for the v1→v2 legacy path and the v2→v3 migration detection — the LIVE shape is v3.
+ * Column schema v2 (contracts/sheets.md). `_job_key` (M) is the hidden upsert key in THIS shape.
+ * Retained only for the v2→v3 migration detection (and as a documented reference) — the LIVE shape is v3.
  */
 export const V2_HEADER: string[] = [
   'Received date', // A
@@ -74,7 +74,12 @@ export const V3_HEADER: string[] = [
   '_job_key', // N
 ];
 
-const NEW_COLS = V2_HEADER.slice(8); // I–M appended when upgrading a v1 (8-col) sheet to v2
+// Header-shape landmarks used by ensureHeader's marker-based detection (so a sheet carrying extra
+// trailing user columns is still recognized rather than mis-routed to the fail-loud throw).
+const FILE_WWC_INDEX = 8; // column I — the v3 marker (blank here means a partial migration to repair)
+const JOB_KEY_INDEX_V2 = 12; // column M — `_job_key` position BEFORE File WWC was inserted
+const JOB_KEY_INDEX_V3 = 13; // column N — `_job_key` position in the current v3 shape
+const V1_COL_COUNT = 8; // the legacy 8-column (A–H) shape, no `_job_key` column
 
 /** Map the internal lifecycle status to the Sheet's display status (Constitution III). */
 export function lifecycleToSheetStatus(s: XtmLifecycleStatus): SheetStatus {
@@ -135,7 +140,7 @@ export interface SheetsApi {
 }
 
 /**
- * Google Sheets sink (contracts/sheets.md). Upserts by `_job_key` (col M) so a
+ * Google Sheets sink (contracts/sheets.md). Upserts by `_job_key` (col N) so a
  * job never produces duplicate rows (Constitution VII / FR-017); rows lacking a
  * `_job_key` are historical/manual and are NEVER claimed or overwritten (FR-026).
  */
@@ -144,15 +149,23 @@ export class SheetSink {
 
   /**
    * Ensure the sheet has the current v3 header, migrating older shapes in place. Idempotent:
-   * a no-op once the header is v3, so it is safe to run on every process start.
+   * a no-op once the header is fully v3, so it is safe to run on every process start. Detection is
+   * MARKER-based (not exact length) so a sheet carrying extra trailing user columns is still
+   * recognized rather than mis-routed to the fail-loud throw (which would dead-letter the 'sheets'
+   * outbox item and page the heartbeat).
    *
-   * - empty            → write the full v3 header.
-   * - v3 (14 cols, N=_job_key)  → no-op (must not insert/rewrite again on subsequent starts).
-   * - v2 (13 cols, M=_job_key)  → insert a blank File WWC column at I (index 8) FIRST so existing
-   *   data cells shift right and `_job_key` lands at N, THEN rewrite the header as v3 — historical
-   *   rows keep their data aligned (the upsert keys off N afterward).
-   * - v1 (8 cols)      → append I–M to reach v2 (legacy cold path; a later start lifts it to v3).
-   * - anything else    → fail loud rather than overwrite an unrecognized sheet (FR-022).
+   * - empty                                   → write the full v3 header.
+   * - v3 (`_job_key` at N AND 'File WWC' at I) → no-op (must not insert/rewrite on later starts).
+   * - partial v3 (`_job_key` at N but I is NOT 'File WWC') → a crash left a blank File WWC label
+   *   after insertColumn ran but setHeader did not; relabel ONLY (NO second insertColumn, which
+   *   would double-shift the already-shifted data). (Finding #6)
+   * - v2 (`_job_key` at M, no 'File WWC' at I; tolerates trailing cols) → insert a blank File WWC
+   *   column at I FIRST so existing data cells shift right and `_job_key` lands at N, THEN rewrite
+   *   the header as v3 (order matters; the upsert keys off N afterward). (Finding #5)
+   * - v1 (8 cols, A–H identical to v3's first 8) → migrate STRAIGHT to v3 in one step. There is no
+   *   `_job_key` column to preserve, so NO insertColumn; existing v1 data rows keep their 8 cells
+   *   (I–N read empty) and are never claimed by the upsert (FR-026). (Finding #3)
+   * - anything else                           → fail loud rather than overwrite (FR-022).
    */
   async ensureHeader(): Promise<void> {
     const header = await this.api.getHeader();
@@ -160,17 +173,23 @@ export class SheetSink {
       await this.api.setHeader(V3_HEADER);
       return;
     }
-    if (header.length >= 14 && header[13] === '_job_key') return; // already v3 — idempotent
-    if (header.length === 13 && header[12] === '_job_key') {
-      // v2 → v3: open the File WWC slot at column I, THEN rewrite the header (order matters so
-      // historical data cells shift right with the insert before the header is relabeled).
-      await this.api.insertColumn(8);
+    if (header[JOB_KEY_INDEX_V3] === '_job_key') {
+      // v3-shaped (`_job_key` at N). Fully migrated only if the File WWC marker is also present at I.
+      if (header[FILE_WWC_INDEX] === 'File WWC') return; // already v3 — idempotent no-op
+      // Partial migration (insertColumn ran, setHeader did not): relabel only — do NOT insert again.
       await this.api.setHeader(V3_HEADER);
       return;
     }
-    if (header.length === 8) {
-      // v1 → v2: keep the user's 8 columns, append I–M (a later start migrates v2 → v3).
-      await this.api.setHeader([...header, ...NEW_COLS]);
+    if (header[JOB_KEY_INDEX_V2] === '_job_key') {
+      // v2 (`_job_key` still at M, File WWC not yet inserted): open the slot at I, THEN relabel so
+      // historical data cells shift right (their `_job_key` M→N) before the header is rewritten.
+      await this.api.insertColumn(FILE_WWC_INDEX);
+      await this.api.setHeader(V3_HEADER);
+      return;
+    }
+    if (header.length === V1_COL_COUNT) {
+      // v1 → v3 in one step: A–H labels match v3's first 8, no `_job_key` to preserve (no insert).
+      await this.api.setHeader(V3_HEADER);
       return;
     }
     // Anything else: do not overwrite an unrecognized sheet — fail loud (FR-022).
