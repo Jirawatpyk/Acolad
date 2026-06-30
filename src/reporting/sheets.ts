@@ -81,6 +81,24 @@ const JOB_KEY_INDEX_V2 = 12; // column M — `_job_key` position BEFORE File WWC
 const JOB_KEY_INDEX_V3 = 13; // column N — `_job_key` position in the current v3 shape
 const V1_COL_COUNT = 8; // the legacy 8-column (A–H) shape, no `_job_key` column
 
+/** 1-based column index → A1 column letter (1→A, 26→Z, 27→AA). */
+function columnLetter(n: number): string {
+  let letter = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    letter = String.fromCharCode(65 + rem) + letter;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letter;
+}
+
+/**
+ * Last column letter of the v3 sheet, derived ONCE from the header width so the range literals in
+ * {@link GoogleSheetsApi} (getKeyColumn / writeRow / appendRow) stay in sync — a future header change
+ * updates this one place instead of three independent hardcoded letters. Resolves to 'N' today.
+ */
+export const LAST_COL_LETTER = columnLetter(V3_HEADER.length);
+
 /** Map the internal lifecycle status to the Sheet's display status (Constitution III). */
 export function lifecycleToSheetStatus(s: XtmLifecycleStatus): SheetStatus {
   const map: Record<XtmLifecycleStatus, SheetStatus> = {
@@ -292,7 +310,7 @@ export class GoogleSheetsApi implements SheetsApi {
   async getKeyColumn(): Promise<string[]> {
     const r = await this.sheets.spreadsheets.values.get({
       spreadsheetId: this.spreadsheetId,
-      range: `${this.tab}!N:N`,
+      range: `${this.tab}!${LAST_COL_LETTER}:${LAST_COL_LETTER}`,
     });
     return ((r.data.values ?? []) as string[][]).map((row) => row[0] ?? '');
   }
@@ -300,7 +318,7 @@ export class GoogleSheetsApi implements SheetsApi {
   async writeRow(rowNum: number, values: string[]): Promise<void> {
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: this.spreadsheetId,
-      range: `${this.tab}!A${rowNum}:N${rowNum}`,
+      range: `${this.tab}!A${rowNum}:${LAST_COL_LETTER}${rowNum}`,
       valueInputOption: 'RAW',
       requestBody: { values: [values] },
     });
@@ -309,7 +327,7 @@ export class GoogleSheetsApi implements SheetsApi {
   async appendRow(values: string[]): Promise<void> {
     await this.sheets.spreadsheets.values.append({
       spreadsheetId: this.spreadsheetId,
-      range: `${this.tab}!A:N`,
+      range: `${this.tab}!A:${LAST_COL_LETTER}`,
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [values] },

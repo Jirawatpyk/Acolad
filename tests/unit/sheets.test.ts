@@ -4,6 +4,7 @@ import {
   GoogleSheetSender,
   V2_HEADER,
   V3_HEADER,
+  LAST_COL_LETTER,
   formatSheetDate,
   lifecycleToSheetStatus,
   type SheetsApi,
@@ -325,5 +326,12 @@ describe('schema constants', () => {
     expect(V3_HEADER).toHaveLength(14);
     expect(V3_HEADER[8]).toBe('File WWC');
     expect(V3_HEADER[13]).toBe('_job_key');
+  });
+
+  it('LAST_COL_LETTER is derived from the v3 header width — N today (Finding #15)', () => {
+    // The three GoogleSheetsApi range methods key off this single constant, so a future header
+    // change updates one place instead of three hardcoded N literals.
+    expect(LAST_COL_LETTER).toBe('N');
+    expect(V3_HEADER).toHaveLength(14); // guard: if the header grows, the letter must track it
   });
 });
