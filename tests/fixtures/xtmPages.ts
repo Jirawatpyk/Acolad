@@ -171,9 +171,34 @@ const MENU_TOGGLE_SCRIPT =
   `if(btn&&m&&!wasOpen)m.setAttribute('data-dropdown-menu','true');` +
   `});</script>`;
 
+/**
+ * The canonical Active-grid header labels in column order (recon-confirmed). The
+ * header-layout assertion (`assertHeaderLayout`, finding #8) reads these and verifies the
+ * identity-bearing columns sit where the positional `td:nth-child(N)` selectors expect.
+ * Pass a different array via `xtmActivePage`'s `headerLabels` to simulate a column
+ * insert/move (e.g. a column inserted before Project shifts every later header right by one).
+ */
+export const XTM_ACTIVE_HEADER_LABELS = [
+  '',
+  'Project',
+  'File WWC',
+  'Customer',
+  'File',
+  'Source',
+  'Target',
+  'Date due',
+  'Step',
+  'Step type',
+  'Role',
+  'Segments',
+  'Words',
+  'Progress',
+  '',
+] as const;
+
 export function xtmActivePage(
   rows: string[],
-  opts: { state?: string; total?: number; shown?: number } = {},
+  opts: { state?: string; total?: number; shown?: number; headerLabels?: readonly string[] } = {},
 ): string {
   const state = opts.state ?? 'ACTIVE';
   const total = opts.total ?? rows.length;
@@ -182,6 +207,11 @@ export function xtmActivePage(
   // simulate a paginated grid (more items exist on later pages).
   const end = opts.shown ?? total;
   const lo = total === 0 ? 0 : 1;
+  // Header row drives the layout assertion (#8). Defaults to the canonical labels so
+  // existing fixtures are unchanged; override to simulate a shifted/inserted column.
+  const headerCells = (opts.headerLabels ?? XTM_ACTIVE_HEADER_LABELS)
+    .map((h) => `<th>${h}</th>`)
+    .join('');
   return (
     `<!DOCTYPE html><html><head><title>Tasks</title></head>` +
     `<body id="internal" ng-app="xtm.tasks">` +
@@ -189,15 +219,23 @@ export function xtmActivePage(
     `<div id="taskListing" role="tabpanel"><h1 id="${state}">Active tasks</h1>` +
     `<table id="TaskListingTable">` +
     `<thead class="table__tableHeader--22GT1"><tr class="listingTable__headRow--OEmzU">` +
-    `<th></th><th>Project</th><th>File WWC</th><th>Customer</th><th>File</th>` +
-    `<th>Source</th><th>Target</th><th>Date due</th><th>Step</th><th>Step type</th>` +
-    `<th>Role</th><th>Segments</th><th>Words</th><th>Progress</th><th></th></tr></thead>` +
+    `${headerCells}</tr></thead>` +
     `<tbody class="table__tableBody--1Pixi">${rows.join('')}</tbody>` +
     `</table>` +
     `<div data-testid="listing-section-footer"><span class="itemsCount__itemCount--1BMuy">${lo} - ${end} of ${total}</span></div>` +
     `<div class="en_GB" id="context-menus-container"></div>` +
     `</div>${MENU_TOGGLE_SCRIPT}</body></html>`
   );
+}
+
+/**
+ * Active header labels with one column inserted before Project — every later header shifts
+ * RIGHT by one, so Project lands at col 3 (not 2). Used to exercise the header-layout
+ * assertion (#8): a positional read keyed off the OLD column numbers would silently read the
+ * wrong cells, and since projectName (col 2) is part of the job KEY, identity would corrupt.
+ */
+export function xtmHeaderInsertedBeforeProject(): string[] {
+  return ['', 'Inserted Column', ...XTM_ACTIVE_HEADER_LABELS.slice(1)];
 }
 
 /** Active tab, genuinely empty (footer "0 - 0 of 0", container present). */

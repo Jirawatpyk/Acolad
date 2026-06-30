@@ -104,6 +104,22 @@ export const XTM = {
       words: '[data-testid="words-container"]', // RawJob.words (Active col 13)
       progressFiller: '[data-testid="progress-container-filler"]', // col 14; 0%/grey = not started
     },
+    // ── Header-layout guard (finding #8) ──────────────────────────────────────
+    // The cell selectors above are POSITIONAL (td:nth-child(N)). If XTM inserts/moves a
+    // column, every positional read silently points at the wrong cell — and projectName
+    // (col 2) is now part of the job KEY, so a shift corrupts IDENTITY (re-accept everything /
+    // misclassify everything), not just display. Before scraping, assertHeaderLayout
+    // (xtmInbox.ts) reads the grid's <thead> and verifies these identity-bearing headers sit
+    // at their expected columns by TEXT (trim, case-insensitive contains). Any mismatch →
+    // LayoutChangedError + evidence (fail loud, the existing error→system-alert path pages).
+    // Recon-confirmed order (2026-06-30). [col, expected label]:
+    expectedHeaders: [
+      [2, 'Project'],
+      [3, 'File WWC'],
+      [5, 'File'],
+      [9, 'Step'],
+      [11, 'Role'],
+    ],
   },
 
   // ── Empty-state vs failed-render (shared) ─────────────────────────────────
@@ -138,6 +154,17 @@ export const XTM = {
       role: 'td:nth-child(11)', // VERIFIED col 11 on Closed (live recon 2026-06-30) — matches Active
       dueDate: '[data-testid="dueDate-fullDate"]',
     },
+    // Header-layout guard (finding #8), same mechanism as active.expectedHeaders. The Closed
+    // grid shares the Active column positions through Role (recon-confirmed 2026-06-30), so the
+    // identity-bearing headers must sit at the same columns; a drift fails loud before the
+    // borrowed positional selectors silently read the wrong cells. [col, expected label]:
+    expectedHeaders: [
+      [2, 'Project'],
+      [3, 'File WWC'],
+      [5, 'File'],
+      [9, 'Step'],
+      [11, 'Role'],
+    ],
   },
 
   // ── Accept control + success signal — D4/D6 ───────────────────────────────
