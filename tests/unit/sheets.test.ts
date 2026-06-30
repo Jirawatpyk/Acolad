@@ -3,15 +3,21 @@ import {
   SheetSink,
   GoogleSheetSender,
   V2_HEADER,
+  V3_HEADER,
   formatSheetDate,
   lifecycleToSheetStatus,
   type SheetsApi,
   type SheetRow,
 } from '../../src/reporting/sheets.js';
 
-/** In-memory fake of the row/header operations (rows[0] = header). */
+/**
+ * In-memory fake of the row/header operations (rows[0] = header). `_job_key` is column N
+ * (index 13) in the v3 schema. `calls` records mutating ops in order so a test can assert the
+ * v2→v3 migration runs insertColumn(8) BEFORE setHeader(V3_HEADER) (and not at all when v3).
+ */
 class FakeSheets implements SheetsApi {
   rows: string[][];
+  calls: string[] = [];
   constructor(initial: string[][] = []) {
     this.rows = initial.map((r) => [...r]);
   }
@@ -19,16 +25,25 @@ class FakeSheets implements SheetsApi {
     return this.rows[0] ? [...this.rows[0]] : [];
   }
   async setHeader(values: string[]): Promise<void> {
+    this.calls.push(`setHeader(${values.length})`);
     this.rows[0] = [...values];
   }
   async getKeyColumn(): Promise<string[]> {
-    return this.rows.map((r) => r[12] ?? '');
+    return this.rows.map((r) => r[13] ?? '');
   }
   async writeRow(rowNum: number, values: string[]): Promise<void> {
     this.rows[rowNum - 1] = [...values];
   }
   async appendRow(values: string[]): Promise<void> {
     this.rows.push([...values]);
+  }
+  async insertColumn(beforeIndex: number): Promise<void> {
+    this.calls.push(`insertColumn(${beforeIndex})`);
+    this.rows = this.rows.map((r) => {
+      const copy = [...r];
+      copy.splice(beforeIndex, 0, '');
+      return copy;
+    });
   }
 }
 
@@ -42,6 +57,7 @@ const row = (over: Partial<SheetRow> = {}): SheetRow => ({
   targetLang: 'Malay (Malaysia)',
   dueDate: '2026-06-20',
   words: 120,
+  fileWwc: 17,
   step: 'PE 1',
   role: 'Corrector',
   acceptedAt: null,
@@ -49,15 +65,63 @@ const row = (over: Partial<SheetRow> = {}): SheetRow => ({
   ...over,
 });
 
-describe('SheetSink.ensureHeader (v1->v2 migration, FR-016)', () => {
-  it('writes the full v2 header on an empty sheet', async () => {
+describe('SheetSink.ensureHeader (v3 migration, FR-016)', () => {
+  it('writes the full v3 header on an empty sheet', async () => {
     const api = new FakeSheets();
     await new SheetSink(api).ensureHeader();
-    expect(api.rows[0]).toEqual(V2_HEADER);
-    expect(api.rows[0]?.[12]).toBe('_job_key');
+    expect(api.rows[0]).toEqual(V3_HEADER);
+    expect(api.rows[0]?.[8]).toBe('File WWC'); // new column I
+    expect(api.rows[0]?.[13]).toBe('_job_key'); // now column N
   });
 
-  it('upgrades a v1 (8-column) header by appending I-M, preserving the user columns', async () => {
+  it('v2 → v3: inserts a blank File WWC column at I, THEN rewrites the header (in that order)', async () => {
+    // A live v2 sheet: 13-col header (_job_key at M) + a historical data row.
+    const v2DataRow = [
+      '01/06/2026 10:00', // A received
+      'Accepted', // B status
+      'Old Project', // C project
+      'old.docx', // D file
+      'English (USA)', // E source
+      'Malay (Malaysia)', // F target
+      '02/06/2026', // G due
+      '500', // H words
+      'PE 1', // I step (v2)
+      'Corrector', // J role (v2)
+      '01/06/2026 10:05', // K accepted at (v2)
+      'a note', // L note (v2)
+      'old.docx|pe 1|corrector', // M _job_key (v2)
+    ];
+    const api = new FakeSheets([V2_HEADER, v2DataRow]);
+    await new SheetSink(api).ensureHeader();
+
+    // Order matters: open the slot, then relabel.
+    expect(api.calls).toEqual(['insertColumn(8)', 'setHeader(14)']);
+    expect(api.rows[0]).toEqual(V3_HEADER);
+    // The historical row keeps its data aligned: a blank File WWC at I (8) and its
+    // _job_key shifted M → N (12 → 13).
+    expect(api.rows[1]?.[7]).toBe('500'); // Words still at H
+    expect(api.rows[1]?.[8]).toBe(''); // blank File WWC at I
+    expect(api.rows[1]?.[9]).toBe('PE 1'); // Step shifted I → J
+    expect(api.rows[1]?.[13]).toBe('old.docx|pe 1|corrector'); // _job_key now at N
+  });
+
+  it('is idempotent: a no-op when the header is already v3 (no insert, no setHeader)', async () => {
+    const api = new FakeSheets([V3_HEADER]);
+    await new SheetSink(api).ensureHeader();
+    expect(api.calls).toEqual([]); // neither insertColumn nor setHeader fired
+    expect(api.rows[0]).toEqual(V3_HEADER);
+  });
+
+  it('is idempotent across restarts: a second ensureHeader after a v2→v3 migration does nothing more', async () => {
+    const api = new FakeSheets([V2_HEADER, ['', '', '', '', '', '', '', '', '', '', '', '', 'k']]);
+    const sink = new SheetSink(api);
+    await sink.ensureHeader();
+    const afterFirst = [...api.calls];
+    await sink.ensureHeader(); // simulate the next process start
+    expect(api.calls).toEqual(afterFirst); // no further insert/setHeader
+  });
+
+  it('upgrades a v1 (8-column) header by appending I–M (legacy cold path)', async () => {
     const v1 = [
       'Received date',
       'Status',
@@ -71,14 +135,11 @@ describe('SheetSink.ensureHeader (v1->v2 migration, FR-016)', () => {
     const api = new FakeSheets([v1]);
     await new SheetSink(api).ensureHeader();
     expect(api.rows[0]?.slice(0, 8)).toEqual(v1); // user columns untouched
-    expect(api.rows[0]).toHaveLength(13);
+    expect(api.rows[0]).toHaveLength(13); // v2 shape
     expect(api.rows[0]?.[12]).toBe('_job_key');
-  });
-
-  it('is a no-op when the header is already v2', async () => {
-    const api = new FakeSheets([V2_HEADER]);
+    // A later start lifts the now-v2 sheet to v3.
     await new SheetSink(api).ensureHeader();
-    expect(api.rows[0]).toEqual(V2_HEADER);
+    expect(api.rows[0]).toEqual(V3_HEADER);
   });
 
   it('fails loud on an unrecognized header rather than overwriting', async () => {
@@ -89,44 +150,70 @@ describe('SheetSink.ensureHeader (v1->v2 migration, FR-016)', () => {
 });
 
 describe('SheetSink.upsertRow (upsert by job_key, Constitution VII / FR-017)', () => {
-  it('appends a new row for an unseen job_key', async () => {
-    const api = new FakeSheets([V2_HEADER]);
-    await new SheetSink(api).upsertRow(row());
+  it('appends a new row for an unseen job_key, with File WWC at I and _job_key at N', async () => {
+    const api = new FakeSheets([V3_HEADER]);
+    await new SheetSink(api).upsertRow(row({ fileWwc: 427 }));
     expect(api.rows).toHaveLength(2);
     expect(api.rows[1]?.[1]).toBe('New'); // Status col B
-    expect(api.rows[1]?.[12]).toBe('a.docx|pe 1|corrector'); // _job_key col M
+    expect(api.rows[1]?.[7]).toBe('120'); // Words col H
+    expect(api.rows[1]?.[8]).toBe('427'); // File WWC col I
+    expect(api.rows[1]?.[13]).toBe('a.docx|pe 1|corrector'); // _job_key col N
   });
 
   it('updates the existing row in place (no duplicate) on a status change', async () => {
-    const api = new FakeSheets([V2_HEADER]);
+    const api = new FakeSheets([V3_HEADER]);
     const sink = new SheetSink(api);
     await sink.upsertRow(row({ status: 'New' }));
     await sink.upsertRow(row({ status: 'Accepted', acceptedAt: '2026-06-19T10:00:05+07:00' }));
     expect(api.rows).toHaveLength(2); // still one data row
     expect(api.rows[1]?.[1]).toBe('Accepted');
-    expect(api.rows[1]?.[10]).toBe('19/06/2026 10:00'); // Accepted at col K — readable Bangkok local
+    expect(api.rows[1]?.[11]).toBe('19/06/2026 10:00'); // Accepted at col L — readable Bangkok local
   });
 
   it('never claims a historical row that has no job_key (FR-026)', async () => {
-    // A manually-entered legacy row (no _job_key in column M).
-    const legacy = ['2026-06-01', 'Done', 'Old', 'old.docx', '', '', '', '', '', '', '', '', ''];
-    const api = new FakeSheets([V2_HEADER, legacy]);
+    // A manually-entered legacy row (no _job_key in column N).
+    const legacy = [
+      '2026-06-01',
+      'Done',
+      'Old',
+      'old.docx',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+    ];
+    const api = new FakeSheets([V3_HEADER, legacy]);
     await new SheetSink(api).upsertRow(row());
     expect(api.rows).toHaveLength(3); // legacy untouched, new row appended
     expect(api.rows[1]).toEqual(legacy);
-    expect(api.rows[2]?.[12]).toBe('a.docx|pe 1|corrector');
+    expect(api.rows[2]?.[13]).toBe('a.docx|pe 1|corrector');
   });
 
-  it('serializes null fields as empty cells and words as text', async () => {
-    const api = new FakeSheets([V2_HEADER]);
-    await new SheetSink(api).upsertRow(row({ sourceLang: null, words: null, note: 'snatched' }));
+  it('serializes null fields as empty cells and words/File WWC as text', async () => {
+    const api = new FakeSheets([V3_HEADER]);
+    await new SheetSink(api).upsertRow(
+      row({ sourceLang: null, words: null, fileWwc: null, note: 'snatched' }),
+    );
     expect(api.rows[1]?.[4]).toBe(''); // source
     expect(api.rows[1]?.[7]).toBe(''); // words
-    expect(api.rows[1]?.[11]).toBe('snatched'); // note col L
+    expect(api.rows[1]?.[8]).toBe(''); // File WWC
+    expect(api.rows[1]?.[12]).toBe('snatched'); // note col M
+  });
+
+  it('serializes a File WWC of 0 as "0" (a real value, not blank)', async () => {
+    const api = new FakeSheets([V3_HEADER]);
+    await new SheetSink(api).upsertRow(row({ fileWwc: 0 }));
+    expect(api.rows[1]?.[8]).toBe('0');
   });
 
   it('writes human-readable Bangkok dates (not raw ISO) for received/due/accepted', async () => {
-    const api = new FakeSheets([V2_HEADER]);
+    const api = new FakeSheets([V3_HEADER]);
     await new SheetSink(api).upsertRow(
       row({
         receivedDate: '2026-06-22T10:11:25.007Z', // UTC → +07
@@ -136,7 +223,7 @@ describe('SheetSink.upsertRow (upsert by job_key, Constitution VII / FR-017)', (
     );
     expect(api.rows[1]?.[0]).toBe('22/06/2026 17:11'); // Received date col A
     expect(api.rows[1]?.[6]).toBe('22/06/2026 21:38'); // Due date col G
-    expect(api.rows[1]?.[10]).toBe('22/06/2026 17:12'); // Accepted at col K
+    expect(api.rows[1]?.[11]).toBe('22/06/2026 17:12'); // Accepted at col L
   });
 });
 
@@ -147,11 +234,11 @@ describe('formatSheetDate re-export (back-compat shim — full cases live in dat
 });
 
 describe('GoogleSheetSender.ensureReady (proactive header so an empty sheet is still headed)', () => {
-  it('writes the v2 header up front with no data rows', async () => {
+  it('writes the v3 header up front with no data rows', async () => {
     const api = new FakeSheets();
     const sender = new GoogleSheetSender(new SheetSink(api));
     expect(await sender.ensureReady()).toBe('ok');
-    expect(api.rows[0]).toEqual(V2_HEADER);
+    expect(api.rows[0]).toEqual(V3_HEADER);
     expect(api.rows).toHaveLength(1); // header only — no job logged
   });
 
@@ -193,5 +280,16 @@ describe('GoogleSheetSender.ensureReady (proactive header so an empty sheet is s
 describe('lifecycleToSheetStatus', () => {
   it('maps rejected → Rejected', () => {
     expect(lifecycleToSheetStatus('rejected')).toBe('Rejected');
+  });
+});
+
+// V2_HEADER is retained for the migration detection path — keep a guard so it is not deleted.
+describe('schema constants', () => {
+  it('V2_HEADER is the 13-col shape with _job_key at M and V3_HEADER inserts File WWC at I', () => {
+    expect(V2_HEADER).toHaveLength(13);
+    expect(V2_HEADER[12]).toBe('_job_key');
+    expect(V3_HEADER).toHaveLength(14);
+    expect(V3_HEADER[8]).toBe('File WWC');
+    expect(V3_HEADER[13]).toBe('_job_key');
   });
 });

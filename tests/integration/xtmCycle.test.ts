@@ -49,6 +49,7 @@ const xraw = (over: Partial<XtmRawJob> = {}): XtmRawJob => ({
   dueDate: null,
   dueRaw: null,
   words: 100,
+  fileWwc: 17,
   step: 'PE 1',
   role: 'Corrector',
   acceptAvailable: true,
@@ -98,6 +99,7 @@ const accepted = (over: {
   dueDate: over.dueDate,
   dueRaw: null,
   words: over.words,
+  fileWwc: null,
   step: 'PE 1',
   role: 'Corrector',
   eligible: true,
@@ -372,7 +374,7 @@ describe('XtmPollCycle (US1 — detect, accept, record)', () => {
 });
 
 function outboxPayloads(channel: 'chat' | 'sheets'): Array<{
-  row?: { status: string };
+  row?: { status: string; fileWwc?: number | null; words?: number | null };
   cardsV2?: Array<{ cardId: string; card: { header: { title: string } } }>;
 }> {
   return (
@@ -382,7 +384,7 @@ function outboxPayloads(channel: 'chat' | 'sheets'): Array<{
   ).map(
     (r) =>
       JSON.parse(r.payload_json) as {
-        row?: { status: string };
+        row?: { status: string; fileWwc?: number | null; words?: number | null };
         cardsV2?: Array<{ cardId: string; card: { header: { title: string } } }>;
       },
   );
@@ -428,6 +430,15 @@ describe('XtmPollCycle enqueue (US2 Sheets + US3 Chat, T041/T048)', () => {
     expect(sheets).toHaveLength(1);
     expect(sheets[0]?.row?.status).toBe('Accepted');
     expect(chatHasTitle('✅')).toBe(true);
+  });
+
+  it('carries the scraped File WWC through to the Sheet payload', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    await new XtmPollCycle(db, cfg(), new StubAcceptor()).run(snap([xraw({ fileWwc: 427 })]));
+    const sheets = outboxPayloads('sheets');
+    expect(sheets).toHaveLength(1);
+    expect(sheets[0]?.row?.fileWwc).toBe(427); // File WWC reaches the Sheet row payload
   });
 
   it('enqueues a Skipped sheets row + a 🆕 chat for a non-Malay job', async () => {

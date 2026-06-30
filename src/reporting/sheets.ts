@@ -26,13 +26,17 @@ export interface SheetRow {
   targetLang: string | null;
   dueDate: string | null;
   words: number | null;
+  fileWwc: number | null;
   step: string | null;
   role: string | null;
   acceptedAt: string | null;
   note: string | null;
 }
 
-/** Column schema v2 (contracts/sheets.md). `_job_key` (M) is the hidden upsert key. */
+/**
+ * Column schema v2 (contracts/sheets.md). `_job_key` (M) is the hidden upsert key.
+ * Retained for the v1→v2 legacy path and the v2→v3 migration detection — the LIVE shape is v3.
+ */
 export const V2_HEADER: string[] = [
   'Received date', // A
   'Status', // B
@@ -49,7 +53,28 @@ export const V2_HEADER: string[] = [
   '_job_key', // M
 ];
 
-const NEW_COLS = V2_HEADER.slice(8); // I–M added when upgrading a v1 sheet
+/**
+ * Column schema v3 — adds `File WWC` at column I (index 8), right after Words (H); everything from
+ * Step onward shifts right one, so `_job_key` is now column N (index 13). This is the current shape.
+ */
+export const V3_HEADER: string[] = [
+  'Received date', // A
+  'Status', // B
+  'Project name', // C
+  'File', // D
+  'Source language', // E
+  'Target languages', // F
+  'Due date', // G
+  'Words', // H
+  'File WWC', // I (new)
+  'Step', // J
+  'Role', // K
+  'Accepted at', // L
+  'Note', // M
+  '_job_key', // N
+];
+
+const NEW_COLS = V2_HEADER.slice(8); // I–M appended when upgrading a v1 (8-col) sheet to v2
 
 /** Map the internal lifecycle status to the Sheet's display status (Constitution III). */
 export function lifecycleToSheetStatus(s: XtmLifecycleStatus): SheetStatus {
@@ -76,6 +101,7 @@ function rowToValues(r: SheetRow): string[] {
     r.targetLang ?? '',
     formatReadableDate(r.dueDate),
     r.words === null ? '' : String(r.words),
+    r.fileWwc === null ? '' : String(r.fileWwc),
     r.step ?? '',
     r.role ?? '',
     formatReadableDate(r.acceptedAt),
@@ -94,12 +120,18 @@ export interface SheetsApi {
   getHeader(): Promise<string[]>;
   /** Overwrite the header row (row 1). */
   setHeader(values: string[]): Promise<void>;
-  /** Column M (`_job_key`) values including the header, for upsert lookup. */
+  /** Column N (`_job_key`) values including the header, for upsert lookup. */
   getKeyColumn(): Promise<string[]>;
-  /** Overwrite a data row A:M (1-based). */
+  /** Overwrite a data row A:N (1-based). */
   writeRow(rowNum: number, values: string[]): Promise<void>;
-  /** Append a new data row A:M. */
+  /** Append a new data row A:N. */
   appendRow(values: string[]): Promise<void>;
+  /**
+   * Insert ONE blank column before the 0-based `beforeIndex`, shifting existing cells (header +
+   * every data row) right by one. Used once by the v2→v3 migration to open the File WWC slot (I)
+   * while keeping historical rows aligned (their `_job_key` shifts M→N).
+   */
+  insertColumn(beforeIndex: number): Promise<void>;
 }
 
 /**
@@ -110,16 +142,34 @@ export interface SheetsApi {
 export class SheetSink {
   constructor(private readonly api: SheetsApi) {}
 
-  /** Ensure the sheet has the v2 header, upgrading a v1 (8-col) sheet in place. */
+  /**
+   * Ensure the sheet has the current v3 header, migrating older shapes in place. Idempotent:
+   * a no-op once the header is v3, so it is safe to run on every process start.
+   *
+   * - empty            → write the full v3 header.
+   * - v3 (14 cols, N=_job_key)  → no-op (must not insert/rewrite again on subsequent starts).
+   * - v2 (13 cols, M=_job_key)  → insert a blank File WWC column at I (index 8) FIRST so existing
+   *   data cells shift right and `_job_key` lands at N, THEN rewrite the header as v3 — historical
+   *   rows keep their data aligned (the upsert keys off N afterward).
+   * - v1 (8 cols)      → append I–M to reach v2 (legacy cold path; a later start lifts it to v3).
+   * - anything else    → fail loud rather than overwrite an unrecognized sheet (FR-022).
+   */
   async ensureHeader(): Promise<void> {
     const header = await this.api.getHeader();
     if (header.length === 0) {
-      await this.api.setHeader(V2_HEADER);
+      await this.api.setHeader(V3_HEADER);
       return;
     }
-    if (header.length >= 13 && header[12] === '_job_key') return; // already v2
+    if (header.length >= 14 && header[13] === '_job_key') return; // already v3 — idempotent
+    if (header.length === 13 && header[12] === '_job_key') {
+      // v2 → v3: open the File WWC slot at column I, THEN rewrite the header (order matters so
+      // historical data cells shift right with the insert before the header is relabeled).
+      await this.api.insertColumn(8);
+      await this.api.setHeader(V3_HEADER);
+      return;
+    }
     if (header.length === 8) {
-      // v1 → v2: keep the user's 8 columns, append I–M.
+      // v1 → v2: keep the user's 8 columns, append I–M (a later start migrates v2 → v3).
       await this.api.setHeader([...header, ...NEW_COLS]);
       return;
     }
@@ -141,12 +191,12 @@ export class SheetSink {
  * Sends a queued Sheets row (the outbox 'sheets' channel target — mirrors
  * ChatSender). Maps googleapis errors to the dispatcher's retry semantics:
  * 401/403 (auth/permission) → permanent; everything else (5xx/429/network) →
- * transient. Ensures the v2 header once per process before the first write.
+ * transient. Ensures the v3 header once per process before the first write.
  */
 export interface SheetSender {
   send(row: SheetRow): Promise<SendOutcome>;
   /**
-   * Best-effort: ensure the v2 header exists up front (once per process) so an
+   * Best-effort: ensure the v3 header exists up front (once per process) so an
    * empty Active list still leaves a headed sheet — without waiting for the first
    * job. No-op after the first success. Called by the poll loop each cycle.
    */
@@ -223,7 +273,7 @@ export class GoogleSheetsApi implements SheetsApi {
   async getKeyColumn(): Promise<string[]> {
     const r = await this.sheets.spreadsheets.values.get({
       spreadsheetId: this.spreadsheetId,
-      range: `${this.tab}!M:M`,
+      range: `${this.tab}!N:N`,
     });
     return ((r.data.values ?? []) as string[][]).map((row) => row[0] ?? '');
   }
@@ -231,7 +281,7 @@ export class GoogleSheetsApi implements SheetsApi {
   async writeRow(rowNum: number, values: string[]): Promise<void> {
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: this.spreadsheetId,
-      range: `${this.tab}!A${rowNum}:M${rowNum}`,
+      range: `${this.tab}!A${rowNum}:N${rowNum}`,
       valueInputOption: 'RAW',
       requestBody: { values: [values] },
     });
@@ -240,10 +290,52 @@ export class GoogleSheetsApi implements SheetsApi {
   async appendRow(values: string[]): Promise<void> {
     await this.sheets.spreadsheets.values.append({
       spreadsheetId: this.spreadsheetId,
-      range: `${this.tab}!A:M`,
+      range: `${this.tab}!A:N`,
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [values] },
     });
+  }
+
+  /**
+   * Insert one blank column before the 0-based `beforeIndex` via batchUpdate/insertDimension
+   * (COLUMNS), shifting every existing cell right. Needs the tab's numeric sheetId, fetched once
+   * (matched by title) and cached. `inheritFromBefore:false` so the new column takes default
+   * formatting rather than copying the Words column's.
+   */
+  async insertColumn(beforeIndex: number): Promise<void> {
+    const sheetId = await this.resolveSheetId();
+    await this.sheets.spreadsheets.batchUpdate({
+      spreadsheetId: this.spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            insertDimension: {
+              range: {
+                sheetId,
+                dimension: 'COLUMNS',
+                startIndex: beforeIndex,
+                endIndex: beforeIndex + 1,
+              },
+              inheritFromBefore: false,
+            },
+          },
+        ],
+      },
+    });
+  }
+
+  private cachedSheetId: number | undefined;
+  /** The tab's numeric sheetId (matched by title), cached after the first lookup. */
+  private async resolveSheetId(): Promise<number> {
+    if (this.cachedSheetId !== undefined) return this.cachedSheetId;
+    const meta = await this.sheets.spreadsheets.get({ spreadsheetId: this.spreadsheetId });
+    const match = (meta.data.sheets ?? []).find((s) => s.properties?.title === this.tab);
+    const id = match?.properties?.sheetId;
+    if (id === undefined || id === null) {
+      throw new Error(`sheet tab not found for insertColumn: ${this.tab}`);
+    }
+    this.cachedSheetId = id;
+    return id;
   }
 }
