@@ -1,5 +1,5 @@
 import { google } from 'googleapis';
-import type { XtmLifecycleStatus } from '../detection/types.js';
+import type { XtmJobState, XtmLifecycleStatus } from '../detection/types.js';
 import type { SendOutcome } from './googleChat.js';
 import { formatReadableDate } from './dateFormat.js';
 
@@ -112,6 +112,29 @@ export function lifecycleToSheetStatus(s: XtmLifecycleStatus): SheetStatus {
     rejected: 'Rejected',
   };
   return map[s];
+}
+
+/** Lifecycle statuses that mean the job has left the Active grid. */
+const TERMINAL_ABSENT: ReadonlySet<XtmLifecycleStatus> = new Set(['missing', 'closed', 'removed']);
+
+/**
+ * Pure helper that resolves the Sheet Status + Note for a job, applying sticky-Rejected
+ * precedence: a gate-Rejected job keeps "Rejected" (plus a "(left Active DD/MM/YYYY HH:mm)"
+ * suffix once it exits Active) until it is accepted. Accepted overrides any rejectReason.
+ *
+ * This is a PURE function — no I/O, no cycle state. It is wired into `toSheetRow` by Task 7.
+ */
+export function resolveSheetStatusAndNote(
+  state: Pick<XtmJobState, 'lifecycleStatus' | 'acceptStatus' | 'rejectReason'>,
+  opts: { note: string | null; capturedAtMs: number },
+): { status: SheetStatus; note: string | null } {
+  if (state.rejectReason !== null && state.acceptStatus !== 'accepted') {
+    const left = TERMINAL_ABSENT.has(state.lifecycleStatus)
+      ? ` (left Active ${formatReadableDate(new Date(opts.capturedAtMs).toISOString())})`
+      : '';
+    return { status: 'Rejected', note: `${state.rejectReason}${left}` };
+  }
+  return { status: lifecycleToSheetStatus(state.lifecycleStatus), note: opts.note };
 }
 
 function rowToValues(r: SheetRow): string[] {

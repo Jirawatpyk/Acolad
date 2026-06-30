@@ -7,6 +7,7 @@ import {
   LAST_COL_LETTER,
   formatSheetDate,
   lifecycleToSheetStatus,
+  resolveSheetStatusAndNote,
   type SheetsApi,
   type SheetRow,
 } from '../../src/reporting/sheets.js';
@@ -315,6 +316,67 @@ describe('GoogleSheetSender.ensureReady (proactive header so an empty sheet is s
 describe('lifecycleToSheetStatus', () => {
   it('maps rejected → Rejected', () => {
     expect(lifecycleToSheetStatus('rejected')).toBe('Rejected');
+  });
+});
+
+describe('resolveSheetStatusAndNote', () => {
+  // TZ-explicit capturedAtMs: 2026-06-30T18:23:00+07:00 → Bangkok "30/06/2026 18:23"
+  // Must pass under TZ=UTC because we use an offset-bearing ISO string, not local midnight.
+  const capturedAtMs = new Date('2026-06-30T18:23:00+07:00').getTime();
+  const rejectNote = 'group blocked: x';
+
+  it('rejected + missing → Rejected with (left Active DD/MM/YYYY HH:mm) suffix', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'missing', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, capturedAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x (left Active 30/06/2026 18:23)' });
+  });
+
+  it('rejected + closed → Rejected with (left Active …) suffix', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'closed', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, capturedAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x (left Active 30/06/2026 18:23)' });
+  });
+
+  it('rejected + removed → Rejected with (left Active …) suffix', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'removed', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, capturedAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x (left Active 30/06/2026 18:23)' });
+  });
+
+  it('rejected + present (new — still in Active) → Rejected with NO suffix', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'new', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, capturedAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
+  });
+
+  it('accepted overrides rejectReason → Accepted with opts.note', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'accepted', acceptStatus: 'accepted', rejectReason: rejectNote },
+        { note: 'snatched', capturedAtMs },
+      ),
+    ).toEqual({ status: 'Accepted', note: 'snatched' });
+  });
+
+  it('no rejectReason + closed → Closed with opts.note (regression: unchanged behaviour)', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'closed', acceptStatus: 'none', rejectReason: null },
+        { note: 'done fine', capturedAtMs },
+      ),
+    ).toEqual({ status: 'Closed', note: 'done fine' });
   });
 });
 
