@@ -301,6 +301,37 @@ it('cap=0 → "(no cap)" headline', () => {
   ).toContain('no cap');
 });
 
+it('#8 kill-switch: gate OFF (capEnforced=false) → no enforced-cap claim even with a positive cap', () => {
+  // ACCEPT_SCHEDULE_ENABLED=0 → accept is 24/7, the per-deadline cap is NOT enforced. Advertising
+  // "cap 1000/day" would be misleading; the headline must reflect that no limit is enforced.
+  const card = text(
+    buildDailyReportCard(
+      [job({ dueDate: '2026-06-25T18:00:00+07:00', words: 100 })],
+      NOW,
+      'http://x',
+      1000, // a positive cap value in config...
+      undefined, // default raw-date mapper
+      false, // ...but the schedule gate is OFF → not enforced
+    ),
+  );
+  expect(card).not.toContain('cap 1000'); // never advertise an unenforced limit
+  expect(card).toContain('no cap'); // honest: no cap is enforced when the gate is off
+  expect(card).toContain('100 words'); // the workload view still renders
+});
+
+it('#8: gate ON (default capEnforced) with a positive cap still advertises the cap', () => {
+  // Regression guard: the default (no flag) must preserve the enforced-cap headline.
+  const card = text(
+    buildDailyReportCard(
+      [job({ dueDate: '2026-06-25T18:00:00+07:00', words: 100 })],
+      NOW,
+      'http://x',
+      1000,
+    ),
+  );
+  expect(card).toContain('cap 1000/day');
+});
+
 it('header is "📋 Daily Report — DD/MM/YYYY" in Bangkok format', () => {
   // NOW = 2026-06-25T09:00:00+07:00 → Bangkok date '2026-06-25' → '25/06/2026'
   const card = text(buildDailyReportCard([], NOW, 'http://x', 1000));
