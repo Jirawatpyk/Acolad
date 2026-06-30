@@ -93,6 +93,23 @@ describe('diffXtm (XTM appearance algorithm via generic diff)', () => {
     expect(state?.words).toBe(250); // but the refreshed display field is updated
     expect(second.detailsChanges).toHaveLength(1);
   });
+
+  it('(#12) preserves rejectReason across a re-sync (a business field, not read from the grid)', () => {
+    // applyXtmState carries rejectReason only via the `...existing` spread (it is owned by the
+    // orchestration, never read from the grid). This pins that invariant against a future refactor
+    // that converts applyXtmState to explicit fields and silently drops rejectReason.
+    const first = diffXtm(snap([xraw()], 'c1'), new Map());
+    const prev = new Map<string, XtmJobState>();
+    for (const [k, s] of first.nextStates) {
+      prev.set(k, { ...s, rejectReason: 'group blocked: holiday_calendar_stale' });
+    }
+    // A genuine grid-field change (words) on a NON-held job → the display change still applies…
+    const second = diffXtm(snap([xraw({ words: 250 })], 'c2'), prev);
+    const state = [...second.nextStates.values()][0];
+    expect(state?.rejectReason).toBe('group blocked: holiday_calendar_stale'); // …while rejectReason survives
+    expect(state?.words).toBe(250);
+    expect(second.detailsChanges).toHaveLength(1);
+  });
 });
 
 describe('diffXtm — held-job dueDate/words lock (F1, over-accept guard)', () => {
