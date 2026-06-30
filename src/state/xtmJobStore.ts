@@ -19,6 +19,7 @@ interface XtmJobRow {
   lifecycle_status: XtmLifecycleStatus | null;
   accept_status: XtmAcceptStatus;
   accepted_at: string | null;
+  reject_reason: string | null;
   status: 'visible' | 'missing';
   first_seen_at: string;
   last_seen_at: string;
@@ -103,11 +104,11 @@ export class XtmJobStore {
     const stmt = this.db.prepare(`
       INSERT INTO jobs (job_key, title, xtm_task_id, project_name, file_name, source_lang,
         target_lang, due_date, due_raw, words, file_wwc, step, role, eligible, lifecycle_status,
-        accept_status, accepted_at, status, first_seen_at, last_seen_at, snapshot_hash,
+        accept_status, accepted_at, reject_reason, status, first_seen_at, last_seen_at, snapshot_hash,
         consecutive_misses)
       VALUES (@jobKey, @title, @xtmTaskId, @projectName, @fileName, @sourceLang,
         @targetLang, @dueDate, @dueRaw, @words, @fileWwc, @step, @role, @eligible, @lifecycleStatus,
-        @acceptStatus, @acceptedAt, @status, @firstSeenAt, @lastSeenAt, @snapshotHash,
+        @acceptStatus, @acceptedAt, @rejectReason, @status, @firstSeenAt, @lastSeenAt, @snapshotHash,
         @consecutiveMisses)
       ON CONFLICT(job_key) DO UPDATE SET
         xtm_task_id=excluded.xtm_task_id, project_name=excluded.project_name,
@@ -116,6 +117,7 @@ export class XtmJobStore {
         words=excluded.words, file_wwc=excluded.file_wwc, step=excluded.step, role=excluded.role,
         eligible=excluded.eligible, lifecycle_status=excluded.lifecycle_status,
         accept_status=excluded.accept_status, accepted_at=excluded.accepted_at,
+        reject_reason=excluded.reject_reason,
         status=excluded.status, last_seen_at=excluded.last_seen_at,
         snapshot_hash=excluded.snapshot_hash, consecutive_misses=excluded.consecutive_misses
     `);
@@ -139,6 +141,7 @@ export class XtmJobStore {
           lifecycleStatus: s.lifecycleStatus,
           acceptStatus: s.acceptStatus,
           acceptedAt: s.acceptedAt,
+          rejectReason: s.rejectReason ?? null,
           status: s.status,
           firstSeenAt: s.firstSeenAt,
           lastSeenAt: s.lastSeenAt,
@@ -169,6 +172,7 @@ function rowToState(r: XtmJobRow): XtmJobState {
     lifecycleStatus: r.lifecycle_status ?? 'new',
     acceptStatus: r.accept_status,
     acceptedAt: r.accepted_at,
+    rejectReason: r.reject_reason,
     status: r.status,
     firstSeenAt: r.first_seen_at,
     lastSeenAt: r.last_seen_at,

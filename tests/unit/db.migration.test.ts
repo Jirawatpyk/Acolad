@@ -34,6 +34,7 @@ const NEW_COLS = [
   'lifecycle_status',
   'accept_status',
   'accepted_at',
+  'reject_reason',
   'sheet_synced_status',
 ];
 
@@ -370,30 +371,36 @@ describe('jobs.lifecycle_status widened for rejected', () => {
     }).not.toThrow();
     const db = opened!.db;
 
-    // (b) file_wwc was added (by ensureJobColumns, before the rebuild's SELECT).
+    // (b) file_wwc AND reject_reason were added (by ensureJobColumns, before the rebuild's SELECT).
+    // The old DDL above seeds NEITHER column, so both must be carried through the widen rebuild
+    // (their names come from the same source-of-truth arrays the rebuild's column list is built from).
     expect(cols(db, 'jobs')).toContain('file_wwc');
+    expect(cols(db, 'jobs')).toContain('reject_reason');
 
     // (c) lifecycle CHECK widened: 'rejected' now writes without a CHECK violation.
     expect(() =>
       db.prepare("UPDATE jobs SET lifecycle_status='rejected' WHERE job_key='combo-j'").run(),
     ).not.toThrow();
 
-    // (d) the pre-existing row survived the rebuild with its data intact.
+    // (d) the pre-existing row survived the rebuild with its data intact (newly-added
+    // columns it never had — file_wwc, reject_reason — default to NULL for it).
     const r = db
       .prepare(
-        "SELECT title, file_name, words, file_wwc, lifecycle_status FROM jobs WHERE job_key='combo-j'",
+        "SELECT title, file_name, words, file_wwc, reject_reason, lifecycle_status FROM jobs WHERE job_key='combo-j'",
       )
       .get() as {
       title: string;
       file_name: string;
       words: number;
       file_wwc: number | null;
+      reject_reason: string | null;
       lifecycle_status: string;
     };
     expect(r.title).toBe('real job');
     expect(r.file_name).toBe('captions.json');
     expect(r.words).toBe(1234);
     expect(r.file_wwc).toBeNull();
+    expect(r.reject_reason).toBeNull();
     expect(r.lifecycle_status).toBe('rejected');
     db.close();
   });

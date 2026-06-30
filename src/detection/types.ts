@@ -110,6 +110,12 @@ export interface XtmJobState extends BaseJobState {
   lifecycleStatus: XtmLifecycleStatus;
   acceptStatus: XtmAcceptStatus;
   acceptedAt: string | null;
+  /**
+   * Why the schedule gate blocked this job's bulk-group (lifecycle 'rejected'), persisted so
+   * the Sheet's "Rejected" status + reason survive cycles (a business field, NOT read from the
+   * grid). Owned by the orchestration; diff initialises it null and preserves it via `...existing`.
+   */
+  rejectReason: string | null;
 }
 
 export type AppearanceEventType = 'first_seen' | 'relisted' | 'missing' | 'cold_start';

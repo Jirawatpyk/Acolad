@@ -106,6 +106,7 @@ const accepted = (over: {
   lifecycleStatus: 'accepted',
   acceptStatus: 'accepted',
   acceptedAt: NOW,
+  rejectReason: null,
   status: 'visible',
   firstSeenAt: NOW,
   lastSeenAt: NOW,

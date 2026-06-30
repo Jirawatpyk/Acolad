@@ -151,6 +151,7 @@ const JOB_V2_COLUMNS: ColumnDef[] = [
     ddl: "accept_status TEXT NOT NULL DEFAULT 'none' CHECK (accept_status IN ('none','accepting','accepted','failed'))",
   },
   { name: 'accepted_at', ddl: 'accepted_at TEXT' },
+  { name: 'reject_reason', ddl: 'reject_reason TEXT' },
   { name: 'sheet_synced_status', ddl: 'sheet_synced_status TEXT' },
 ];
 
