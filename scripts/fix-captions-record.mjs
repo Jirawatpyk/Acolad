@@ -25,7 +25,7 @@ const info = db
 console.log(`DB: updated ${info.changes} row (accept_status=accepted)`);
 db.close();
 
-// 2) Sheet row (status col B + accepted-at col K), found by _job_key in col M
+// 2) Sheet row (status col B + accepted-at col L), found by _job_key in col N
 const auth = new google.auth.GoogleAuth({
   keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || 'google-credentials.json',
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
@@ -34,12 +34,12 @@ const sheets = google.sheets({ version: 'v4', auth });
 const SHEET_ID = process.env.GOOGLE_SHEETS_ID;
 const TAB = process.env.SHEETS_TAB_NAME;
 
-const mcol =
-  (await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${TAB}!M:M` })).data
+const ncol =
+  (await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${TAB}!N:N` })).data
     .values ?? [];
-const idx = mcol.findIndex((r) => (r[0] ?? '') === JOB_KEY);
+const idx = ncol.findIndex((r) => (r[0] ?? '') === JOB_KEY);
 if (idx === -1) {
-  console.log('Sheet: captions row not found (col M)');
+  console.log('Sheet: captions row not found (col N)');
 } else {
   const rowNum = idx + 1;
   await sheets.spreadsheets.values.batchUpdate({
@@ -48,8 +48,8 @@ if (idx === -1) {
       valueInputOption: 'RAW',
       data: [
         { range: `${TAB}!B${rowNum}`, values: [['Accepted']] },
-        { range: `${TAB}!K${rowNum}`, values: [[formatSheetDate(ACCEPTED_AT)]] },
-        { range: `${TAB}!L${rowNum}`, values: [['']] }, // clear the stale failure note
+        { range: `${TAB}!L${rowNum}`, values: [[formatSheetDate(ACCEPTED_AT)]] },
+        { range: `${TAB}!M${rowNum}`, values: [['']] }, // clear the stale failure note
       ],
     },
   });

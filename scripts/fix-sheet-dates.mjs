@@ -1,7 +1,7 @@
 /**
  * One-off: reformat the date columns of EXISTING Sheet rows to the readable
  * Bangkok-local "DD/MM/YYYY HH:mm" (same formatter the bot now uses for new rows).
- * Touches ONLY Received date (A), Due date (G), Accepted at (K), and only cells that
+ * Touches ONLY Received date (A), Due date (G), Accepted at (L), and only cells that
  * still hold an ISO timestamp (contain 'T') — so already-formatted or legacy values
  * are left untouched (idempotent, safe to re-run).
  */
@@ -25,7 +25,7 @@ const reformat = (c) => (c && String(c).includes('T') ? formatSheetDate(String(c
 
 const res = await sheets.spreadsheets.values.get({
   spreadsheetId: SHEET_ID,
-  range: `${TAB}!A2:M`,
+  range: `${TAB}!A2:N`,
 });
 const rows = res.data.values ?? [];
 if (rows.length === 0) {
@@ -34,7 +34,7 @@ if (rows.length === 0) {
   const last = 1 + rows.length;
   let changed = 0;
   for (const row of rows) {
-    for (const i of [0, 6, 10]) {
+    for (const i of [0, 6, 11]) {
       if (reformat(row[i]) !== (row[i] ?? '')) changed++;
     }
   }
@@ -45,7 +45,7 @@ if (rows.length === 0) {
       data: [
         { range: `${TAB}!A2:A${last}`, values: rows.map((r) => [reformat(r[0])]) },
         { range: `${TAB}!G2:G${last}`, values: rows.map((r) => [reformat(r[6])]) },
-        { range: `${TAB}!K2:K${last}`, values: rows.map((r) => [reformat(r[10])]) },
+        { range: `${TAB}!L2:L${last}`, values: rows.map((r) => [reformat(r[11])]) },
       ],
     },
   });
