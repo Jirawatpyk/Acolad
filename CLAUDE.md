@@ -120,7 +120,7 @@ main/once → bootstrap.createXtmBot() ประกอบทุกชิ้น (
 | `schedule/` | accept-scheduling gate (pure, TDD + coverage gate) | `acceptSchedule.ts` (`evaluateAcceptSchedule` — the gate), `workingHours.ts` (`workingMinutesBetween`), `bangkokCalendar.ts` (canonical Bangkok time — อย่า duplicate +7h logic), `parseSchedule.ts` (`resolveThroughput`), `thaiHolidays.ts` + `thaiHolidaysData.ts` (team-curated holidays) |
 | `state/` | SQLite (TDD + coverage gate) | `db.ts`, `xtmJobStore.ts` (job state), `jobStore.ts` (accept state machine), `outbox.ts`, `meta.ts` (baseline/cursor) |
 | `portal/` | Playwright I/O เฉพาะ XTM | `xtmClient.ts` (impl ของ interface), `xtmInbox.ts` (อ่าน grid ใน iframe), `xtmLogin.ts`, `xtmAccept.ts`, `xtmAcceptRecon.ts`, `selectors.ts` (รวมศูนย์), `evidence.ts`, `htmlSanitize.ts`, `errors.ts` |
-| `reporting/` | ส่งออก (TDD + coverage gate) | `dispatcher.ts` (channel→sender + payload-shape routing), `googleChat.ts` (`ChatPayload` union), `chatCard.ts`/`cardText.ts`/`dateFormat.ts` (cardsV2 builder + helpers), `sheets.ts` (Sink + Sender), `xtmNotifier.ts` (EN card builders), `dailyReport.ts` (รายงาน 09:00), `systemAlerts.ts` (EN alert cards) |
+| `reporting/` | ส่งออก (TDD + coverage gate) | `dispatcher.ts` (channel→sender + payload-shape routing), `googleChat.ts` (`ChatPayload` union), `chatCard.ts`/`cardText.ts`/`dateFormat.ts` (cardsV2 builder + helpers), `sheets.ts` (Sink + Sender — scrape **File WWC** [Weighted Word Count] จาก Active grid ลง PM_Tracking Sheet; Sheet **v3**: 14 คอลัมน์, File WWC ที่คอลัมน์ **I**, `_job_key` ที่ **N** — ย้ายจาก v2 13 คอลัมน์/`_job_key` ที่ M), `xtmNotifier.ts` (EN card builders), `dailyReport.ts` (รายงาน 09:00), `systemAlerts.ts` (EN alert cards) |
 | `runtime/` | orchestration + entry points | (ดู Entry points ด้านบน) + `rateLimiter.ts`, `scheduler.ts` |
 | `monitoring/` | สุขภาพระบบ | `heartbeat.ts` (Healthchecks), `logger.ts` (pino + redaction) |
 
@@ -213,14 +213,17 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
   (ไม่อยู่ใน `CURATED_YEARS`) → accept **fail-closed** (Reject + `holiday_calendar_stale`),
   report **fail-open** (ส่งปกติ). **2026 แก้ in-lieu + 2027 เพิ่ม+curated แล้ว (PR #11)** — เหลือ
   reconfirm วันจันทรคติ 2027 (มาฆ/วิสาข/อาสาฬห/เข้าพรรษา) กับประกาศราชกิจจาฯ ทางการเมื่อออก
-- **capacity = held-derived per deadline day (PR #14):** cap = ≤`ACCEPT_MAX_WORDS_PER_DAY` คำที่
-  **DL ตรงวันเดียวกัน** อ่านจาก held list (`XtmJobStore.wordsDueByDeadline()`) **ไม่ใช่วันกดรับ**
+- **capacity = held-derived per deadline day (PR #14; bucket by effective day PR #19):** cap =
+  ≤`ACCEPT_MAX_WORDS_PER_DAY` คำที่ **effective deadline day ตรงวันเดียวกัน** (วันทำงานที่งานไปตกจริง —
+  DL เวลาก่อน 09:00 ถูกชาร์จเข้า cap ของ**วันทำงานก่อนหน้า** ไม่ใช่วันที่ DL ดิบ; ดู `schedule/deadlineDay.ts`)
+  อ่านจาก held list (`XtmJobStore.wordsDueByDeadline()`) **ไม่ใช่วันกดรับ**
   → **งาน finish คืนโควต้า** (source เดียว = held; ไม่มี meta word-counter แล้ว). ตัดสินด้วย pure
   helper `schedule/acceptCapacity.ts` (`decideGroupCapacity`, all-or-nothing per bulk-group **ครอบทั้ง
   feasibility + capacity** กัน owned-but-Rejected); seed จาก held ครั้งเดียว/รอบ **ก่อน** record
   (memoize, advance per-DL-day). audit: `XtmCycleSummary.acceptedDueDays` log `wordsDueOn` ตอน accept
 - daily report 09:00 (`dailyReport.ts`) ส่ง **เฉพาะวันทำการ** (PR #8) — **`📋 Daily Report`:
-  Due today (Σ คำ held ที่ DL=วันนี้) / ⚠️ Overdue (instant `dueAtMs<now`) / In progress top-5 by
+  Due today (Σ คำ held ที่ **effective deadline day = วันนี้** — งานที่ DL เวลาก่อน 09:00 นับเข้า**วันทำงานก่อนหน้า**
+  ไม่ใช่วันที่ปฏิทินดิบ; cutoff PR #19) / ⚠️ Overdue (instant `dueAtMs<now`) / In progress top-5 by
   deadline** สร้างจาก held list, **throw-safe + อยู่ใน try/catch ของ loop** (bug รายงานไม่ page; PR
   #14). ทุกวันที่ Bangkok ผ่าน `schedule/bangkokCalendar.ts` (canonical)
 
@@ -229,6 +232,8 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
 - **"ทำไมบอทไม่กดงาน X":** เปิด Google Sheet → ดู Status `Rejected` + reason ในคอลัมน์
   Note (และ pino log `module:scheduleGate action:reject` — มี jobKey/reason/words/dueDate) →
   ถ้าเหตุผลผิด (holiday ผิด / throughput ต่ำ / cap) แก้ config แล้ว `npm run deploy`.
+  **หมายเหตุ cutoff:** งานที่ DL เวลาก่อน 09:00 (หรือ DL ตรงวันหยุด/เสาร์-อาทิตย์) ถูกชาร์จเข้า cap ของ
+  **วันทำงานก่อนหน้า** (effective deadline day) → วันที่ในเหตุผล reject อาจไม่ตรงกับวัน DL ดิบ.
 - **kill-switch:** `ACCEPT_SCHEDULE_ENABLED=0` + `npm run deploy` = กลับพฤติกรรมก่อน PR #7
   byte-for-byte (config refines ถูก gate ด้วย ENABLED → ปิดได้เสมอแม้ค่าอื่นเพี้ยน).
 - **พฤติกรรมปกติ (ไม่ใช่ bug):** Malay = ภาษาเดียว = 1 bulk-group/รอบ → งาน
