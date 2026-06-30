@@ -54,8 +54,16 @@ describe('effectiveDeadlineDay (the "cutoff" — the WORKING DAY the work lands 
     expect(dayOf('2026-07-01T06:33:00+07:00')).toBe('2026-06-30');
   });
 
-  it('a deadline exactly at 09:00 stays the same day (a full work-day is still ahead)', () => {
-    expect(dayOf('2026-07-01T09:00:00+07:00')).toBe('2026-07-01');
+  it('a deadline exactly at 09:00 rolls back to the previous working day (0 working minutes at/before it)', () => {
+    // A 09:00 deadline has ZERO working minutes available on its OWN day:
+    // workingMinutesBetween(now, 09:00) overlaps [09:00,18:00] with [..,09:00] = 0. So the work
+    // must finish the PREVIOUS working day — feasibility already allocates it there. The capacity
+    // bucket key must agree (strictly-greater cutoff), else the prior day under-counts → over-accept.
+    expect(dayOf('2026-07-01T09:00:00+07:00')).toBe('2026-06-30');
+  });
+
+  it('a deadline one minute past 09:00 (09:01) stays the same day (1 working minute exists)', () => {
+    expect(dayOf('2026-07-01T09:01:00+07:00')).toBe('2026-07-01');
   });
 
   it('an after-hours same-day deadline (22:51 ≥ 09:00) stays the same day', () => {
@@ -80,6 +88,16 @@ describe('effectiveDeadlineDay (the "cutoff" — the WORKING DAY the work lands 
     // Tue 06:00 < 09:00 → walk back: Mon 06-01 is a real in-lieu holiday, Sun, Sat → Fri 05-29.
     const holidays = new Map([['2026-06-01', 'Visakha Bucha Day (in lieu)']]);
     expect(dayOf('2026-06-02T06:00:00+07:00', holidays)).toBe('2026-05-29');
+  });
+
+  it('throws (fail-loud) when the work calendar has NO working day in 400 days back (corrupt calendar)', () => {
+    // An all-non-working calendar (empty workdays) can never satisfy the walk-back. Returning the
+    // deadline's own (wrong) day would silently mis-bucket capacity → over-accept on the
+    // irreversible bulk path; so it must throw rather than guess.
+    const noWorkdays = new Set<number>();
+    expect(() =>
+      effectiveDeadlineDay(Date.parse('2026-06-30T12:00:00+07:00'), 9 * 60, noWorkdays, NO_HOLIDAYS),
+    ).toThrow(/corrupt work calendar/);
   });
 
   it('back-walks into the PREVIOUS year using the real holidaysForEffectiveDay map (New-Year edge)', () => {

@@ -39,10 +39,16 @@ export function deadlineDayOf(dueDate: string | null): string | null {
  * capacity bucket key with that.
  *
  * Rule (reuses `bangkokCalendar` + `isNonWorkingDay`):
- *  - The deadline's own day, when it is a working day AND the deadline is at/after the work-day
- *    start — covers an after-hours same-day deadline like 22:51 (still that day's work).
- *  - Otherwise (before the work-day start, OR the deadline falls on a non-working day) → the
+ *  - The deadline's own day, when it is a working day AND the deadline is STRICTLY AFTER the
+ *    work-day start — covers an after-hours same-day deadline like 22:51 (still that day's work).
+ *  - Otherwise (at/before the work-day start, OR the deadline falls on a non-working day) → the
  *    previous working day (its 18:00 is the last working minute at/before the deadline).
+ *
+ * The cutoff is STRICTLY GREATER (`> hoursStartMin`), not `>=`: a deadline exactly at 09:00 has
+ * ZERO working minutes available on its own day — `workingMinutesBetween(now, 09:00)` overlaps
+ * [09:00,18:00] with [..,09:00] = 0 — so feasibility allocates the work to the PREVIOUS working
+ * day. The bucket key must agree, else the prior day under-counts → silent over-accept past the
+ * cap (the irreversible direction this fix exists to prevent).
  *
  * Only ever called with a parseable deadline (callers null-handle first via `deadlineMsOf`).
  */
@@ -55,7 +61,7 @@ export function effectiveDeadlineDay(
   const cal = bangkokCalendar(dueMs);
   if (
     !isNonWorkingDay(cal.date, cal.weekday, workdays, holidays) &&
-    cal.minutesOfDay >= hoursStartMin
+    cal.minutesOfDay > hoursStartMin
   ) {
     return cal.date;
   }
@@ -66,7 +72,12 @@ export function effectiveDeadlineDay(
     if (!isNonWorkingDay(c.date, c.weekday, workdays, holidays)) return c.date;
     cursor -= DAY_MS;
   }
-  return cal.date; // unbounded fallback — unreachable for any sane work calendar
+  // Fail loud, never guess (the irreversible accept path): no working day in 400 days back means a
+  // corrupt/all-non-working work calendar. Returning the deadline's own (wrong) day would silently
+  // mis-bucket capacity → over-accept. Unreachable for any sane calendar.
+  throw new Error(
+    `effectiveDeadlineDay: no working day within ${MAX_DAYS} days before dueMs=${dueMs} — corrupt work calendar (no workdays/all-holiday)`,
+  );
 }
 
 /**

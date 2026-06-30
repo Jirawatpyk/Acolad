@@ -44,12 +44,12 @@ Feasibility (`workingMinutesBetween` — already work-day-aware); the metric is 
 ## 5. Edge cases
 
 - A deadline that rolls back across a weekend/holiday (e.g. Monday 06:00 → previous **Friday**) — the back-walk skips non-working days. Bounded.
-- A deadline exactly at 09:00 (`minutesOfDay === hoursStartMin`) → that day (a full work-day is ahead of it). Marginal; documented.
+- A deadline exactly at 09:00 (`minutesOfDay === hoursStartMin`) → the **previous working day**. The cutoff is **strictly greater** (`minutesOfDay > hoursStartMin`), not `>=`: a 09:00 deadline has **0 working minutes** available on its own day — `workingMinutesBetween(now, 09:00)` overlaps `[09:00,18:00]` with `[..,09:00]` = 0 — so the work lands the prior working day, exactly as feasibility already allocates it. Bucketing it on its own day (0 working minutes) while feasibility puts the work on the prior day would under-count the prior day → silent over-accept past the cap (the irreversible direction). `09:01` (1 working minute) stays its own day.
 - A null/unparseable deadline → unchanged (the gate rejects it when ON; the seed skips + alerts per the prior fix). `effectiveDeadlineDay` is only called for parseable deadlines.
 
 ## 6. Testing (TDD; `schedule`/`state`/`reporting` coverage-gated ≥80%; TZ-explicit `+07:00`, pass under `TZ=UTC`)
 
-- **Helper:** before-09:00 deadline rolls to the previous working day; exactly-09:00 stays; after-18:00 (22:51) stays same day; a Monday-06:00 deadline rolls to the previous **Friday** (across the weekend); a Tuesday-14:00 deadline stays.
+- **Helper:** before-09:00 deadline rolls to the previous working day; exactly-09:00 rolls to the previous working day (0 working minutes available); 09:01 stays same day (1 working minute); after-18:00 (22:51) stays same day; a Monday-06:00 deadline rolls to the previous **Friday** (across the weekend); a Tuesday-14:00 deadline stays. An all-non-working calendar throws (fail-loud).
 - **Cycle (the live regression):** two Malay groups, one due 30/06 22:51 (858w) + one due 01/07 06:33 (377w), `now` on 30/06 → both effective-bucket to 30/06 → combined 1235 > cap 1000 → the second group is **rejected** (it is accepted today). And the inverse: a genuinely-next-working-day deadline (e.g. 01/07 14:00) buckets to 01/07 (its own day), not 30/06.
 - **Report:** a held job due tomorrow 06:00 (before 09:00) appears in today's "Due today" sum; a held job due tomorrow 14:00 does not.
 
