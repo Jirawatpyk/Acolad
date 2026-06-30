@@ -1217,6 +1217,68 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(sheetRows().length).toBe(countAfterMissing);
   });
 
+  // --- Finding #1/#7: robustness-pass symmetry (the sticky-Rejected break) ----
+  it('Finding #1: a still-present rejected job with ACCEPT_ENABLED=0 flips to new (not stale rejected) → Sheet Missing on disappear', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const tight = { dueDate: dueMon12, words: 5000 }; // infeasible → schedule-rejected
+    // c1: ACCEPT on, too tight → rejected (reason persisted).
+    await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
+      snapAt([xraw(tight)], MON_10, 'c1'),
+    );
+    expect(only().lifecycleStatus).toBe('rejected');
+    expect(only().rejectReason).not.toBeNull();
+    // c2: SAME job still present, ACCEPT now OFF → the robustness pass decides 'disabled' →
+    // lifecycle 'new'. Before the symmetric helper the robustness pass ignored 'disabled', leaving
+    // a STALE 'rejected' lifecycle with its reason cleared — a bare 'Rejected' (note=null).
+    const offCycle = new XtmPollCycle(db, schedCfg({ ACCEPT_ENABLED: false }), new StubAcceptor());
+    await offCycle.run(snapAt([xraw(tight)], MON_10, 'c2'));
+    expect(only().lifecycleStatus).toBe('new'); // NOT stale 'rejected'
+    expect(only().rejectReason).toBeNull(); // reason cleared AND the lifecycle followed
+    // c3 flicker, c4 missing → the Sheet shows Missing, never a bare 'Rejected'.
+    await offCycle.run(snapAt([], MON_10, 'c3'));
+    await offCycle.run(snapAt([], MON_10, 'c4'));
+    expect(only().lifecycleStatus).toBe('missing');
+    expect(sheetRows().at(-1)?.status).toBe('Missing');
+  });
+
+  it('Finding #1: a still-present rejected job whose words jump over ACCEPT_MAX_WORDS flips to skipped with the skip reason (not stale rejected)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    // cap 4000 per-job. c1: 3000w ≤ cap (decideAccept→accept) but too tight for noon → rejected.
+    const cycle = new XtmPollCycle(db, schedCfg({ ACCEPT_MAX_WORDS: 4000 }), new StubAcceptor());
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 3000 })], MON_10, 'c1'));
+    expect(only().lifecycleStatus).toBe('rejected');
+    expect(only().rejectReason).not.toBeNull();
+    // c2: SAME job still present, words now 5000 > the 4000 cap → the robustness pass decides 'skip'.
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c2'));
+    expect(only().lifecycleStatus).toBe('skipped'); // NOT stale 'rejected'
+    expect(only().rejectReason).toBeNull();
+    const last = sheetRows().at(-1)!;
+    expect(last.status).toBe('Skipped');
+    expect(last.note).toContain('exceeds max words'); // the skip reason surfaced, not a stale reject note
+  });
+
+  it('Finding #1 regression: a still-present rejected job the gate re-blocks STAYS sticky Rejected (common case unbroken)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const tight = { dueDate: dueMon12, words: 5000 };
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    await cycle.run(snapAt([xraw(tight)], MON_10, 'c1'));
+    expect(only().lifecycleStatus).toBe('rejected');
+    // c2: SAME job still present, still infeasible → robustness pass → gate re-blocks → rejected.
+    await cycle.run(snapAt([xraw(tight)], MON_10, 'c2'));
+    expect(only().lifecycleStatus).toBe('rejected'); // re-blocked, stays rejected
+    expect(only().rejectReason).not.toBeNull(); // reason re-set by the gate (not left cleared)
+    // disappears → sticky 'Rejected' with a "(left Active …)" suffix (not flipped to Missing).
+    await cycle.run(snapAt([], MON_10, 'c3'));
+    await cycle.run(snapAt([], MON_10, 'c4'));
+    expect(only().lifecycleStatus).toBe('missing'); // internal lifecycle flips…
+    const last = sheetRows().at(-1)!;
+    expect(last.status).toBe('Rejected'); // …but the Sheet stays sticky Rejected
+    expect(last.note).toContain('cannot finish in time');
+  });
+
   it('F1: a still-rejected job whose dueDate changes keeps its reject reason on the field-sync note (I3 — never wiped to null)', async () => {
     fresh();
     new MetaStore(db).markBaselineDone();

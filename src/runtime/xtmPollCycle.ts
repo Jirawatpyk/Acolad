@@ -280,54 +280,19 @@ export class XtmPollCycle {
         continue;
       }
 
-      // Sticky-Rejected clear (Task 7): this is a PRESENT job (the missing branch above already
-      // `continue`d), so it is re-decided by the gate this cycle — wipe any stale persisted reject
-      // reason FIRST; the gate re-sets it below if the job is still blocked. Placement is
-      // load-bearing: it MUST sit AFTER the missing-branch `continue` so a rejected job that just
-      // LEFT Active keeps its reason and the Sheet stays sticky 'Rejected' (resolveSheetStatusAndNote
+      // Clear-then-decide-then-apply (Finding #1/#7): applyPresentDecision wipes the stale persisted
+      // reject reason FIRST (the gate re-sets it below if still blocked) and applies the decideAccept
+      // verdict — the SINGLE place both passes decide, so they can never drift. Placement is
+      // load-bearing: it MUST sit AFTER the missing-branch `continue` so a rejected job that just LEFT
+      // Active keeps its reason and the Sheet stays sticky 'Rejected' (resolveSheetStatusAndNote
       // appends "(left Active …)") instead of flipping to a bare 'Missing'.
-      s.rejectReason = null;
-
-      // first_seen / relisted / cold_start (FR-005 accepts still-acceptable pre-existing).
-      const decision = decideAccept({
-        targetLang: s.targetLang,
-        words: s.words,
-        acceptEnabled: this.cfg.ACCEPT_ENABLED,
-        acceptLanguages: this.cfg.ACCEPT_LANGUAGES,
-        maxWords: this.cfg.ACCEPT_MAX_WORDS,
+      acceptedThisCycle = this.applyPresentDecision(
+        s,
+        wouldAccept,
+        blockNotes,
+        summary,
         acceptedThisCycle,
-        maxPerCycle: this.cfg.ACCEPT_MAX_PER_CYCLE,
-      });
-      if (decision.action === 'skip') {
-        s.lifecycleStatus = 'skipped';
-        blockNotes.set(ev.jobKey, decision.reason); // surface WHY (non-Malay / cap) on the Sheet
-        summary.skipped++;
-      } else if (decision.action === 'disabled') {
-        s.lifecycleStatus = 'new'; // eligible, but auto-accept is off (FR-012)
-        summary.eligibleDisabled++;
-        // Capture the live accept-menu DOM for this eligible job (hover only, in the
-        // loop) so acceptAvailable can be computed before auto-accept is ever enabled.
-        if (this.cfg.ACCEPT_RECON) {
-          summary.reconEligible.push({
-            jobKey: s.jobKey,
-            targetLang: s.targetLang ?? '',
-            projectName: s.projectName,
-            fileName: s.fileName,
-            step: s.step,
-            role: s.role,
-          });
-        }
-      } else {
-        wouldAccept.push(s); // schedule gate (below) decides accept vs reject per group
-        // F6: counts would-accept candidates PRE-gate. The per-cycle cap mechanism relies
-        // on incrementing here so the next decideAccept in THIS pass sees the running count
-        // (moving it past the gate would defeat the cap, since the robustness pass below
-        // reads the count before the gate runs). ACCEPT_MAX_PER_CYCLE MUST stay 0 (the
-        // per-deadline-day capacity cap — decideGroupCapacity in this cycle — owns the
-        // words/day limit); a cap > 0 is forbidden by the runbook for the bulk-claim hazard,
-        // so this pre-gate count never gates a real accept in prod.
-        acceptedThisCycle++;
-      }
+      );
     }
 
     // Robustness: also attempt eligible jobs PRESENT in Active that produced NO fresh
@@ -342,22 +307,18 @@ export class XtmPollCycle {
     for (const s of result.nextStates.values()) {
       if (eventKeys.has(s.jobKey) || !presentKeys.has(s.jobKey)) continue;
       if (!s.eligible || s.acceptStatus !== 'none') continue;
-      // Sticky-Rejected clear (Task 7): same as the event pass — a present, re-decidable job's
-      // stale reject reason is wiped before the gate; the gate re-sets it below if still blocked.
-      s.rejectReason = null;
-      const decision = decideAccept({
-        targetLang: s.targetLang,
-        words: s.words,
-        acceptEnabled: this.cfg.ACCEPT_ENABLED,
-        acceptLanguages: this.cfg.ACCEPT_LANGUAGES,
-        maxWords: this.cfg.ACCEPT_MAX_WORDS,
+      // Same single decision path as the event pass (Finding #1/#7) — clears the stale reject reason
+      // then applies the verdict (skip/disabled/accept) SYMMETRICALLY. Before this the robustness pass
+      // handled ONLY 'accept', so a still-present gate-rejected job that flipped to skip (words over
+      // the cap) or disabled (ACCEPT off) was left a STALE 'rejected' lifecycle with its reason
+      // cleared — a bare, undiagnosable 'Rejected' on the Sheet.
+      acceptedThisCycle = this.applyPresentDecision(
+        s,
+        wouldAccept,
+        blockNotes,
+        summary,
         acceptedThisCycle,
-        maxPerCycle: this.cfg.ACCEPT_MAX_PER_CYCLE,
-      });
-      if (decision.action === 'accept') {
-        wouldAccept.push(s); // same gate as the event pass (C4 — no silent robustness reject)
-        acceptedThisCycle++; // pre-gate count (see F6 note above); ACCEPT_MAX_PER_CYCLE must stay 0
-      }
+      );
     }
 
     // Schedule gate (C1 bulk-group all-or-nothing). Applied ONLY where decideAccept()→accept;
@@ -663,7 +624,16 @@ export class XtmPollCycle {
     // holds skip reasons (F15), but every skipped job already fired via its appearance event
     // above, so reportJob's jobKey dedup makes those entries no-ops here.
     for (const jobKey of blockNotes.keys()) {
-      if (prev.get(jobKey)?.lifecycleStatus === 'rejected') continue;
+      // Re-announce only on a status CHANGE. A job whose lifecycle is UNCHANGED from last cycle
+      // (still 'rejected', or still 'skipped') must NOT re-enqueue every cycle — the event_id carries
+      // pollCycleId, so re-reporting would duplicate. But a was-'rejected'-now-'skipped' transition
+      // (Finding #1: the robustness pass flipping a still-present infeasible job over the word cap) IS
+      // a real change and must be reported — the old `prev === 'rejected'` guard swallowed it, leaving
+      // the Sheet on a stale 'Rejected'. reportJob dedups by jobKey, so a job already reported via its
+      // event/outcome above is skipped here.
+      const prevStatus = prev.get(jobKey)?.lifecycleStatus;
+      const curStatus = result.nextStates.get(jobKey)?.lifecycleStatus;
+      if (prevStatus === curStatus) continue;
       reportJob(jobKey, undefined);
     }
     // Field-change re-sync (Bug B): a still-visible job whose Due date/Words XTM set AFTER
@@ -705,6 +675,70 @@ export class XtmPollCycle {
     if (baseline) this.meta.markBaselineDone();
     this.meta.recordSuccessfulPoll(snapshot.capturedAt);
     return summary;
+  }
+
+  /**
+   * Clear-then-decide-then-apply for ONE present, re-decidable job — the single place BOTH the event
+   * pass and the robustness pass run `decideAccept`, so the two can never drift (Finding #1/#7). It
+   *   1. wipes any stale persisted reject reason FIRST (the schedule gate re-sets it below if the job
+   *      is still blocked — keeping the Sheet's sticky 'Rejected' correct), then
+   *   2. applies the verdict SYMMETRICALLY:
+   *        - 'skip'     → lifecycle 'skipped' + the skip reason in `blockNotes` (surfaced on the Sheet)
+   *        - 'disabled' → lifecycle 'new' (eligible, auto-accept off, FR-012) + the ACCEPT_RECON capture
+   *        - 'accept'   → push to `wouldAccept` for the schedule gate; bump the PRE-gate cap count (F6)
+   *
+   * Returns the running pre-gate accept count (the per-cycle-cap input the next call reads). Before
+   * this extraction the robustness pass handled ONLY 'accept', so a still-present gate-rejected job
+   * that flipped to skip/disabled kept a STALE lifecycle 'rejected' with its reason cleared, rendering
+   * a bare 'Rejected' (note=null) on the Sheet. The caller MUST invoke this only for a PRESENT job,
+   * AFTER the missing-branch `continue`, so a rejected job that just LEFT Active keeps its reason.
+   */
+  private applyPresentDecision(
+    s: XtmJobState,
+    wouldAccept: XtmJobState[],
+    blockNotes: Map<string, string>,
+    summary: XtmCycleSummary,
+    acceptedThisCycle: number,
+  ): number {
+    s.rejectReason = null;
+    const decision = decideAccept({
+      targetLang: s.targetLang,
+      words: s.words,
+      acceptEnabled: this.cfg.ACCEPT_ENABLED,
+      acceptLanguages: this.cfg.ACCEPT_LANGUAGES,
+      maxWords: this.cfg.ACCEPT_MAX_WORDS,
+      acceptedThisCycle,
+      maxPerCycle: this.cfg.ACCEPT_MAX_PER_CYCLE,
+    });
+    if (decision.action === 'skip') {
+      s.lifecycleStatus = 'skipped';
+      blockNotes.set(s.jobKey, decision.reason); // surface WHY (non-Malay / cap) on the Sheet
+      summary.skipped++;
+      return acceptedThisCycle;
+    }
+    if (decision.action === 'disabled') {
+      s.lifecycleStatus = 'new'; // eligible, but auto-accept is off (FR-012)
+      summary.eligibleDisabled++;
+      // Capture the live accept-menu DOM for this eligible job (hover only, in the loop) so
+      // acceptAvailable can be computed before auto-accept is ever enabled.
+      if (this.cfg.ACCEPT_RECON) {
+        summary.reconEligible.push({
+          jobKey: s.jobKey,
+          targetLang: s.targetLang ?? '',
+          projectName: s.projectName,
+          fileName: s.fileName,
+          step: s.step,
+          role: s.role,
+        });
+      }
+      return acceptedThisCycle;
+    }
+    // accept → the schedule gate (below) decides accept vs reject per bulk group. F6: this PRE-gate
+    // count MUST bump here so the next decideAccept in the event pass sees the running total (the
+    // per-cycle cap); ACCEPT_MAX_PER_CYCLE must stay 0 in prod (the per-deadline-day capacity owns the
+    // words/day limit — a cap > 0 is the bulk-claim hazard, see acceptDecision.ts).
+    wouldAccept.push(s);
+    return acceptedThisCycle + 1;
   }
 
   /**
