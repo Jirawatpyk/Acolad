@@ -1548,3 +1548,109 @@ describe('XtmPollCycle field-change re-sync / Bug B (sheet:fieldsync)', () => {
     expect(c2ChatForJob).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 8: live-regression lock — incident 4721900 (EMAIL vs EMAIL_1)
+// Two XTM projects share the identical file name '4721900-1-6 (ID-91e1bdd17f80)_Proof.html'.
+// On the OLD 3-field key (fileName|step|role, no projectName) both collapsed to the same
+// DB entry: EMAIL_1 was treated as EMAIL "still visible", producing zero new Sheet rows and
+// a relisted (🔁) card instead of a new-job (🆕) card.
+// After Task 1 added projectName to the key this test must pass GREEN; it would FAIL on the
+// old 3-field key at the first `toHaveLength(2)` assertion.
+// ---------------------------------------------------------------------------
+describe('XtmPollCycle regression: EMAIL vs EMAIL_1 project collision (incident 4721900, Task 8)', () => {
+  const EMAIL_PROJECT = 'PR Newswire Release 4721900-1-3 (Basecamp Research) Affiliate EMAIL';
+  const EMAIL1_PROJECT = 'PR Newswire Release 4721900-1-3 (Basecamp Research) Affiliate EMAIL_1';
+  const FILE_NAME = '4721900-1-6 (ID-91e1bdd17f80)_Proof.html';
+
+  // TZ-explicit deadlines (+07:00) — CI runs in TZ=UTC, these remain unambiguous.
+  const EMAIL_DUE = '2026-06-30T22:51:00+07:00'; // Tue — EMAIL's deadline
+  const EMAIL1_DUE = '2026-07-01T14:21:00+07:00'; // Wed — EMAIL_1's deadline (distinct day)
+
+  // Cycle timestamps from the live incident (TZ-explicit for TZ=UTC safety in CI).
+  const CYCLE_A_AT = '2026-06-29T19:51:00+07:00'; // Mon evening — cycle that saw EMAIL
+  const CYCLE_B_AT = '2026-06-30T18:21:00+07:00'; // Tue evening — cycle that saw EMAIL_1
+
+  // Accept timestamps deliberately differ so acceptedAt assertions are non-vacuous.
+  const ACCEPT_A = '2026-06-29T12:51:00.000Z'; // UTC — EMAIL accepted in cycle A
+  const ACCEPT_B = '2026-06-30T11:21:00.000Z'; // UTC — EMAIL_1 accepted in cycle B
+
+  const emailJob = (): XtmRawJob =>
+    xraw({ projectName: EMAIL_PROJECT, fileName: FILE_NAME, dueDate: EMAIL_DUE, words: 100 });
+  const email1Job = (): XtmRawJob =>
+    xraw({ projectName: EMAIL1_PROJECT, fileName: FILE_NAME, dueDate: EMAIL1_DUE, words: 100 });
+
+  it(
+    'same file name, different project → distinct keys, two Sheet rows, ' +
+      'EMAIL_1 is 🆕 not 🔁, acceptedAt distinct, each has its own deadline',
+    async () => {
+      fresh();
+      new MetaStore(db).markBaselineDone();
+
+      // Acceptor records distinct at-timestamps per cycle so acceptedAt assertions are testable.
+      let nextAcceptAt = ACCEPT_A;
+      const acc = {
+        async acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]> {
+          const at = nextAcceptAt;
+          return targets.map((t): AcceptResult => ({ jobKey: t.jobKey, outcome: 'accepted', at }));
+        },
+      };
+
+      const cycle = new XtmPollCycle(db, cfg(), acc);
+
+      // Cycle A: EMAIL project appears → accepted.
+      await cycle.run(snapAt([emailJob()], CYCLE_A_AT, 'cA'));
+      nextAcceptAt = ACCEPT_B; // advance before cycle B
+
+      // Cycle B: SAME file name, DIFFERENT project → must be a wholly distinct new job.
+      await cycle.run(snapAt([email1Job()], CYCLE_B_AT, 'cB'));
+
+      const emailKey = computeXtmJobKey(emailJob());
+      const email1Key = computeXtmJobKey(email1Job());
+
+      // ── T8 core: keys MUST differ (on the old key they were identical) ──
+      expect(emailKey, 'job keys must differ when only projectName changes').not.toBe(email1Key);
+
+      // ── Two wholly separate DB records ──
+      const allStates = [...new XtmJobStore(db).loadAll().values()];
+      expect(allStates).toHaveLength(2); // old key → 1 (EMAIL_1 merged into EMAIL)
+
+      const emailState = allStates.find((s) => s.jobKey === emailKey)!;
+      const email1State = allStates.find((s) => s.jobKey === email1Key)!;
+      expect(emailState, 'EMAIL job must be in DB').toBeDefined();
+      expect(email1State, 'EMAIL_1 job must be in DB').toBeDefined();
+
+      // ── Both accepted independently ──
+      expect(emailState.lifecycleStatus).toBe('accepted');
+      expect(email1State.lifecycleStatus).toBe('accepted');
+
+      // ── acceptedAt is per-job: cycle A vs cycle B ──
+      expect(emailState.acceptedAt).toBe(ACCEPT_A);
+      expect(email1State.acceptedAt).toBe(ACCEPT_B);
+      expect(email1State.acceptedAt).not.toBe(emailState.acceptedAt);
+
+      // ── EMAIL_1 is a new job, not a relisted EMAIL ──
+      // Accepted Malay jobs produce a ✅ card. On the OLD key EMAIL_1 was seen as EMAIL "still
+      // visible, already accepted" → zero new chat events in cycle B. With the new key both
+      // cycle A (EMAIL) and cycle B (EMAIL_1) each emit their own ✅ card.
+      const allChat = outboxPayloads('chat');
+      const acceptedCards = allChat.filter((c) => c.cardsV2?.[0]?.card.header.title.includes('✅'));
+      // old key → 1 card (EMAIL_1 merged into EMAIL → cycle B emits nothing new)
+      expect(acceptedCards, 'each accepted job must produce its own ✅ card').toHaveLength(2);
+      // No 🔁 card: EMAIL_1 is never a "relisted" appearance of EMAIL (separate job entirely).
+      const hasRelisted = allChat.some((c) => c.cardsV2?.[0]?.card.header.title.includes('🔁'));
+      expect(hasRelisted, '🔁 card must NOT be emitted (EMAIL_1 is not a relisted EMAIL)').toBe(
+        false,
+      );
+
+      // ── Two Sheet rows (one per distinct job) ──
+      // old key → only 1 row because EMAIL_1 was seen as EMAIL "still visible" → no new outbox entry
+      const sheets = outboxPayloads('sheets');
+      expect(sheets).toHaveLength(2);
+
+      // ── Each job carries its own deadline (deadline isolation, not sharing EMAIL's) ──
+      expect(emailState.dueDate).toBe(EMAIL_DUE); // Tue 2026-06-30T22:51:00+07:00
+      expect(email1State.dueDate).toBe(EMAIL1_DUE); // Wed 2026-07-01T14:21:00+07:00
+    },
+  );
+});
