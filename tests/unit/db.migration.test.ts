@@ -591,4 +591,46 @@ describe('backfill non-terminal job_key to the project-qualified key', () => {
     expect(keyByTitle(b.db, 'legacy-null')).toBe(OLD_KEY);
     b.db.close();
   });
+
+  it('re-keys a NON-terminal row whose step is NULL to the COALESCE form proj|file||role (normField parity)', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    // A non-terminal (accepted) row with a NULL step. computeXtmJobKey's normField
+    // treats NULL as '' → the key must be proj|file||role. Pre-COALESCE the SQL
+    // `lower(trim(step))` was NULL, the whole expr was NULL, the `<>` guard was NULL
+    // (false), and the row was SKIPPED — left mis-keyed. With coalesce(col,'') the row
+    // re-keys to the same value the running bot computes.
+    const NULL_STEP_OLD_KEY = 'file.docx||translator'; // legacy 3-field, empty step segment
+    a.db
+      .prepare(
+        `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash,
+                           project_name, file_name, step, role, lifecycle_status, accept_status)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        NULL_STEP_OLD_KEY,
+        'nullstep',
+        'visible',
+        NOW,
+        NOW,
+        'h',
+        RAW.projectName,
+        RAW.fileName,
+        null, // step IS NULL
+        RAW.role,
+        'accepted',
+        'none',
+      );
+    a.db.close();
+
+    const b = openDatabase(dir, NOW);
+    const expected = computeXtmJobKey({
+      projectName: RAW.projectName,
+      fileName: RAW.fileName,
+      step: null,
+      role: RAW.role,
+    });
+    expect(keyByTitle(b.db, 'nullstep')).toBe(expected);
+    b.db.close();
+  });
 });

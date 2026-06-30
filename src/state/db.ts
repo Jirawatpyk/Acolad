@@ -244,19 +244,30 @@ function widenLifecycleCheck(db: DB): void {
  *
  * Idempotent: the `job_key <> <new key>` guard makes a second run a no-op, so
  * no separate version flag is needed (the same self-gating style as the other
- * migration helpers here). Edge case: if step/role were NULL the expr would be
- * NULL, the `<>` guard would be NULL (false), and the row would be skipped — no
- * PK-NULL write, no crash; non-terminal XTM rows always populate step/role.
+ * migration helpers here). NULL step/role: each field is wrapped in
+ * `coalesce(col,'')` so a NULL folds to '' — mirroring normField's `(v ?? '')` —
+ * so a non-terminal row with a real project+file but NULL step/role re-keys to
+ * `proj|file||` instead of producing a NULL expr that the `<>` guard would read as
+ * false and skip (which would leave the row mis-keyed). No PK-NULL write, no crash.
+ *
+ * Identity guard: the predicate requires `project_name <> '' AND file_name <> ''`,
+ * NOT the vacuous `project_name IS NOT NULL` (project_name is NOT NULL DEFAULT '' —
+ * see JOB_V2_COLUMNS — so that test never excluded anything). A real XTM job always
+ * carries a non-empty project + file (`rawXtmJobSchema` enforces
+ * `z.string().trim().min(1)`), so a row with an empty identity is degenerate: re-keying
+ * it to a meaningless `|||`/`proj|||`-style key is pointless and risks a PK collision
+ * (two degenerate rows → same key → the migration would abort). Skipping them is correct.
  */
 function backfillProjectQualifiedKey(db: DB): void {
   const newKeyExpr =
-    "lower(trim(project_name)) || '|' || lower(trim(file_name)) || '|' || lower(trim(step)) || '|' || lower(trim(role))";
+    "lower(trim(coalesce(project_name,''))) || '|' || lower(trim(coalesce(file_name,''))) || '|' || lower(trim(coalesce(step,''))) || '|' || lower(trim(coalesce(role,'')))";
   db.exec(`
 UPDATE jobs
 SET job_key = ${newKeyExpr}
 WHERE (lifecycle_status IN ('new','accepted','skipped','accept_failed','rejected')
        OR accept_status IN ('accepting','accepted'))
-  AND project_name IS NOT NULL
+  AND project_name <> ''
+  AND file_name <> ''
   AND job_key <> ${newKeyExpr}`);
 }
 

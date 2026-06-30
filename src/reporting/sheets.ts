@@ -129,9 +129,13 @@ export function resolveSheetStatusAndNote(
   opts: { note: string | null; capturedAtMs: number },
 ): { status: SheetStatus; note: string | null } {
   if (state.rejectReason !== null && state.acceptStatus !== 'accepted') {
-    const left = TERMINAL_ABSENT.has(state.lifecycleStatus)
-      ? ` (left Active ${formatReadableDate(new Date(opts.capturedAtMs).toISOString())})`
-      : '';
+    // The "(left Active …)" suffix needs a finite ms — `new Date(NaN).toISOString()` throws a
+    // RangeError. A missing/invalid capturedAtMs degrades to the bare reason (no suffix) rather
+    // than crashing the row build for this job.
+    const left =
+      TERMINAL_ABSENT.has(state.lifecycleStatus) && Number.isFinite(opts.capturedAtMs)
+        ? ` (left Active ${formatReadableDate(new Date(opts.capturedAtMs).toISOString())})`
+        : '';
     return { status: 'Rejected', note: `${state.rejectReason}${left}` };
   }
   return { status: lifecycleToSheetStatus(state.lifecycleStatus), note: opts.note };

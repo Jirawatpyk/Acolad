@@ -378,6 +378,45 @@ describe('resolveSheetStatusAndNote', () => {
       ),
     ).toEqual({ status: 'Closed', note: 'done fine' });
   });
+
+  it('rejected + missing + non-finite capturedAtMs (NaN) → Rejected, bare reason, no suffix, no throw', () => {
+    // A guard against `new Date(NaN).toISOString()` throwing a RangeError when the captured
+    // timestamp is missing/invalid. The "(left Active …)" suffix needs a finite ms; without
+    // one we still emit Rejected + the bare reason rather than crashing the row build.
+    expect(() =>
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'missing', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, capturedAtMs: NaN },
+      ),
+    ).not.toThrow();
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'missing', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, capturedAtMs: NaN },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
+  });
+
+  it('rejected + accepting (mid-accept) → still Rejected (sticky until accepted, not just none)', () => {
+    // Lock the condition `acceptStatus !== 'accepted'` (not `=== 'none'`): a job whose accept
+    // is mid-flight must stay Rejected so a future refactor of the condition cannot silently
+    // flip an accepting-but-gate-blocked job back to its lifecycle status.
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'new', acceptStatus: 'accepting', rejectReason: rejectNote },
+        { note: null, capturedAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
+  });
+
+  it('rejected + failed accept → still Rejected (condition is !== accepted, not === none)', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'new', acceptStatus: 'failed', rejectReason: rejectNote },
+        { note: null, capturedAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
+  });
 });
 
 // V2_HEADER is retained for the migration detection path — keep a guard so it is not deleted.
