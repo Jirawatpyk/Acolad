@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { getThaiHolidays, resolveHolidaysForSpan } from '../../src/schedule/thaiHolidays.js';
+import {
+  getThaiHolidays,
+  resolveHolidaysForSpan,
+  holidaysForEffectiveDay,
+} from '../../src/schedule/thaiHolidays.js';
 
 describe('getThaiHolidays', () => {
   it('returns curated=true and seeded dates (incl. in-lieu) for 2026', () => {
@@ -49,5 +53,15 @@ describe('resolveHolidaysForSpan', () => {
     expect(resolveHolidaysForSpan(Date.parse('2026-06-22T10:00:00+07:00'), null).curated).toBe(
       true,
     );
+  });
+});
+
+describe('holidaysForEffectiveDay', () => {
+  it('merges the current Bangkok year and the next (the effective-day mapper span)', () => {
+    // now in 2026 → the map must carry BOTH 2026 and 2027 holidays so a deadline early next
+    // year (and its walk-back across New Year) resolves against curated data.
+    const m = holidaysForEffectiveDay(Date.parse('2026-06-30T12:00:00+07:00'));
+    expect(m.get('2026-01-01')).toBeTruthy(); // current year
+    expect(m.get('2027-01-01')).toBeTruthy(); // next year
   });
 });

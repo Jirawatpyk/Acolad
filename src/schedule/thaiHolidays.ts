@@ -27,6 +27,19 @@ export function getThaiHolidays(year: number): ThaiHolidayLookup {
   return result;
 }
 
+/** Holidays merged across the current Bangkok year and the next — the span every near-future
+ *  (≤ ~400-day feasibility cap) deadline, plus its effective-day walk-back across New Year, can
+ *  touch. Built fresh (a mutable Map assignable to ReadonlyMap) so callers can iterate/merge it
+ *  freely without poisoning the per-year cache. Used by the effective-deadline-day mapper in the
+ *  cycle (capacity) and the daily report so both bucket against the same curated calendar. */
+export function holidaysForEffectiveDay(nowMs: number): ReadonlyMap<string, string> {
+  const y = bangkokYear(nowMs);
+  return new Map<string, string>([
+    ...getThaiHolidays(y).holidays,
+    ...getThaiHolidays(y + 1).holidays,
+  ]);
+}
+
 /** Merge the holidays for every Bangkok year the now→deadline span touches —
  *  INCLUSIVE of intermediate years (F4): a span longer than a year (e.g. now Dec
  *  2026 → deadline Feb 2028) must merge 2027's holidays and fail-close if 2027 is
