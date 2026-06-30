@@ -96,7 +96,12 @@ describe('effectiveDeadlineDay (the "cutoff" — the WORKING DAY the work lands 
     // irreversible bulk path; so it must throw rather than guess.
     const noWorkdays = new Set<number>();
     expect(() =>
-      effectiveDeadlineDay(Date.parse('2026-06-30T12:00:00+07:00'), 9 * 60, noWorkdays, NO_HOLIDAYS),
+      effectiveDeadlineDay(
+        Date.parse('2026-06-30T12:00:00+07:00'),
+        9 * 60,
+        noWorkdays,
+        NO_HOLIDAYS,
+      ),
     ).toThrow(/corrupt work calendar/);
   });
 
