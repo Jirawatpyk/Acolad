@@ -48,12 +48,11 @@ export interface XtmPortalClient {
   /** Diagnostic (DIAG): capture the bot's own rendered inbox (HTML + iframe + screenshot). */
   captureDiag?(): Promise<string | undefined>;
   /**
-   * Job keys in the Closed tab (FR-014 Closed-vs-Removed; only on disappearance). `activeKeys`
-   * (the disappeared-accepted keys being classified) feeds the Closed grid's #2b cross-keying
-   * drift guard — when supplied and no recomputed Closed key matches, the read throws
-   * `LayoutChangedError` instead of returning a mis-keyed Set.
+   * Job keys in the Closed tab (FR-014 Closed-vs-Removed; only on disappearance). Can still throw
+   * `LayoutChangedError` on a real structural drift (the #8 header guard); a zero cross-key match is
+   * the routine Removed case, not drift, and is never escalated (reverted #2b — see xtmInbox.ts).
    */
-  readClosedKeys(activeKeys?: Set<string>): Promise<Set<string>>;
+  readClosedKeys(): Promise<Set<string>>;
   /** Recycle the browser if its scheduled lifetime elapsed (Constitution VIII). */
   maybeRecycle(): Promise<void>;
   dispose(): Promise<void>;
@@ -287,7 +286,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     }
   }
 
-  async readClosedKeys(activeKeys?: Set<string>): Promise<Set<string>> {
+  async readClosedKeys(): Promise<Set<string>> {
     const page = await this.browser.page();
     const frame = await this.activeFrame(page);
     this.rate.record(this.clock.nowMs()); // FR-027: the Closed read counts against the budget
@@ -308,14 +307,9 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     // drift WARN/evidence would be DORMANT in production (observers default to no-op).
     const secrets = secretValues(this.cfg);
     const keys = await readClosedKeysFromGrid(frame, {
-      // Spread the logger/activeKeys only when present — exactOptionalPropertyTypes forbids an
-      // explicit `undefined` on these optional properties (this.logger is Logger | undefined;
-      // activeKeys is omitted by callers that don't cross-key, e.g. older tests).
+      // Spread the logger only when present — exactOptionalPropertyTypes forbids an explicit
+      // `undefined` on this optional property (this.logger is Logger | undefined).
       ...(this.logger ? { logger: this.logger } : {}),
-      // #2b/#3: when the cycle hands us the disappeared-accepted keys, the grid read can detect a
-      // wrong-but-non-null project-column drift (zero cross-key match → LayoutChangedError) and
-      // fail loud instead of returning a mis-keyed Set. Empty/undefined → cross-keying stays off.
-      ...(activeKeys ? { activeKeys } : {}),
       captureEvidence: (reason) =>
         captureEvidence(page, this.cfg.STATE_DIR, reason, this.clock.nowIso(), secrets),
     });

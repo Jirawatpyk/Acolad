@@ -238,6 +238,17 @@ export function xtmHeaderInsertedBeforeProject(): string[] {
   return ['', 'Inserted Column', ...XTM_ACTIVE_HEADER_LABELS.slice(1)];
 }
 
+/**
+ * A present-but-INCOMPLETE header: only the first identity columns (Project at col 2, File WWC at
+ * col 3) have rendered; the later checked columns (File col 5, Step col 9, Role col 11) have no
+ * `<th>` yet — the signature of a transient partial render. The header-layout assertion (#8) must
+ * treat a MISSING `<th>` as not-yet-rendered (skip) and only throw on a WRONG label at a column
+ * that DID render, so this fixture must NOT trip a false LayoutChangedError.
+ */
+export function xtmHeaderPartial(): string[] {
+  return ['', 'Project', 'File WWC'];
+}
+
 /** Active tab, genuinely empty (footer "0 - 0 of 0", container present). */
 export function xtmEmptyActivePage(): string {
   return xtmActivePage([], { total: 0 });

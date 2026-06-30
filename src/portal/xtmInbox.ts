@@ -116,10 +116,12 @@ export function parseItemsTotal(footer: string | null): number | null {
  * error→system-alert path pages on-call, rather than a silent wrong-key scrape (CLAUDE.md:
  * "selector/marker หาย, locale เปลี่ยน → เก็บ evidence + system alert — ห้ามเดา parse").
  *
- * Asserts ONLY when header cells are actually rendered: an absent <thead> is left to the
- * caller's existing empty-vs-loading classifier (a still-loading grid can render its shell
- * before the header), so we never page on a transient. A present-but-shifted header is the
- * unambiguous drift signal this guards.
+ * Asserts ONLY when header cells are actually rendered: an absent OR partial <thead> is left to
+ * the caller's existing empty-vs-loading classifier (a still-loading grid can render its shell —
+ * or only the first few headers — before the rest), so we never page on a transient. A column
+ * that DID render but carries the WRONG label is the unambiguous drift signal this guards: a
+ * MISSING <th> (index past the rendered cells) is treated as not-yet-rendered and skipped, so a
+ * short header never trips a false LayoutChangedError.
  */
 async function assertHeaderLayout(
   scope: GridScope,
@@ -134,13 +136,16 @@ async function assertHeaderLayout(
     .locator('th')
     .allTextContents();
   if (headerTexts.length === 0) return; // no header rendered yet — not this guard's failure mode
-  const norm = (s: string | undefined): string => (s ?? '').trim().toLowerCase();
+  const norm = (s: string): string => s.trim().toLowerCase();
   const mismatches: string[] = [];
   for (const [col, label] of expected) {
-    if (!norm(headerTexts[col - 1]).includes(label.toLowerCase())) {
-      mismatches.push(
-        `col ${col}: expected "${label}", got "${headerTexts[col - 1]?.trim() ?? '∅'}"`,
-      );
+    const cell = headerTexts[col - 1];
+    // A column the header has not rendered yet (index past the present <th>s) reads `undefined` —
+    // treat it as a transient partial render and skip, NOT as a wrong label (which would page on a
+    // mid-load snapshot). Only a PRESENT <th> with the wrong text is the structural-drift signal.
+    if (cell === undefined) continue;
+    if (!norm(cell).includes(label.toLowerCase())) {
+      mismatches.push(`col ${col}: expected "${label}", got "${cell.trim()}"`);
     }
   }
   if (mismatches.length > 0) {
@@ -350,26 +355,6 @@ export interface ReadClosedKeysObservers {
   logger?: Pick<Logger, 'warn'>;
   /** Sanitized-evidence capture, same shape as readActiveSnapshot's `captureEvidence`. */
   captureEvidence?: (reason: string) => Promise<string | undefined>;
-  /**
-   * The known Active job-key set (finding #2b — cross-keying). When provided AND non-empty,
-   * readClosedKeys verifies that at least one recomputed Closed key intersects it. A
-   * project-column drift that reads a WRONG-but-non-null value (which the all-null guard
-   * misses) makes EVERY Closed key diverge from Active → zero intersection. With candidate
-   * rows present and zero matches, that is identity-corrupting drift → fail loud
-   * (LayoutChangedError + evidence), reusing the same error→system-alert path as #8 (#3).
-   *
-   * Wiring this is the OUT-OF-SCOPE caller's job: the cycle (xtmPollCycle) holds the Active
-   * keys of the disappeared-accepted jobs it is about to classify Closed-vs-Removed; passing
-   * those here activates the page. Until wired, the cross-keying stays DORMANT (the truthy
-   * drift WARN below and the #8 header guard remain always-on).
-   */
-  activeKeys?: Set<string>;
-  /**
-   * Observability hook for the cross-keying result (matched vs total candidate rows), called
-   * whenever `activeKeys` is provided — so a caller that prefers to escalate EXTERNALLY (raise
-   * its own alert) instead of relying on the throw can read the counts. Fired before any throw.
-   */
-  onCrossKeyCheck?: (stats: { matched: number; total: number }) => void;
 }
 
 /**
@@ -485,27 +470,15 @@ export async function readClosedKeys(
     );
   }
 
-  // #2b/#3: cross-keying escalation. A project column that reads a WRONG-but-NON-NULL value for
-  // every row slips past the all-null guard above (allProjectNull stays false), yet still makes
-  // every recomputed key diverge from Active → a silent universal Closed→Removed misclassification
-  // (mass false "removed" + held-derived capacity never returns its quota). When the caller hands
-  // us the known Active key set, we can catch exactly this: candidate rows present but ZERO keys
-  // intersect = identity drift → fail loud (the same LayoutChangedError→system-alert path as #8),
-  // never a silent mis-key. Dormant until a caller wires activeKeys (see the interface doc).
-  if (observers.activeKeys && observers.activeKeys.size > 0 && candidateCount > 0) {
-    let matched = 0;
-    for (const k of keys) if (observers.activeKeys.has(k)) matched++;
-    observers.onCrossKeyCheck?.({ matched, total: candidateCount });
-    if (matched === 0) {
-      const evidencePath = await observers.captureEvidence?.('closed_crosskey_drift');
-      throw new LayoutChangedError(
-        `Closed grid has ${candidateCount} row(s) but NONE of the recomputed keys match any known ` +
-          'Active job key — a wrong-but-non-null column (likely project) has drifted, so every ' +
-          'finished job would silently misclassify as Removed. VERIFY closed.cell selectors against ' +
-          'live Closed-grid HTML.',
-        evidencePath,
-      );
-    }
-  }
+  // NOTE (reverted #2b cross-keying): a prior fix wave added a "Closed has rows but ZERO recomputed
+  // keys match any disappeared-accepted key → throw LayoutChangedError" escalation here. It was
+  // removed: zero cross-key match CANNOT distinguish a wrong-but-non-null column drift from a
+  // legitimately Removed job (an accepted job that was cancelled is ABSENT from the Closed tab,
+  // which still holds OTHER finished rows — candidateCount > 0, matched = 0). That made a routine
+  // cancellation page on-call AND abort the cycle before upsertMany/accept, so the job stayed
+  // 'accepted' and re-entered the disappeared set every cycle → a persistent auto-accept outage
+  // and sustained paging. As the doc above states, a throw here strands the Closed-vs-Removed
+  // decision and pages on a cosmetic mismatch — a worse failure mode than the bug. The #8 header
+  // guard (a real structural column shift) and the #2a all-null WARN remain the drift signals.
   return keys;
 }

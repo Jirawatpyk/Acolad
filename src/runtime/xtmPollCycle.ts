@@ -37,16 +37,15 @@ export interface XtmAcceptor {
 
 /**
  * Reads the job keys currently in the Closed tab (FR-014). Queried ONLY when an
- * accepted job disappears from Active (cost-bounded) to tell Closed from Removed.
- *
- * `activeKeys` (the disappeared-accepted job keys this cycle is about to classify) is
- * forwarded to the Closed grid's #2b cross-keying guard: if the Closed grid has rows but
- * NONE of its recomputed keys intersect this set, a wrong-but-non-null column (likely
- * project) has drifted — the reader throws `LayoutChangedError` rather than return a
- * mis-keyed Set that would silently misclassify every finished job as Removed.
+ * accepted job disappears from Active (cost-bounded) to tell Closed from Removed. A job
+ * whose key is present → Closed; absent → Removed (cancelled/reassigned). The reader can
+ * still throw `LayoutChangedError` on a real structural drift (the #8 header guard), which
+ * propagates to the loop's handleError — but a zero cross-key match is NOT drift (a routine
+ * cancellation is absent from a Closed tab that still holds other finished rows), so it is
+ * never escalated here.
  */
 export interface ClosedReader {
-  readClosedKeys(activeKeys?: Set<string>): Promise<Set<string>>;
+  readClosedKeys(): Promise<Set<string>>;
 }
 
 /** Per-accept latency sample (T050) — both measured from detection (capturedAt). */
@@ -470,16 +469,15 @@ export class XtmPollCycle {
     // the rate budget (FR-027). bootstrap always wires a closedReader in production;
     // the guarded path keeps the job 'accepted' as-is only when one is absent (tests).
     if (disappearedAccepted.length > 0 && this.closedReader) {
-      // #2b/#3: hand the disappeared-accepted keys to the Closed read so its cross-keying guard
-      // can catch a wrong-but-non-null project-column drift (every recomputed Closed key diverges
-      // → zero match → LayoutChangedError). The throw is INTENTIONALLY not caught here: it
-      // propagates out of run() to the loop's handleError, which routes a LayoutChangedError to
-      // the layout_changed system alert + heartbeat.fail() — the SAME path an Active-scrape drift
-      // takes. Swallowing it would re-introduce the silent universal Closed→Removed misclassification
-      // (mass false "removed" + held-derived capacity never returning its quota) this guard exists
-      // to prevent. A genuinely empty Closed grid still returns an empty Set (no false page).
-      const expectedKeys = new Set(disappearedAccepted.map((s) => s.jobKey));
-      const closedKeys = await this.closedReader.readClosedKeys(expectedKeys);
+      // Closed-vs-Removed: a disappeared accepted job whose key is in the Closed tab is Closed;
+      // absent → Removed (cancelled/reassigned). A non-empty Closed grid with ZERO matching keys is
+      // the NORMAL Removed case (the tab still holds OTHER finished rows), NOT drift — so we do NOT
+      // cross-key/escalate (the reverted #2b: that throw paged on routine cancellations AND aborted
+      // the cycle before upsertMany/accept, stranding the job 'accepted' forever — see xtmInbox.ts).
+      // The reader can STILL throw LayoutChangedError on a real structural drift (#8 header guard);
+      // that is INTENTIONALLY not caught here — it propagates out of run() to the loop's handleError
+      // (layout_changed alert + heartbeat.fail), the same path an Active-scrape drift takes.
+      const closedKeys = await this.closedReader.readClosedKeys();
       for (const s of disappearedAccepted) {
         if (closedKeys.has(s.jobKey)) {
           s.lifecycleStatus = 'closed';

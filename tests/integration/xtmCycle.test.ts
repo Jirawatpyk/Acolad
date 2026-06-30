@@ -423,30 +423,48 @@ describe('XtmPollCycle Closed/Removed (FR-014, T042)', () => {
     expect(only().lifecycleStatus).toBe('removed');
   });
 
-  it('#2b/#3: hands the disappeared-accepted keys to the Closed read, and a Closed-grid identity drift (LayoutChangedError) is raised LOUD — never a silent Removed', async () => {
+  it('reverted #2b: a disappeared accepted job ABSENT from a NON-empty Closed grid is Removed — no throw, no activeKeys forwarded, cycle still accepts a co-present job', async () => {
     fresh();
-    // Simulate the real readClosedKeysFromGrid #2b cross-keying throw: Closed rows are present
-    // but ZERO recomputed keys match any disappeared-accepted key (a wrong-but-non-null project
-    // column drift). The reader records the activeKeys it was handed so we can prove the cross-
-    // keying INPUT is now wired by the cycle.
-    let received: Set<string> | undefined;
+    // The routine "cancelled → Removed" case (V10b): the Closed tab still holds OTHER
+    // previously-finished rows (≥1 candidate) but NOT this job's key. Zero cross-key match is
+    // NORMAL here, NOT drift — so the reader must be called with NO activeKeys (the #2b cross-key
+    // escalation was reverted) and the cycle must classify 'removed' without throwing/aborting.
+    let argCount = -1;
     const reader = {
-      async readClosedKeys(activeKeys?: Set<string>): Promise<Set<string>> {
-        received = activeKeys;
-        throw new LayoutChangedError('Closed grid identity drift (cross-key zero match)');
+      async readClosedKeys(...args: unknown[]): Promise<Set<string>> {
+        argCount = args.length;
+        return new Set(['OtherProject|other.docx|PE 1|Corrector']); // ≥1 unrelated finished row
+      },
+    };
+    const acc = new StubAcceptor();
+    const cycle = new XtmPollCycle(db, cfg(), acc, reader);
+    await cycle.run(snap([xraw()], 'c1')); // accept job A
+    await cycle.run(snap([], 'c2')); // A absent once (flicker)
+    // A absent twice → Closed check (≥1 unrelated row) → Removed; a fresh job B in the SAME cycle
+    // must STILL be accepted, proving the cycle reached upsertMany + the accept block (no abort).
+    const jobB = xraw({ xtmTaskId: 'ID-2', fileName: 'b.docx' });
+    const summary = await cycle.run(snap([jobB], 'c3'));
+    expect(summary.removed).toBe(1);
+    expect(argCount).toBe(0); // reverted: the cross-key activeKeys arg is no longer forwarded
+    expect(only('a.docx').lifecycleStatus).toBe('removed'); // upsertMany ran
+    expect(only('b.docx').lifecycleStatus).toBe('accepted'); // accept block ran — no abort
+  });
+
+  it('a LayoutChangedError from the Closed read (e.g. a #8 header drift) still propagates LOUD — never swallowed into a silent Removed', async () => {
+    fresh();
+    // The cross-key escalation is gone, but the Closed read can STILL throw on a real structural
+    // drift (the #8 header guard). Such a throw must propagate out of run() to the loop's
+    // handleError (layout_changed alert + heartbeat.fail), NOT be swallowed into 'removed'.
+    const reader = {
+      async readClosedKeys(): Promise<Set<string>> {
+        throw new LayoutChangedError('Closed grid header layout drifted');
       },
     };
     const cycle = new XtmPollCycle(db, cfg(), new StubAcceptor(), reader);
     await cycle.run(snap([xraw()], 'c1')); // accept
     await cycle.run(snap([], 'c2')); // absent once (flicker)
-    // absent twice → disappeared-accepted → Closed read throws → must PROPAGATE (the loop's
-    // handleError routes LayoutChangedError → layout_changed alert + heartbeat.fail), NOT be
-    // swallowed into a silent 'removed' classification.
     await expect(cycle.run(snap([], 'c3'))).rejects.toBeInstanceOf(LayoutChangedError);
-    // The cycle passed exactly the disappeared-accepted job's key as the cross-keying input.
-    expect(received).toEqual(new Set([computeXtmJobKey(xraw())]));
     // The throw aborted before persisting any reclassification → the job is NOT silently Removed.
-    expect(only().lifecycleStatus).not.toBe('removed');
     expect(only().lifecycleStatus).toBe('accepted');
   });
 });

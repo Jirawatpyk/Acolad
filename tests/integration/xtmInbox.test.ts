@@ -13,6 +13,7 @@ import {
   xtmBrokenActivePage,
   xtmLoadingActivePage,
   xtmHeaderInsertedBeforeProject,
+  xtmHeaderPartial,
   malayRow,
   thaiRow,
   xtmRow,
@@ -175,6 +176,16 @@ describe('readActiveSnapshot (XTM Active grid)', () => {
       readActiveSnapshot(page, 'cycle-1', '2026-06-19T10:00:00+07:00', captureEvidence, FAST),
     ).rejects.toBeInstanceOf(LayoutChangedError);
     expect(captureEvidence).toHaveBeenCalledWith('layout_changed');
+  });
+
+  it('#8 (MINOR): does NOT throw on a present-but-INCOMPLETE Active header (fewer th than expected)', async () => {
+    // A transient partial render: only Project (col 2) + File WWC (col 3) headers exist; the later
+    // checked columns (File/Step/Role) have no <th> yet. A missing th must be skipped, NOT read as
+    // undefined → false LayoutChangedError. The body row is complete, so the scrape proceeds.
+    const snap = await snapshotOf(
+      xtmActivePage([malayRow()], { headerLabels: xtmHeaderPartial() }),
+    );
+    expect(snap.jobs).toHaveLength(1);
   });
 
   it('#8: proceeds normally when the header layout is intact (no false positive)', async () => {
@@ -346,51 +357,26 @@ describe('readClosedKeys (Closed-vs-Removed disambiguation)', () => {
     expect(captureEvidence).toHaveBeenCalledWith('layout_changed');
   });
 
-  // ── #2b/#3: cross-keying escalation — wrong-but-non-null project drift the all-null guard misses ──
-  it('#2b: throws + captures evidence when activeKeys are provided but ZERO Closed keys intersect', async () => {
-    // Closed reads a non-null WRONG project for every row → recomputed keys never match the known
-    // Active keys. allProjectNull is FALSE (project is non-null), so the all-null guard misses it;
-    // the cross-keying check catches it — candidates present + zero intersect → fail loud (#3).
-    const captureEvidence = vi.fn(async () => 'state/evidence/closed_crosskey_drift');
-    const onCrossKeyCheck = vi.fn();
-    const activeKey = computeXtmJobKey({
-      projectName: 'Newswire Release 4712942',
-      fileName: '4712942-1-21 (ID-1b270f065098)_captions.json',
-      step: 'Post-Editing (PE) 1',
-      role: 'Corrector',
-    });
-    await page.setContent(xtmActivePage([malayRow({ project: 'WRONG PROJECT NAME' })]));
-    await expect(
-      readClosedKeys(page, {
-        captureEvidence,
-        onCrossKeyCheck,
-        activeKeys: new Set([activeKey]),
-      }),
-    ).rejects.toBeInstanceOf(LayoutChangedError);
-    // The matched/total count is exposed (so an out-of-scope caller could also escalate).
-    expect(onCrossKeyCheck).toHaveBeenCalledWith({ matched: 0, total: 1 });
-    expect(captureEvidence).toHaveBeenCalledWith('closed_crosskey_drift');
+  // ── reverted #2b: zero cross-key match is the NORMAL Removed case, NOT drift — never throw ──
+  it('returns the Closed key set WITHOUT throwing even when no row matches any prior job (zero cross-key match = routine Removed, not drift)', async () => {
+    // A cancelled accepted job → its key is absent from the Closed tab, which still holds OTHER
+    // finished rows (V10b). The reverted cross-key escalation must NOT turn this routine case into
+    // a LayoutChangedError: readClosedKeys returns the keys and never pages. The #8 header guard
+    // (real structural drift) and the #2a all-null WARN remain the only drift signals.
+    const captureEvidence = vi.fn(async () => undefined);
+    await page.setContent(xtmActivePage([malayRow({ project: 'Some Other Finished Project' })]));
+    const keys = await readClosedKeys(page, { captureEvidence });
+    expect(keys.size).toBe(1); // key emitted normally
+    expect(captureEvidence).not.toHaveBeenCalled(); // no evidence-as-alert, no page
   });
 
-  it('#2b: does NOT escalate when at least one Closed key matches an Active key (happy path)', async () => {
-    const onCrossKeyCheck = vi.fn();
-    const activeKey = computeXtmJobKey({
-      projectName: 'Newswire Release 4712942',
-      fileName: '4712942-1-21 (ID-1b270f065098)_captions.json',
-      step: 'Post-Editing (PE) 1',
-      role: 'Corrector',
-    });
-    await page.setContent(xtmActivePage([malayRow()]));
-    const keys = await readClosedKeys(page, { onCrossKeyCheck, activeKeys: new Set([activeKey]) });
-    expect(keys.has(activeKey)).toBe(true);
-    expect(onCrossKeyCheck).toHaveBeenCalledWith({ matched: 1, total: 1 });
-  });
-
-  it('#2b: cross-keying stays DORMANT when no activeKeys are provided (production back-compat)', async () => {
-    // The production caller (xtmClient.readClosedKeys) does not pass activeKeys yet, so the
-    // zero-match throw must NOT fire — readClosedKeys returns the key set as before, never throws.
-    await page.setContent(xtmActivePage([malayRow({ project: 'WRONG' })]));
-    const keys = await readClosedKeys(page); // no observers, no activeKeys
-    expect(keys.size).toBe(1); // returns normally, no escalation
+  // ── #8 (MINOR): tolerate a present-but-incomplete header — only a WRONG label at a rendered
+  // column is drift; a missing <th> is a transient partial render, not a layout shift. ──
+  it('#8: does NOT throw on a present-but-INCOMPLETE Closed header (fewer th than expected — transient partial render)', async () => {
+    // Only the first identity columns rendered (Project, File WWC); cols 5/9/11 have no <th> yet.
+    // A missing th must be treated as not-yet-rendered (skip), not read as undefined → false drift.
+    await page.setContent(xtmActivePage([malayRow()], { headerLabels: xtmHeaderPartial() }));
+    const keys = await readClosedKeys(page);
+    expect(keys.size).toBe(1); // scrape proceeds, no false LayoutChangedError
   });
 });
