@@ -64,4 +64,24 @@ describe('holidaysForEffectiveDay', () => {
     expect(m.get('2026-01-01')).toBeTruthy(); // current year
     expect(m.get('2027-01-01')).toBeTruthy(); // next year
   });
+
+  it('merges the PRIOR Bangkok year (Y-1) — the safety-critical New-Year back-walk invariant', () => {
+    // Safety-critical: the effective-day walk moves BACKWARD, so an early-January before-09:00
+    // deadline (now already in Y) walks into Dec 31 of Y-1 (New Year's Eve, a curated holiday).
+    // If Y-1 is NOT merged, 12-31 reads as a working day → the bucket under-counts → New-Year
+    // over-accept (the irreversible direction). now in 2027 → assert 2026 (Y-1) is present.
+    const m = holidaysForEffectiveDay(Date.parse('2027-06-30T12:00:00+07:00'));
+    expect(m.get('2026-12-31')).toBeTruthy(); // PRIOR year (New Year's Eve) merged in
+    expect(m.get('2026-01-01')).toBeTruthy(); // and the rest of the prior year
+  });
+
+  it('merges out to Y+2 so a near-year-end held deadline (within the 400-day feasibility reach) is covered (#9)', () => {
+    // now late in 2026 → a held job's deadline + 400-day reach can land in 2028 (Y+2). The mapper
+    // must span the same range feasibility resolves (resolveHolidaysForSpan → yLo+2), so it never
+    // reads a Y+2 holiday as a working day while feasibility had already vetted it. 2027 (Y+1) is
+    // curated, so assert it is present; the loop runs from Y-1 (2025) to Y+2 (2028) inclusive.
+    const m = holidaysForEffectiveDay(Date.parse('2026-12-20T12:00:00+07:00'));
+    expect(m.get('2027-01-01')).toBeTruthy(); // Y+1 present
+    expect(m.get('2027-12-31')).toBeTruthy(); // and the far end of Y+1 (back-walk guard for a 2028 DL)
+  });
 });

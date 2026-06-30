@@ -232,7 +232,10 @@ export class XtmPollCycle {
     // Normally zero — the F1 lock keeps a held job's deadline; a non-zero count means a
     // deadline-less job was held on the gate-OFF path (or the lock was bypassed) — investigate.
     if (scheduleEnabled) {
-      const heldNoDeadline = this.store.heldJobsMissingDeadline();
+      // Pass the SAME effDayOf mapper the seed uses (F10): a held job is "missing-deadline" iff its
+      // bucket key is null, so the detector and the seed can never disagree about which jobs were
+      // dropped from the per-deadline-day capacity count.
+      const heldNoDeadline = this.store.heldJobsMissingDeadline(effDayOf);
       if (heldNoDeadline.length > 0) {
         raiseAlert(
           this.db,

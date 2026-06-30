@@ -27,22 +27,30 @@ export function getThaiHolidays(year: number): ThaiHolidayLookup {
   return result;
 }
 
-/** Holidays merged across the PREVIOUS, current, and next Bangkok year — the span every
- *  near-future (≤ ~400-day feasibility cap) deadline plus its effective-day walk-back can touch.
- *  The PRIOR year is required because the back-walk moves BACKWARD: an early-January before-09:00
- *  deadline (evaluated when now is already in year Y) walks into Dec 31 of Y-1 (New Year's Eve, a
- *  curated holiday) — without Y-1 loaded it reads as a working day → bucket under-counts →
- *  over-accept (the irreversible direction). An uncurated Y-1 just merges an empty map (safe).
- *  Built fresh (a mutable Map assignable to ReadonlyMap) so callers can iterate/merge it freely
- *  without poisoning the per-year cache. Used by the effective-deadline-day mapper in the cycle
- *  (capacity) and the daily report so both bucket against the same curated calendar. */
+/** Holidays merged across `[Y-1 .. Y+2]` (Bangkok years) — the full span the effective-deadline-day
+ *  mapper can touch, kept in lock-step with what FEASIBILITY resolves (`resolveHolidaysForSpan`
+ *  bounds a now→deadline span to `yLo..yLo+2`, i.e. up to `Y+2` for the ~400-day feasibility cap).
+ *  Both ends matter:
+ *   - **Y-1 (back-walk guard):** the effective-day walk moves BACKWARD — an early-January
+ *     before-09:00 deadline (evaluated when now is already in year Y) walks into Dec 31 of Y-1
+ *     (New Year's Eve, a curated holiday). Without Y-1 loaded it reads as a working day → bucket
+ *     under-counts → over-accept (the irreversible direction).
+ *   - **Y+2 (far-deadline guard):** near year-end, a held job's deadline + 400-day reach can land
+ *     in Y+2. With only `[Y-1..Y+1]` the mapper would read a Y+2 holiday as a working day → the
+ *     same under-count → over-accept, while feasibility (which spans to Y+2) had already vetted it.
+ *     Merging to Y+2 keeps the two from diverging.
+ *  An uncurated year just merges an empty map (safe). Built fresh (a mutable Map assignable to
+ *  ReadonlyMap) so callers can iterate/merge it freely without poisoning the per-year cache. Used
+ *  by the effective-deadline-day mapper in the cycle (capacity) and the daily report so both
+ *  bucket against the same curated calendar that feasibility uses. */
 export function holidaysForEffectiveDay(nowMs: number): ReadonlyMap<string, string> {
   const y = bangkokYear(nowMs);
-  return new Map<string, string>([
-    ...getThaiHolidays(y - 1).holidays,
-    ...getThaiHolidays(y).holidays,
-    ...getThaiHolidays(y + 1).holidays,
-  ]);
+  const out = new Map<string, string>();
+  // [Y-1 .. Y+2] inclusive — matches resolveHolidaysForSpan's yLo+2 reach plus the Y-1 back-walk.
+  for (let yr = y - 1; yr <= y + 2; yr++) {
+    for (const [d, name] of getThaiHolidays(yr).holidays) out.set(d, name);
+  }
+  return out;
 }
 
 /** Merge the holidays for every Bangkok year the now→deadline span touches —
