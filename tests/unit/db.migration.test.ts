@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../../src/state/db.js';
 import { Outbox } from '../../src/state/outbox.js';
+import { computeXtmJobKey } from '../../src/detection/jobKey.js';
 
 const NOW = '2026-06-19T10:00:00.000Z';
 
@@ -473,5 +474,121 @@ describe('db migration v1 -> v2 (existing production db)', () => {
     ).value;
     expect(v).toBe('2');
     db.close();
+  });
+});
+
+describe('backfill non-terminal job_key to the project-qualified key', () => {
+  // Raw (un-normalized) XTM fields: leading/trailing spaces + mixed case exercise
+  // BOTH halves of normField (trim AND lower). A SQL expr missing either half
+  // (e.g. trim without lower) would diverge from computeXtmJobKey and fail here.
+  const RAW = {
+    projectName: '  ProjAlpha  ',
+    fileName: ' File.DOCX ',
+    step: ' Translate ',
+    role: ' Translator ',
+  };
+  // The legacy 3-field key the row carried BEFORE projectName joined the key.
+  const OLD_KEY = 'file.docx|translate|translator';
+  // Source-of-truth target: the SQL backfill must reproduce this byte-for-byte.
+  const NEW_KEY = computeXtmJobKey(RAW);
+
+  /** Seed one jobs row with the RAW fields, a chosen old key, and a lifecycle/accept state. */
+  function seedJob(
+    db: Database.Database,
+    jobKey: string,
+    titleHandle: string,
+    lifecycle: string | null,
+    acceptStatus = 'none',
+  ): void {
+    db.prepare(
+      `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash,
+                         project_name, file_name, step, role, lifecycle_status, accept_status)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      jobKey,
+      titleHandle,
+      'visible',
+      NOW,
+      NOW,
+      'h',
+      RAW.projectName,
+      RAW.fileName,
+      RAW.step,
+      RAW.role,
+      lifecycle,
+      acceptStatus,
+    );
+  }
+
+  /** Read a row's current job_key via a stable non-key handle (job_key changes under us). */
+  function keyByTitle(db: Database.Database, titleHandle: string): string {
+    return (
+      db.prepare('SELECT job_key AS k FROM jobs WHERE title=?').get(titleHandle) as { k: string }
+    ).k;
+  }
+
+  it('re-keys a NON-terminal (accepted) row to the project-qualified key (trim + lower)', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    seedJob(a.db, OLD_KEY, 'nonterminal', 'accepted');
+    a.db.close();
+
+    const b = openDatabase(dir, NOW); // re-open runs migrate() -> backfill
+    expect(keyByTitle(b.db, 'nonterminal')).toBe(NEW_KEY);
+    b.db.close();
+  });
+
+  it('leaves a TERMINAL (closed) row key UNCHANGED', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    seedJob(a.db, OLD_KEY, 'terminal', 'closed');
+    a.db.close();
+
+    const b = openDatabase(dir, NOW);
+    expect(keyByTitle(b.db, 'terminal')).toBe(OLD_KEY);
+    b.db.close();
+  });
+
+  it('is idempotent — a second migration run is a no-op on the re-keyed row', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    seedJob(a.db, OLD_KEY, 'idem', 'accepted');
+    a.db.close();
+
+    const b = openDatabase(dir, NOW); // first backfill: re-keys
+    const k1 = keyByTitle(b.db, 'idem');
+    b.db.close();
+
+    const c = openDatabase(dir, NOW); // second backfill: must be a no-op
+    const k2 = keyByTitle(c.db, 'idem');
+    c.db.close();
+
+    expect(k1).toBe(NEW_KEY);
+    expect(k2).toBe(NEW_KEY);
+  });
+
+  it('re-keys a mid-accept row (lifecycle NULL, accept_status accepting) via the OR branch', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    seedJob(a.db, OLD_KEY, 'accepting', null, 'accepting');
+    a.db.close();
+
+    const b = openDatabase(dir, NOW);
+    expect(keyByTitle(b.db, 'accepting')).toBe(NEW_KEY);
+    b.db.close();
+  });
+
+  it('leaves a legacy row (lifecycle_status NULL, accept none) UNCHANGED — predicate is the explicit enum, NOT "NOT IN"', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    // project_name is set + job_key differs, so ONLY the lifecycle/accept predicate
+    // can keep this row out of the backfill. A NOT IN ('closed','missing','removed')
+    // predicate would wrongly pull this NULL-lifecycle row in.
+    seedJob(a.db, OLD_KEY, 'legacy-null', null, 'none');
+    a.db.close();
+
+    const b = openDatabase(dir, NOW);
+    expect(keyByTitle(b.db, 'legacy-null')).toBe(OLD_KEY);
+    b.db.close();
   });
 });

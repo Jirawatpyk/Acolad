@@ -161,6 +161,7 @@ function migrate(db: DB): void {
     ensureJobColumns(db);
     ensureOutboxChannel(db);
     widenLifecycleCheck(db);
+    backfillProjectQualifiedKey(db);
     db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
       'schema_version',
       String(SCHEMA_VERSION),
@@ -212,6 +213,46 @@ function widenLifecycleCheck(db: DB): void {
   db.exec(createJobsTableSql(allColumns, false));
   db.exec(`INSERT INTO jobs (${colNames}) SELECT ${colNames} FROM jobs_old`);
   db.exec('DROP TABLE jobs_old');
+}
+
+/**
+ * One-time backfill: re-key NON-TERMINAL rows from the legacy 3-field
+ * `file|step|role` key to the project-qualified `project|file|step|role` key
+ * (the new `computeXtmJobKey` shape — collision fix). Without this, a held row
+ * still carrying the old key would, on the next deploy, fail to match its
+ * freshly-computed key — mis-disappearing and then re-accepting itself.
+ *
+ * Runs INSIDE migrate()'s enclosing transaction, AFTER ensureJobColumns /
+ * widenLifecycleCheck so the column set (and the widened lifecycle CHECK) is
+ * final.
+ *
+ * The SQL `lower(trim(...))` MUST mirror `computeXtmJobKey`'s normField
+ * (`(v ?? '').trim().toLowerCase()`) — a divergence means the re-keyed value
+ * would not match the value the running bot computes. `newKeyExpr` is shared by
+ * the SET and the `<>` guard so the two can never drift.
+ *
+ * Predicate uses the EXPLICIT non-terminal enum, NOT `NOT IN
+ * ('closed','missing','removed')`: legacy feature-001 rows carry
+ * lifecycle_status = NULL and must be left untouched — a NOT IN test would
+ * wrongly pull them in (NULL is not in the excluded set). Terminal rows
+ * (closed/missing/removed, and not mid-accept) keep their old keys.
+ *
+ * Idempotent: the `job_key <> <new key>` guard makes a second run a no-op, so
+ * no separate version flag is needed (the same self-gating style as the other
+ * migration helpers here). Edge case: if step/role were NULL the expr would be
+ * NULL, the `<>` guard would be NULL (false), and the row would be skipped — no
+ * PK-NULL write, no crash; non-terminal XTM rows always populate step/role.
+ */
+function backfillProjectQualifiedKey(db: DB): void {
+  const newKeyExpr =
+    "lower(trim(project_name)) || '|' || lower(trim(file_name)) || '|' || lower(trim(step)) || '|' || lower(trim(role))";
+  db.exec(`
+UPDATE jobs
+SET job_key = ${newKeyExpr}
+WHERE (lifecycle_status IN ('new','accepted','skipped','accept_failed','rejected')
+       OR accept_status IN ('accepting','accepted'))
+  AND project_name IS NOT NULL
+  AND job_key <> ${newKeyExpr}`);
 }
 
 /**
