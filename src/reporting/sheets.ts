@@ -115,11 +115,10 @@ export function lifecycleToSheetStatus(s: XtmLifecycleStatus): SheetStatus {
 }
 
 /**
- * Lifecycle statuses that mean the job has left the Active grid (the "terminal-absent" set). This is
- * the exact COMPLEMENT of the non-terminal enum in db.ts's `backfillProjectQualifiedKey`
- * (`new`/`accepted`/`skipped`/`accept_failed`/`rejected`). There is no shared canonical constant, so
- * if a new `XtmLifecycleStatus` is ever added, update BOTH this set and that db.ts predicate together
- * (Finding #14).
+ * Lifecycle statuses that mean the job has left the Active grid (the "terminal-absent" set) —
+ * the complement of the still-in-Active states `new`/`accepted`/`skipped`/`accept_failed`/`rejected`
+ * within the `XtmLifecycleStatus` union. There is no shared canonical constant, so if a new
+ * `XtmLifecycleStatus` is ever added, classify it here explicitly (terminal-absent vs still-active).
  */
 const TERMINAL_ABSENT: ReadonlySet<XtmLifecycleStatus> = new Set(['missing', 'closed', 'removed']);
 
