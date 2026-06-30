@@ -63,6 +63,7 @@ export function computeXtmSnapshotHash(job: XtmRawJob): string {
     job.dueDate ?? '',
     job.dueRaw ?? '',
     job.words === null ? '' : String(job.words),
+    job.fileWwc === null ? '' : String(job.fileWwc),
     job.step ?? '',
     job.role ?? '',
     job.acceptAvailable ? '1' : '0',

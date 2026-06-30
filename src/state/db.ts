@@ -138,6 +138,7 @@ const JOB_V2_COLUMNS: ColumnDef[] = [
   { name: 'due_date', ddl: 'due_date TEXT' },
   { name: 'due_raw', ddl: 'due_raw TEXT' },
   { name: 'words', ddl: 'words INTEGER' },
+  { name: 'file_wwc', ddl: 'file_wwc INTEGER' },
   { name: 'step', ddl: 'step TEXT' },
   { name: 'role', ddl: 'role TEXT' },
   { name: 'eligible', ddl: 'eligible INTEGER NOT NULL DEFAULT 0' },

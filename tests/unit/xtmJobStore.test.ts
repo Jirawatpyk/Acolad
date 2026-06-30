@@ -27,6 +27,7 @@ const xstate = (over: Partial<XtmJobState> = {}): XtmJobState => ({
   dueDate: null,
   dueRaw: '18-Jun-2026 19:25',
   words: 100,
+  fileWwc: 42,
   step: 'Post-Editing (PE) 1',
   role: 'Corrector',
   eligible: true,
@@ -61,6 +62,7 @@ describe('XtmJobStore', () => {
     expect(s?.fileName).toBe('chapter-01.docx');
     expect(s?.targetLang).toBe('Malay (Malaysia)');
     expect(s?.words).toBe(100);
+    expect(s?.fileWwc).toBe(42);
     expect(s?.eligible).toBe(true);
     expect(s?.lifecycleStatus).toBe('new');
     expect(s?.acceptStatus).toBe('none');
@@ -92,6 +94,19 @@ describe('XtmJobStore', () => {
     const store = freshStore();
     store.upsertMany([xstate({ jobKey: 'k2', fileName: 'b.html', eligible: false })]);
     expect(store.loadAll().get('k2')?.eligible).toBe(false);
+  });
+
+  it('round-trips fileWwc including null and 0 (0 is a real value, not blank)', () => {
+    const store = freshStore();
+    store.upsertMany([
+      xstate({ jobKey: 'fw-null', fileName: 'n.docx', fileWwc: null }),
+      xstate({ jobKey: 'fw-zero', fileName: 'z.docx', fileWwc: 0 }),
+      xstate({ jobKey: 'fw-num', fileName: 'd.docx', fileWwc: 427 }),
+    ]);
+    const loaded = store.loadAll();
+    expect(loaded.get('fw-null')?.fileWwc).toBeNull();
+    expect(loaded.get('fw-zero')?.fileWwc).toBe(0);
+    expect(loaded.get('fw-num')?.fileWwc).toBe(427);
   });
 
   it('loadAll ignores legacy partner rows (empty file_name)', () => {

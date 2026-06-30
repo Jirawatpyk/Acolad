@@ -271,6 +271,7 @@ const makeJob = (over: Partial<XtmJobState> = {}): XtmJobState => ({
   dueDate: '2026-06-30T00:00:00Z',
   dueRaw: null,
   words: 1500,
+  fileWwc: null,
   step: 'PE 1',
   role: 'Corrector',
   eligible: true,

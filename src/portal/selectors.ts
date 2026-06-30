@@ -85,6 +85,9 @@ export const XTM = {
     // Indices 1–11 are identical on Active and Closed (omitted cols are trailing).
     cell: {
       project: 'td:nth-child(2)', // RawJob.projectName
+      // File WWC (Weighted Word Count) sits between Project(2) and Customer(4) — logged to
+      // the Sheet only (not used for capacity); read like Words (digits-only, null when absent).
+      fileWwc: 'td:nth-child(3)', // RawJob.fileWwc
       file: 'td:nth-child(5)', // RawJob.fileName + D2 job-key basis
       source: 'td:nth-child(6)', // RawJob.sourceLang ("English (USA)")
       target: 'td:nth-child(7)', // RawJob.targetLang — compared to Malay (config)

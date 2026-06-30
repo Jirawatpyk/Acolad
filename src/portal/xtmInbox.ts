@@ -38,6 +38,7 @@ const rawXtmJobSchema = z.object({
   dueDate: z.string().nullable(),
   dueRaw: z.string().nullable(),
   words: z.number().int().nonnegative().nullable(),
+  fileWwc: z.number().int().nonnegative().nullable(),
   step: z.string().trim().min(1).nullable(),
   role: z.string().trim().min(1).nullable(),
   acceptAvailable: z.boolean(),
@@ -141,6 +142,7 @@ export async function readActiveSnapshot(
         step: text(el, sel.step),
         role: text(el, sel.role),
         wordsRaw: text(el, sel.words),
+        fileWwcRaw: text(el, sel.fileWwc),
       }));
     },
     {
@@ -153,6 +155,7 @@ export async function readActiveSnapshot(
       step: XTM.active.cell.step,
       role: XTM.active.cell.role,
       words: XTM.active.cell.words,
+      fileWwc: XTM.active.cell.fileWwc,
     },
   );
   // A rendered DATA row (non-empty project/file) that carries no per-row kebab means
@@ -179,6 +182,7 @@ export async function readActiveSnapshot(
       dueDate: normalizeXtmDue(row.dueRaw),
       dueRaw: row.dueRaw,
       words: parseXtmWords(row.wordsRaw),
+      fileWwc: parseXtmWords(row.fileWwcRaw),
       step: row.step,
       role: row.role,
       // D6 (operator-confirmed): acceptability is NOT in the grid cells — it is the
