@@ -141,7 +141,7 @@ export class XtmJobStore {
           lifecycleStatus: s.lifecycleStatus,
           acceptStatus: s.acceptStatus,
           acceptedAt: s.acceptedAt,
-          rejectReason: s.rejectReason ?? null,
+          rejectReason: s.rejectReason,
           status: s.status,
           firstSeenAt: s.firstSeenAt,
           lastSeenAt: s.lastSeenAt,
