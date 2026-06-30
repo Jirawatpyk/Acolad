@@ -300,12 +300,13 @@ export interface ReadClosedKeysObservers {
  * empty set when the grid is genuinely empty; the Closed grid shares the Active
  * column positions (indices 1–11), so the same file/step/role cells apply.
  *
- * That shared-layout assumption is LOAD-BEARING but only recon-asserted, and it INCLUDES File
- * WWC being at col 3 on Closed. If the live Closed grid OMITS File WWC (plausible — a finished
- * task has no remaining weighted count), step/role shift LEFT by one, the borrowed selectors
- * read the wrong cells, and the recomputed key never matches the Active `_job_key` → a finished
- * job silently misclassifies as "removed" (and, with held-derived capacity, fails to return its
- * quota). We cannot fully fix that without a live Closed-grid recon. As a NON-DESTABILIZING
+ * VERIFIED 2026-06-30 (live recon): the Closed grid DOES carry File WWC at col 3 and matches
+ * Active through Role (file=5/step=9/role=11; Closed is 12 cols, dropping Words/Progress to the
+ * RIGHT of Role, beyond what we read here) — so the borrowed Active selectors are correct. Were
+ * XTM to later drop File WWC from Closed, step/role would shift LEFT by one, the borrowed selectors
+ * would read the wrong cells, and the recomputed key would never match the Active `_job_key` → a
+ * finished job would silently misclassify as "removed" (and, with held-derived capacity, fail to
+ * return its quota). As a future-proof NON-DESTABILIZING
  * drift detector: when Closed data rows are present (kebab + non-empty file) but EVERY such row
  * reads null step AND null role — the systematic-mismatch signature — capture sanitized evidence
  * and emit a WARN. We do NOT throw/page: a throw here strands the Closed-vs-Removed decision and

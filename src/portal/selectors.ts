@@ -128,16 +128,14 @@ export const XTM = {
       project: 'td:nth-child(2)',
       file: 'td:nth-child(5)', // join key vs the disappeared Active job
       target: 'td:nth-child(7)',
-      // VERIFY against live Closed-grid HTML — step/role are BORROWED from Active on the recon-
-      // asserted shared-layout assumption (Active indices 1–11 == Closed 1–11). That assumption
-      // INCLUDES File WWC at col 3: if the live Closed grid OMITS File WWC (plausible — a finished
-      // task has no remaining weighted count), step/role shift LEFT by one and these MUST change.
-      // readClosedKeys emits a structured WARN + evidence (closed_layout_drift) when every Closed
-      // row reads null step AND role — the systematic-mismatch signal — but the real fix needs a
-      // live Closed-grid recon to confirm the column set. Same strings as Active TODAY = NO
-      // behavior change; this only centralizes + documents the assumption.
-      step: 'td:nth-child(9)', // BORROWED from Active — see VERIFY note above
-      role: 'td:nth-child(11)', // BORROWED from Active — see VERIFY note above
+      // VERIFIED 2026-06-30 (live recon): the Closed grid carries File WWC at col 3 and shares the
+      // Active column positions through Role — File=5/Step=9/Role=11 match Active exactly (Closed is
+      // 12 cols, dropping Words/Progress to the RIGHT of Role, beyond what readClosedKeys reads), so
+      // these borrowed-from-Active selectors are CORRECT. readClosedKeys still emits a structured
+      // WARN + evidence (closed_layout_drift) when every Closed row reads null step AND role — now a
+      // future-proof regression detector that fires only if XTM later changes the Closed layout.
+      step: 'td:nth-child(9)', // VERIFIED col 9 on Closed (live recon 2026-06-30) — matches Active
+      role: 'td:nth-child(11)', // VERIFIED col 11 on Closed (live recon 2026-06-30) — matches Active
       dueDate: '[data-testid="dueDate-fullDate"]',
     },
   },
