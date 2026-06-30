@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import assert from 'node:assert';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1615,10 +1616,14 @@ describe('XtmPollCycle regression: EMAIL vs EMAIL_1 project collision (incident 
       const allStates = [...new XtmJobStore(db).loadAll().values()];
       expect(allStates).toHaveLength(2); // old key → 1 (EMAIL_1 merged into EMAIL)
 
-      const emailState = allStates.find((s) => s.jobKey === emailKey)!;
-      const email1State = allStates.find((s) => s.jobKey === email1Key)!;
+      const emailState = allStates.find((s) => s.jobKey === emailKey);
+      const email1State = allStates.find((s) => s.jobKey === email1Key);
       expect(emailState, 'EMAIL job must be in DB').toBeDefined();
       expect(email1State, 'EMAIL_1 job must be in DB').toBeDefined();
+      // Narrow for the property accesses below — a regression now yields a readable
+      // toBeDefined() failure above instead of a TypeError on a non-null-asserted undefined.
+      assert(emailState);
+      assert(email1State);
 
       // ── Both accepted independently ──
       expect(emailState.lifecycleStatus).toBe('accepted');

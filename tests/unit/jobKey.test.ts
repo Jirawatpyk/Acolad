@@ -74,7 +74,7 @@ const xjob = (over: Partial<XtmRawJob> = {}): XtmRawJob => ({
   ...over,
 });
 
-describe('computeXtmJobKey (R3 — fileId|step|role composite)', () => {
+describe('computeXtmJobKey (R3 — projectName|fileName|step|role composite)', () => {
   it('is deterministic for the same file/step/role', () => {
     expect(computeXtmJobKey(xjob())).toBe(computeXtmJobKey(xjob()));
   });
@@ -121,8 +121,8 @@ describe('computeXtmJobKey — project disambiguation', () => {
     const a = computeXtmJobKey({ projectName: 'PR 4721900-1-3 EMAIL', ...base });
     const b = computeXtmJobKey({ projectName: 'PR 4721900-1-3 EMAIL_1', ...base });
     expect(a).not.toBe(b);
-    // negative: file|step|role are byte-identical, so the OLD key WOULD have collided
-    expect([base.fileName, base.step, base.role]).toEqual([base.fileName, base.step, base.role]);
+    // negative: file|step|role are byte-identical between a and b, so the OLD 3-field key
+    // WOULD have collided — only the project segment makes the new keys differ.
   });
   it('same project + same file|step|role is the SAME key (relisting dedup intact)', () => {
     expect(computeXtmJobKey({ projectName: 'PR EMAIL', ...base })).toBe(

@@ -528,7 +528,10 @@ describe('acceptEligibleTasks — exact cell text match in rowForTarget (C1)', (
       xtmActivePage(
         [
           // Superstring row FIRST — file name CONTAINS the target name but is not equal.
+          // Same project as the target so project is a NON-discriminator here; the file-exact
+          // (.bak superstring) rejection is the gate this test isolates.
           xtmMenuRow('sup111', 'accept', {
+            project: exactTarget.projectName,
             file: 'F1 (ID-aaa)_captions.json.bak',
             step: 'Post-Editing (PE) 1',
             role: 'Corrector',
@@ -577,7 +580,10 @@ describe('acceptEligibleTasks — exact cell text match in rowForTarget (C1)', (
     await page.setContent(
       xtmActivePage(
         [
+          // Same project as the target so project is a non-discriminator — the file-exact
+          // rejection (not a project mismatch) is what makes the target absent.
           xtmMenuRow('sup111', 'accept', {
+            project: exactTarget.projectName,
             file: 'F1 (ID-aaa)_captions.json.bak', // superstring only — exact target absent
             step: 'Post-Editing (PE) 1',
             role: 'Corrector',
@@ -643,16 +649,8 @@ describe('acceptEligibleTasks — rowForTarget includes project cell in row filt
   const ROLE = 'Corrector';
 
   it('C1c: selects the EMAIL_1 row (not EMAIL) when both share file/step/role', async () => {
-    // Grid: EMAIL row FIRST, EMAIL_1 row SECOND — same file/step/role, only project differs.
-    // Without project filter, rowForTarget picks EMAIL (first). Since EMAIL and EMAIL_1 belong
-    // to different bulk-accept groups, clicking EMAIL's bulk leaves EMAIL_1 still claimable
-    // (acceptAvailable=true in the re-read) → outcome='failed' for the EMAIL_1 target.
-    // With project filter, only EMAIL_1 matches → clicked → acceptAvailable=false → 'accepted'.
-    // EMAIL row is FIRST and shows "Finish task" (already owned — no bulk to click).
-    // EMAIL_1 row is SECOND and shows "Accept task" (claimable).
-    // Without project filter, rowForTarget picks EMAIL (first match on file/step/role).
-    // EMAIL has a finish menu → already-owned → no click → post_accept_click not fired → RED.
-    // With project filter, rowForTarget picks only EMAIL_1 → clicked → GREEN.
+    // Setup: EMAIL row FIRST (owned/"Finish task"), EMAIL_1 SECOND (claimable) — without the
+    // project filter rowForTarget picks EMAIL (no click → RED); with it, EMAIL_1 is clicked → GREEN.
     await page.setContent(
       xtmActivePage(
         [
