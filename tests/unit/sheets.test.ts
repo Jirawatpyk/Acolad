@@ -370,6 +370,21 @@ describe('resolveSheetStatusAndNote', () => {
     ).toEqual({ status: 'Accepted', note: 'snatched' });
   });
 
+  it('B#2/B#6: accept_failed with a non-null rejectReason renders Accept failed, NOT Rejected', () => {
+    // The accept-machine terminal must win: a real accept failure carrying a stale gate reason must
+    // surface as 'Accept failed' (its true status), never be masked as a gate 'Rejected'.
+    expect(
+      resolveSheetStatusAndNote(
+        {
+          lifecycleStatus: 'accept_failed',
+          acceptStatus: 'failed',
+          rejectReason: 'group blocked: x',
+        },
+        { note: 'unconfirmed', lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Accept failed', note: 'unconfirmed' });
+  });
+
   it('no rejectReason + closed → Closed with opts.note (regression: unchanged behaviour)', () => {
     expect(
       resolveSheetStatusAndNote(

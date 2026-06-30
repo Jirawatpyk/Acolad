@@ -134,13 +134,19 @@ export function resolveSheetStatusAndNote(
   state: Pick<XtmJobState, 'lifecycleStatus' | 'acceptStatus' | 'rejectReason'>,
   opts: { note: string | null; lastSeenAtMs: number },
 ): { status: SheetStatus; note: string | null } {
-  // Finding #10: a TRUTHY guard — an empty-string rejectReason carries no diagnostic value, so it
-  // must NOT enter the Rejected branch (which would render Status 'Rejected' with an empty note);
-  // it falls through to the real lifecycle status instead. Accepted always overrides a reject reason.
+  // Sticky-Rejected precedence, gated three ways:
+  //  - Finding #10: a TRUTHY reason — an empty-string rejectReason carries no diagnostic value, so it
+  //    must NOT enter the Rejected branch (which would render Status 'Rejected' with an empty note).
+  //  - acceptStatus !== 'accepted': an accepted job overrides any stale reject reason.
+  //  - B#2/B#6: lifecycle !== 'accept_failed' — a real accept FAILURE carrying a stale gate reason must
+  //    surface as its true 'Accept failed' status, never be masked as a gate 'Rejected'. ('accept_failed'
+  //    is also absent from TERMINAL_ABSENT, so it would have rendered a bare 'Rejected' with no suffix.)
+  // Any other lifecycle (rejected/skipped/new/missing/closed/removed) with a real reason is sticky-Rejected.
   if (
     state.rejectReason != null &&
     state.rejectReason !== '' &&
-    state.acceptStatus !== 'accepted'
+    state.acceptStatus !== 'accepted' &&
+    state.lifecycleStatus !== 'accept_failed'
   ) {
     // Finding #9: the "(left Active …)" suffix is the job's LAST-SEEN time (the last cycle it was
     // actually present), NOT the missing-DETECTION time — a job leaves Active ~MISSING_THRESHOLD ×
