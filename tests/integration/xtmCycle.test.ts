@@ -1392,6 +1392,51 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     );
     expect(summary.acceptedDueDays).toEqual([]); // nothing advanced → no audit entries
   });
+
+  // --- effective-deadline-day cutoff (the live 2026-06-30 regression) ---------
+  // A deadline whose Bangkok time is BEFORE the 09:00 work-start cannot be worked that
+  // calendar day — its work lands the PREVIOUS working day, so the cap must bucket it there.
+  const NOW_TUE = '2026-06-30T12:00:00+07:00'; // Bangkok Tuesday, working hours
+  const dueTue2251 = '2026-06-30T22:51:00+07:00'; // after-hours, same day → effective 2026-06-30
+  const dueWed0633 = '2026-07-01T06:33:00+07:00'; // before 09:00 → effective 2026-06-30 (prior day)
+  const dueWed1400 = '2026-07-01T14:00:00+07:00'; // after 09:00 → effective 2026-07-01 (its own day)
+  const TUE_DAY = bangkokDateString(Date.parse(dueTue2251)); // '2026-06-30'
+
+  it('cutoff: a before-09:00 deadline buckets to the prior working day → second group over-cap rejected', async () => {
+    fresh();
+    // Group A already held: 858w due Tue 22:51 (after-hours, same day) → effective day 30/06.
+    new XtmJobStore(db).upsertMany([
+      accepted({ jobKey: 'A', fileName: 'A.docx', dueDate: dueTue2251, words: 858 }),
+    ]);
+    const acc = new StubAcceptor();
+    // Group B: 377w due Wed 06:33 — BEFORE the 09:00 work-start, so its work lands the previous
+    // working day (Tue 30/06), sharing A's bucket: 858 + 377 = 1235 > the 1000 cap → REJECTED.
+    // Pre-fix it bucketed by the raw date (01/07, an empty bucket) and was wrongly accepted.
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ fileName: 'B.docx', dueDate: dueWed0633, words: 377 })], NOW_TUE),
+    );
+    expect(acc.calls.flat()).toHaveLength(0); // never clicked — correctly blocked
+    expect(only('B.docx').lifecycleStatus).toBe('rejected');
+    const note = sheetRows().find((r) => r.file === 'B.docx')?.note ?? '';
+    expect(note).toContain('daily word cap reached');
+    expect(note).toContain(TUE_DAY); // names the WORKING day the work lands on, not 01/07
+  });
+
+  it('cutoff inverse: a genuine next-working-day deadline (14:00) buckets to its own day → accepted', async () => {
+    fresh();
+    // Same held 858w on Tue 30/06, but the new job is due Wed 14:00 (AFTER 09:00) → effective
+    // day 01/07, its OWN (empty) bucket → 377 ≤ cap → accepted (the cutoff only rolls back
+    // deadlines BEFORE the work-start, never a genuine next-day-afternoon deadline).
+    new XtmJobStore(db).upsertMany([
+      accepted({ jobKey: 'A', fileName: 'A.docx', dueDate: dueTue2251, words: 858 }),
+    ]);
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ fileName: 'C.docx', dueDate: dueWed1400, words: 377 })], NOW_TUE),
+    );
+    expect(acc.calls.flat()).toHaveLength(1); // clicked — its own day is under cap
+    expect(only('C.docx').lifecycleStatus).toBe('accepted');
+  });
 });
 
 describe('XtmPollCycle field-change re-sync / Bug B (sheet:fieldsync)', () => {
