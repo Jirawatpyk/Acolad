@@ -229,7 +229,12 @@ function widenLifecycleCheck(db: DB): void {
  * The SQL `lower(trim(...))` MUST mirror `computeXtmJobKey`'s normField
  * (`(v ?? '').trim().toLowerCase()`) — a divergence means the re-keyed value
  * would not match the value the running bot computes. `newKeyExpr` is shared by
- * the SET and the `<>` guard so the two can never drift.
+ * the SET and the `<>` guard so the two can never drift. Residual gap (accepted):
+ * SQLite `lower()` folds only ASCII A–Z while JS `.toLowerCase()` folds full
+ * Unicode, so this assumes live job-key fields are ASCII (ID-based file names,
+ * English step/role, ASCII project names — `trim` is already neutralised because
+ * `rawXtmJobSchema` JS-trims project/file at parse time). Revisit only if a
+ * non-ASCII uppercase project name ever appears on a held row.
  *
  * Predicate uses the EXPLICIT non-terminal enum, NOT `NOT IN
  * ('closed','missing','removed')`: legacy feature-001 rows carry
