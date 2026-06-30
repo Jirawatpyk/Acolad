@@ -28,6 +28,7 @@ const cfg = (over: Partial<AppConfig> = {}): AppConfig =>
     LOGIN_MAX_RETRY: 3,
     LOGIN_LOCKOUT_MINUTES: 15,
     workdays: new Set([1, 2, 3, 4, 5]), // Mon–Fri: required by dueDailyReport working-day gate
+    hoursStartMin: 9 * 60, // 09:00 work-start: the daily report's "Due today" effective-day bucket
     ...over,
   }) as AppConfig;
 

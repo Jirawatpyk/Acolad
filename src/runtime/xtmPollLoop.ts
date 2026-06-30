@@ -8,8 +8,9 @@ import { GoogleChatSender, type ChatSender } from '../reporting/googleChat.js';
 import type { SheetSender } from '../reporting/sheets.js';
 import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
 import { buildDailyReportCard, dueDailyReport } from '../reporting/dailyReport.js';
-import { getThaiHolidays } from '../schedule/thaiHolidays.js';
+import { getThaiHolidays, holidaysForEffectiveDay } from '../schedule/thaiHolidays.js';
 import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
+import { makeEffectiveDayOf } from '../schedule/deadlineDay.js';
 import { Heartbeat, type HeartbeatPinger } from '../monitoring/heartbeat.js';
 import type { XtmPortalClient } from '../portal/xtmClient.js';
 import { XtmPollCycle } from './xtmPollCycle.js';
@@ -352,11 +353,18 @@ export class XtmPollLoop {
           // IV). Meta stays unset on a throw (the set below is never reached), so the next
           // eligible cycle retries.
           const held = this.store.listByLifecycle('accepted');
+          // Bucket "Due today" by the EFFECTIVE deadline day (the working day the work lands on)
+          // so the report's headline matches the capacity cap — same mapper the cycle uses.
           const card = buildDailyReportCard(
             held,
             nowMs,
             this.cfg.XTM_ACOLAD_OFFERS_URL,
             this.cfg.ACCEPT_MAX_WORDS_PER_DAY,
+            makeEffectiveDayOf(
+              this.cfg.hoursStartMin,
+              this.cfg.workdays,
+              holidaysForEffectiveDay(nowMs),
+            ),
           );
           this.db.transaction(() => {
             this.outbox.enqueue(`daily:${date}`, JSON.stringify(card), this.clock.nowIso(), 'team');

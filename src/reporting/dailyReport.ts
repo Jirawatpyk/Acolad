@@ -10,7 +10,7 @@ import { buildCard, type CardRow } from './chatCard.js';
 import { formatReadableDate } from './dateFormat.js';
 import { dash } from './cardText.js';
 import { bangkokCalendar, bangkokDateString } from '../schedule/bangkokCalendar.js';
-import { deadlineMsOf } from '../schedule/deadlineDay.js';
+import { deadlineMsOf, deadlineDayOf } from '../schedule/deadlineDay.js';
 import { isNonWorkingDay } from '../schedule/workingHours.js';
 import type { XtmJobState } from '../detection/types.js';
 
@@ -49,8 +49,10 @@ export function dueDailyReport(
  * Builds the Google Chat cardsV2 payload for the daily in-progress jobs report.
  *
  * Layout:
- * - "Due today" headline: words whose Bangkok deadline date is today (day-bucket,
- *   not instant) — includes night-accepted jobs due today even if already past NOW.
+ * - "Due today" headline: words whose EFFECTIVE deadline day (the working day the work
+ *   lands on — see `effectiveDay`) is today, so the headline matches the capacity cap.
+ *   Includes a job due tomorrow-early-morning (before the 09:00 work-start), whose work
+ *   is really today's. Day-bucket, not instant — covers night-accepted jobs due today.
  * - "⚠️ Overdue" row (instant-based): present only when at least one held job's
  *   deadline ms is strictly before nowMs.
  * - Up to 5 job rows, sorted by deadline asc (null/unparseable → last).
@@ -63,12 +65,18 @@ export function dueDailyReport(
  * @param nowMs          Current epoch ms (for the date header / card ID / overdue).
  * @param xtmUrl         Deep-link to XTM Active task list.
  * @param maxWordsPerDay Daily word cap from config (0 = no cap).
+ * @param effectiveDay   Maps a dueDate → the Bangkok working day its work lands on (or null
+ *                       for null/unparseable). The loop passes the effective-deadline-day mapper
+ *                       so "Due today" matches the cap; the default is the raw deadline date
+ *                       (`deadlineDayOf`) so the report stays usable standalone (byte-for-byte
+ *                       legacy bucketing for callers without a work calendar).
  */
 export function buildDailyReportCard(
   held: XtmJobState[],
   nowMs: number,
   xtmUrl: string,
   maxWordsPerDay: number,
+  effectiveDay: (dueDate: string | null) => string | null = deadlineDayOf,
 ): { cardsV2: unknown[] } {
   const today = bangkokDateString(nowMs);
 
@@ -84,7 +92,9 @@ export function buildDailyReportCard(
     const ms = dueMs(j);
     if (!Number.isFinite(ms)) continue;
     if (ms < nowMs) overdue.push(j);
-    if (bangkokDateString(ms) === today) dueTodayWords += j.words ?? 0; // day-bucket (not instant)
+    // Bucket by the EFFECTIVE day (the work-day the work lands on) so the headline matches the
+    // capacity cap — a before-09:00 deadline tomorrow is today's work; an after-09:00 one is not.
+    if (effectiveDay(j.dueDate) === today) dueTodayWords += j.words ?? 0;
   }
 
   const usage =
