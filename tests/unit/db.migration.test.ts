@@ -477,10 +477,14 @@ describe('db migration v1 -> v2 (existing production db)', () => {
   });
 });
 
-describe('backfill non-terminal job_key to the project-qualified key', () => {
-  // Raw (un-normalized) XTM fields: leading/trailing spaces + mixed case exercise
-  // BOTH halves of normField (trim AND lower). A SQL expr missing either half
-  // (e.g. trim without lower) would diverge from computeXtmJobKey and fail here.
+describe('backfill job_key to the project-qualified key (re-key-all real-identity rows)', () => {
+  // The backfill is one-shot: the FIRST openDatabase on a fresh dir runs it over an empty table
+  // and sets the `job_key_backfill_v2` meta flag. To exercise it over actual old-key rows (a real
+  // pre-deploy db has old-key rows but not yet the v2 flag), seed the rows, then clear the flag so
+  // the next open's backfill runs — `clearBackfillFlag` reproduces that pre-deploy state.
+  //
+  // Raw (un-normalized) XTM fields: leading/trailing spaces + mixed case exercise BOTH halves of
+  // normField (trim AND lower). The JS computeXtmJobKey path must reproduce NEW_KEY exactly.
   const RAW = {
     projectName: '  ProjAlpha  ',
     fileName: ' File.DOCX ',
@@ -489,7 +493,7 @@ describe('backfill non-terminal job_key to the project-qualified key', () => {
   };
   // The legacy 3-field key the row carried BEFORE projectName joined the key.
   const OLD_KEY = 'file.docx|translate|translator';
-  // Source-of-truth target: the SQL backfill must reproduce this byte-for-byte.
+  // Source-of-truth target: the backfill must reproduce this byte-for-byte via computeXtmJobKey.
   const NEW_KEY = computeXtmJobKey(RAW);
 
   /** Seed one jobs row with the RAW fields, a chosen old key, and a lifecycle/accept state. */
@@ -520,6 +524,11 @@ describe('backfill non-terminal job_key to the project-qualified key', () => {
     );
   }
 
+  /** Clear the one-shot flag so the NEXT openDatabase actually runs the backfill over seeded rows. */
+  function clearBackfillFlag(db: Database.Database): void {
+    db.prepare("DELETE FROM meta WHERE key='job_key_backfill_v2'").run();
+  }
+
   /** Read a row's current job_key via a stable non-key handle (job_key changes under us). */
   function keyByTitle(db: Database.Database, titleHandle: string): string {
     return (
@@ -527,79 +536,129 @@ describe('backfill non-terminal job_key to the project-qualified key', () => {
     ).k;
   }
 
-  it('re-keys a NON-terminal (accepted) row to the project-qualified key (trim + lower)', () => {
+  it('re-keys an accepted row to the project-qualified key (trim + lower)', () => {
     const dir = tmp();
     const a = openDatabase(dir, NOW);
-    seedJob(a.db, OLD_KEY, 'nonterminal', 'accepted');
+    seedJob(a.db, OLD_KEY, 'accepted', 'accepted');
+    clearBackfillFlag(a.db);
     a.db.close();
 
     const b = openDatabase(dir, NOW); // re-open runs migrate() -> backfill
-    expect(keyByTitle(b.db, 'nonterminal')).toBe(NEW_KEY);
+    expect(keyByTitle(b.db, 'accepted')).toBe(NEW_KEY);
     b.db.close();
   });
 
-  it('leaves a TERMINAL (closed) row key UNCHANGED', () => {
+  it('re-keys a TERMINAL (closed) row too — re-key-all drops the old lifecycle predicate (#4/B#8)', () => {
     const dir = tmp();
     const a = openDatabase(dir, NOW);
+    // The old predicate left closed/removed rows on their legacy key; re-key-all treats every
+    // real-identity row uniformly so a relisting closed row still matches its freshly-computed key.
     seedJob(a.db, OLD_KEY, 'terminal', 'closed');
+    clearBackfillFlag(a.db);
     a.db.close();
 
     const b = openDatabase(dir, NOW);
-    expect(keyByTitle(b.db, 'terminal')).toBe(OLD_KEY);
+    expect(keyByTitle(b.db, 'terminal')).toBe(NEW_KEY);
     b.db.close();
   });
 
-  it('is idempotent — a second migration run is a no-op on the re-keyed row', () => {
+  it('re-keys a MISSING row — the primary relisting state must match its new key (B#1)', () => {
     const dir = tmp();
     const a = openDatabase(dir, NOW);
-    seedJob(a.db, OLD_KEY, 'idem', 'accepted');
-    a.db.close();
-
-    const b = openDatabase(dir, NOW); // first backfill: re-keys
-    const k1 = keyByTitle(b.db, 'idem');
-    b.db.close();
-
-    const c = openDatabase(dir, NOW); // second backfill: must be a no-op
-    const k2 = keyByTitle(c.db, 'idem');
-    c.db.close();
-
-    expect(k1).toBe(NEW_KEY);
-    expect(k2).toBe(NEW_KEY);
-  });
-
-  it('re-keys a mid-accept row (lifecycle NULL, accept_status accepting) via the OR branch', () => {
-    const dir = tmp();
-    const a = openDatabase(dir, NOW);
-    seedJob(a.db, OLD_KEY, 'accepting', null, 'accepting');
+    // B#1: the old lifecycle predicate EXCLUDED 'missing', so a job that was missing at deploy kept
+    // its old key and fired a spurious 'first_seen' (🆕) when it relisted, losing its history.
+    seedJob(a.db, OLD_KEY, 'missing', 'missing');
+    clearBackfillFlag(a.db);
     a.db.close();
 
     const b = openDatabase(dir, NOW);
-    expect(keyByTitle(b.db, 'accepting')).toBe(NEW_KEY);
+    expect(keyByTitle(b.db, 'missing')).toBe(NEW_KEY);
     b.db.close();
   });
 
-  it('leaves a legacy row (lifecycle_status NULL, accept none) UNCHANGED — predicate is the explicit enum, NOT "NOT IN"', () => {
+  it('re-keys a NULL-lifecycle row with a real identity (re-key-all, no lifecycle predicate)', () => {
     const dir = tmp();
     const a = openDatabase(dir, NOW);
-    // project_name is set + job_key differs, so ONLY the lifecycle/accept predicate
-    // can keep this row out of the backfill. A NOT IN ('closed','missing','removed')
-    // predicate would wrongly pull this NULL-lifecycle row in.
-    seedJob(a.db, OLD_KEY, 'legacy-null', null, 'none');
+    // A row with a real project+file identity but NULL lifecycle/none accept is still re-keyed:
+    // identity, not lifecycle, decides. (Genuine legacy partner rows are excluded by EMPTY identity,
+    // not by this predicate — see the degenerate-skip test below.)
+    seedJob(a.db, OLD_KEY, 'null-lifecycle', null, 'none');
+    clearBackfillFlag(a.db);
     a.db.close();
 
     const b = openDatabase(dir, NOW);
-    expect(keyByTitle(b.db, 'legacy-null')).toBe(OLD_KEY);
+    expect(keyByTitle(b.db, 'null-lifecycle')).toBe(NEW_KEY);
     b.db.close();
   });
 
-  it('re-keys a NON-terminal row whose step is NULL to the COALESCE form proj|file||role (normField parity)', () => {
+  it('SKIPS a degenerate empty-project/file row (no |||-style key, no PK collision)', () => {
     const dir = tmp();
     const a = openDatabase(dir, NOW);
-    // A non-terminal (accepted) row with a NULL step. computeXtmJobKey's normField
-    // treats NULL as '' → the key must be proj|file||role. Pre-COALESCE the SQL
-    // `lower(trim(step))` was NULL, the whole expr was NULL, the `<>` guard was NULL
-    // (false), and the row was SKIPPED — left mis-keyed. With coalesce(col,'') the row
-    // re-keys to the same value the running bot computes.
+    // A degenerate row (empty project + file — a real XTM job never has these blank). Re-keying it
+    // would produce a meaningless `|||` key and risk a PK collision, so it is left untouched.
+    a.db
+      .prepare(
+        `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash,
+                           project_name, file_name, step, role, lifecycle_status, accept_status)
+         VALUES ('degenerate-key','degenerate','visible',?,?,'h','','',NULL,NULL,'accepted','none')`,
+      )
+      .run(NOW, NOW);
+    clearBackfillFlag(a.db);
+    a.db.close();
+
+    const b = openDatabase(dir, NOW);
+    expect(keyByTitle(b.db, 'degenerate')).toBe('degenerate-key'); // unchanged
+    // No row was re-keyed to a meaningless empty-segment key.
+    const bogus = b.db
+      .prepare("SELECT COUNT(*) AS n FROM jobs WHERE job_key LIKE '|%' OR job_key='|||'")
+      .get() as { n: number };
+    expect(bogus.n).toBe(0);
+    b.db.close();
+  });
+
+  it('computes the new key via computeXtmJobKey, NOT a SQL lower() — a non-ASCII uppercase project re-keys to the JS-folded value (#5 ASCII gap)', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    // SQLite lower() folds only ASCII A–Z; JS .toLowerCase() folds full Unicode. A project name with
+    // a non-ASCII uppercase letter (É, U+00C9) proves the JS path is used: computeXtmJobKey folds it
+    // to é, while the removed SQL lower() would have left É uppercase (a silent drift).
+    const RAW_U = { projectName: 'CAFÉ', fileName: 'f.docx', step: 's', role: 'r' };
+    const U_OLD_KEY = 'f.docx|s|r'; // legacy 3-field
+    a.db
+      .prepare(
+        `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash,
+                           project_name, file_name, step, role, lifecycle_status, accept_status)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        U_OLD_KEY,
+        'unicode',
+        'visible',
+        NOW,
+        NOW,
+        'h',
+        RAW_U.projectName,
+        RAW_U.fileName,
+        RAW_U.step,
+        RAW_U.role,
+        'accepted',
+        'none',
+      );
+    clearBackfillFlag(a.db);
+    a.db.close();
+
+    const b = openDatabase(dir, NOW);
+    expect(keyByTitle(b.db, 'unicode')).toBe(computeXtmJobKey(RAW_U)); // JS path → 'café|f.docx|s|r'
+    expect(keyByTitle(b.db, 'unicode')).not.toBe('cafÉ|f.docx|s|r'); // the SQL-lower would-be value
+    b.db.close();
+  });
+
+  it('re-keys a row whose step is NULL to proj|file||role (normField NULL parity)', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    // computeXtmJobKey's normField treats NULL as '' → the key is proj|file||role. A null-step row
+    // with a real project+file is still re-keyed correctly (the coalesce-to-'' parity that the prior
+    // SQL backfill needed is intrinsic to computeXtmJobKey, so the JS path gets it for free).
     const NULL_STEP_OLD_KEY = 'file.docx||translator'; // legacy 3-field, empty step segment
     a.db
       .prepare(
@@ -621,6 +680,7 @@ describe('backfill non-terminal job_key to the project-qualified key', () => {
         'accepted',
         'none',
       );
+    clearBackfillFlag(a.db);
     a.db.close();
 
     const b = openDatabase(dir, NOW);
@@ -632,5 +692,50 @@ describe('backfill non-terminal job_key to the project-qualified key', () => {
     });
     expect(keyByTitle(b.db, 'nullstep')).toBe(expected);
     b.db.close();
+  });
+
+  it('leaves a row already at its new key untouched (the newKey !== oldKey skip)', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    seedJob(a.db, NEW_KEY, 'already-new', 'accepted'); // already project-qualified
+    clearBackfillFlag(a.db);
+    a.db.close();
+
+    const b = openDatabase(dir, NOW);
+    expect(keyByTitle(b.db, 'already-new')).toBe(NEW_KEY); // no spurious update
+    b.db.close();
+  });
+
+  it('is one-shot via the meta flag: an old-key row inserted AFTER the flag is set is NOT re-keyed (#6)', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW); // fresh open sets job_key_backfill_v2 (empty table)
+    // Inserted AFTER the flag, WITHOUT clearing it — the one-shot guard must short-circuit, so the
+    // backfill is NOT a full table scan on every open (unlike the old per-row `<>` predicate, which
+    // would have re-keyed this row on the next open).
+    seedJob(a.db, OLD_KEY, 'late', 'accepted');
+    a.db.close();
+
+    const b = openDatabase(dir, NOW);
+    expect(keyByTitle(b.db, 'late')).toBe(OLD_KEY); // untouched — flag short-circuited the backfill
+    b.db.close();
+  });
+
+  it('is idempotent — a second open after a real backfill is a no-op (flag set)', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    seedJob(a.db, OLD_KEY, 'idem', 'accepted');
+    clearBackfillFlag(a.db);
+    a.db.close();
+
+    const b = openDatabase(dir, NOW); // first real backfill: re-keys + sets flag
+    const k1 = keyByTitle(b.db, 'idem');
+    b.db.close();
+
+    const c = openDatabase(dir, NOW); // second open: flag present → no-op
+    const k2 = keyByTitle(c.db, 'idem');
+    c.db.close();
+
+    expect(k1).toBe(NEW_KEY);
+    expect(k2).toBe(NEW_KEY);
   });
 });

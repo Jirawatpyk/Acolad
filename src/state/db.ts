@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { mkdirSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { computeXtmJobKey } from '../detection/jobKey.js';
 
 export type DB = Database.Database;
 
@@ -216,59 +217,76 @@ function widenLifecycleCheck(db: DB): void {
 }
 
 /**
- * One-time backfill: re-key NON-TERMINAL rows from the legacy 3-field
- * `file|step|role` key to the project-qualified `project|file|step|role` key
- * (the new `computeXtmJobKey` shape — collision fix). Without this, a held row
- * still carrying the old key would, on the next deploy, fail to match its
- * freshly-computed key — mis-disappearing and then re-accepting itself.
+ * One-time backfill: re-key EVERY real-identity row from the legacy 3-field
+ * `file|step|role` key to the project-qualified `project|file|step|role` key, using
+ * the ACTUAL `computeXtmJobKey` (the running bot's key function) — NOT a parallel
+ * SQL re-implementation of it. Without this, a held/relisting row still carrying the
+ * old key would, on the next deploy, fail to match its freshly-computed key —
+ * mis-disappearing (a spurious 'first_seen' 🆕 on relist) and losing its history.
+ *
+ * Re-keys ALL rows with a real identity (`project_name <> '' AND file_name <> ''`),
+ * dropping the previous lifecycle/accept predicate entirely — identity, not lifecycle,
+ * decides. This closes three gaps the old SQL predicate had:
+ *   - #5: the old SET re-implemented normField in SQL (`lower(trim(coalesce(...)))`),
+ *     which would silently DRIFT from `computeXtmJobKey` if normField changed, and used
+ *     SQLite's ASCII-only `lower()` vs JS's full-Unicode `.toLowerCase()`. Re-keying in
+ *     JS via `computeXtmJobKey` removes both the drift and the ASCII gap.
+ *   - #4 / B#8: the old predicate's `OR accept_status IN ('accepting','accepted')` also
+ *     re-keyed terminal closed/removed+accepted rows, contradicting its own "terminal
+ *     keeps old key" comment. Re-key-all treats every row uniformly, so the inconsistency
+ *     is gone.
+ *   - B#1: the old predicate EXCLUDED `'missing'` — the PRIMARY relisting state — so a job
+ *     that was missing at deploy kept its old key and fired a spurious 'first_seen' when it
+ *     relisted (losing its accept/lifecycle history). Re-keying all real-identity rows fixes it.
+ *
+ * One-shot (#6): guarded by a `job_key_backfill_v2` meta flag (read-first, the same
+ * self-gating style as the sibling migrations here) so it runs ONCE — not a full table
+ * scan on every `openDatabase`. The flag is set after a successful run. Idempotent via
+ * BOTH the flag and the `newKey !== oldKey` per-row skip.
+ *
+ * NULL step/role and trim/lowercase parity are intrinsic to `computeXtmJobKey`
+ * (`normField = (v ?? '').trim().toLowerCase()`), so the JS path gets them for free.
+ *
+ * Real-identity guard: a real XTM job always carries a non-empty project + file
+ * (`rawXtmJobSchema` enforces `z.string().trim().min(1)`); legacy feature-001 partner
+ * rows carry empty project/file (NOT NULL DEFAULT ''). A row with an empty identity is
+ * degenerate — re-keying it to a meaningless `|||`/`proj|||`-style key is pointless and
+ * risks a PK collision, so it is skipped.
+ *
+ * PK-collision safety: two distinct old-key rows have distinct legacy `file|step|role`
+ * keys, so their 4-segment `project|file|step|role` new keys are also distinct; and a
+ * 4-segment new key can never equal a remaining 3-segment old key — no collision.
  *
  * Runs INSIDE migrate()'s enclosing transaction, AFTER ensureJobColumns /
- * widenLifecycleCheck so the column set (and the widened lifecycle CHECK) is
- * final.
- *
- * The SQL `lower(trim(...))` MUST mirror `computeXtmJobKey`'s normField
- * (`(v ?? '').trim().toLowerCase()`) — a divergence means the re-keyed value
- * would not match the value the running bot computes. `newKeyExpr` is shared by
- * the SET and the `<>` guard so the two can never drift. Residual gap (accepted):
- * SQLite `lower()` folds only ASCII A–Z while JS `.toLowerCase()` folds full
- * Unicode, so this assumes live job-key fields are ASCII (ID-based file names,
- * English step/role, ASCII project names — `trim` is already neutralised because
- * `rawXtmJobSchema` JS-trims project/file at parse time). Revisit only if a
- * non-ASCII uppercase project name ever appears on a held row.
- *
- * Predicate uses the EXPLICIT non-terminal enum, NOT `NOT IN
- * ('closed','missing','removed')`: legacy feature-001 rows carry
- * lifecycle_status = NULL and must be left untouched — a NOT IN test would
- * wrongly pull them in (NULL is not in the excluded set). Terminal rows
- * (closed/missing/removed, and not mid-accept) keep their old keys.
- *
- * Idempotent: the `job_key <> <new key>` guard makes a second run a no-op, so
- * no separate version flag is needed (the same self-gating style as the other
- * migration helpers here). NULL step/role: each field is wrapped in
- * `coalesce(col,'')` so a NULL folds to '' — mirroring normField's `(v ?? '')` —
- * so a non-terminal row with a real project+file but NULL step/role re-keys to
- * `proj|file||` instead of producing a NULL expr that the `<>` guard would read as
- * false and skip (which would leave the row mis-keyed). No PK-NULL write, no crash.
- *
- * Identity guard: the predicate requires `project_name <> '' AND file_name <> ''`,
- * NOT the vacuous `project_name IS NOT NULL` (project_name is NOT NULL DEFAULT '' —
- * see JOB_V2_COLUMNS — so that test never excluded anything). A real XTM job always
- * carries a non-empty project + file (`rawXtmJobSchema` enforces
- * `z.string().trim().min(1)`), so a row with an empty identity is degenerate: re-keying
- * it to a meaningless `|||`/`proj|||`-style key is pointless and risks a PK collision
- * (two degenerate rows → same key → the migration would abort). Skipping them is correct.
+ * widenLifecycleCheck so the column set (and the widened lifecycle CHECK) is final.
  */
 function backfillProjectQualifiedKey(db: DB): void {
-  const newKeyExpr =
-    "lower(trim(coalesce(project_name,''))) || '|' || lower(trim(coalesce(file_name,''))) || '|' || lower(trim(coalesce(step,''))) || '|' || lower(trim(coalesce(role,'')))";
-  db.exec(`
-UPDATE jobs
-SET job_key = ${newKeyExpr}
-WHERE (lifecycle_status IN ('new','accepted','skipped','accept_failed','rejected')
-       OR accept_status IN ('accepting','accepted'))
-  AND project_name <> ''
-  AND file_name <> ''
-  AND job_key <> ${newKeyExpr}`);
+  const done = db.prepare("SELECT value FROM meta WHERE key = 'job_key_backfill_v2'").get() as
+    | { value: string }
+    | undefined;
+  if (done) return;
+
+  const rows = db.prepare('SELECT job_key, project_name, file_name, step, role FROM jobs').all() as {
+    job_key: string;
+    project_name: string;
+    file_name: string;
+    step: string | null;
+    role: string | null;
+  }[];
+  const update = db.prepare('UPDATE jobs SET job_key = ? WHERE job_key = ?');
+  for (const row of rows) {
+    // Skip degenerate rows (empty project/file) — a meaningless key + a PK-collision risk.
+    if (row.project_name === '' || row.file_name === '') continue;
+    const newKey = computeXtmJobKey({
+      projectName: row.project_name,
+      fileName: row.file_name,
+      step: row.step,
+      role: row.role,
+    });
+    if (newKey !== row.job_key) update.run(newKey, row.job_key);
+  }
+
+  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('job_key_backfill_v2', '1')").run();
 }
 
 /**
