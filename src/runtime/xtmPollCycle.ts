@@ -166,7 +166,7 @@ export class XtmPollCycle {
           `sheet:stranded:${s.jobKey}:${snapshot.pollCycleId}`,
           JSON.stringify({
             op: 'upsert',
-            row: this.toSheetRow(s, 'crash mid-accept', snapshot.capturedAt),
+            row: this.toSheetRow(s, 'crash mid-accept'),
           }),
           snapshot.capturedAt,
           'sheets',
@@ -584,7 +584,7 @@ export class XtmPollCycle {
       }
       this.outbox.enqueue(
         `sheet:${base}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, note, snapshot.capturedAt) }),
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, note) }),
         snapshot.capturedAt,
         'sheets',
       );
@@ -653,7 +653,7 @@ export class XtmPollCycle {
       // 'accepted' and was reported above, skipped here).
       this.outbox.enqueue(
         `sheet:fieldsync:${dc.jobKey}|${snapshot.pollCycleId}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, null, snapshot.capturedAt) }),
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, null) }),
         snapshot.capturedAt,
         'sheets',
       );
@@ -746,13 +746,14 @@ export class XtmPollCycle {
    * (Task 7) so the sticky-Rejected precedence is applied in ONE place: a gate-Rejected job
    * (persisted `rejectReason`, not yet accepted) keeps Status 'Rejected' — gaining a
    * "(left Active …)" suffix once it leaves Active — instead of flipping to Missing/Closed. The
-   * passed `note` is used only when the job is NOT sticky-Rejected. `capturedAt` is the cycle's
-   * snapshot time, the basis for the "left Active" timestamp.
+   * passed `note` is used only when the job is NOT sticky-Rejected. The "left Active" timestamp is
+   * the job's own `lastSeenAt` (Finding #9) — the last cycle it was present, NOT the cycle's
+   * missing-detection time — so no per-job parse of the snapshot capturedAt is needed (#14).
    */
-  private toSheetRow(s: XtmJobState, note: string | null, capturedAt: string): SheetRow {
+  private toSheetRow(s: XtmJobState, note: string | null): SheetRow {
     const { status, note: resolvedNote } = resolveSheetStatusAndNote(s, {
       note,
-      capturedAtMs: Date.parse(capturedAt),
+      lastSeenAtMs: Date.parse(s.lastSeenAt),
     });
     return {
       jobKey: s.jobKey,

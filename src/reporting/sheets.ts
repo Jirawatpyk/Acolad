@@ -126,15 +126,17 @@ const TERMINAL_ABSENT: ReadonlySet<XtmLifecycleStatus> = new Set(['missing', 'cl
  */
 export function resolveSheetStatusAndNote(
   state: Pick<XtmJobState, 'lifecycleStatus' | 'acceptStatus' | 'rejectReason'>,
-  opts: { note: string | null; capturedAtMs: number },
+  opts: { note: string | null; lastSeenAtMs: number },
 ): { status: SheetStatus; note: string | null } {
   if (state.rejectReason !== null && state.acceptStatus !== 'accepted') {
-    // The "(left Active …)" suffix needs a finite ms — `new Date(NaN).toISOString()` throws a
-    // RangeError. A missing/invalid capturedAtMs degrades to the bare reason (no suffix) rather
-    // than crashing the row build for this job.
+    // Finding #9: the "(left Active …)" suffix is the job's LAST-SEEN time (the last cycle it was
+    // actually present), NOT the missing-DETECTION time — a job leaves Active ~MISSING_THRESHOLD ×
+    // poll-interval before we notice. The suffix needs a finite ms — `new Date(NaN).toISOString()`
+    // throws a RangeError — so a missing/invalid lastSeenAtMs degrades to the bare reason (no suffix)
+    // rather than crashing the row build for this job.
     const left =
-      TERMINAL_ABSENT.has(state.lifecycleStatus) && Number.isFinite(opts.capturedAtMs)
-        ? ` (left Active ${formatReadableDate(new Date(opts.capturedAtMs).toISOString())})`
+      TERMINAL_ABSENT.has(state.lifecycleStatus) && Number.isFinite(opts.lastSeenAtMs)
+        ? ` (left Active ${formatReadableDate(new Date(opts.lastSeenAtMs).toISOString())})`
         : '';
     return { status: 'Rejected', note: `${state.rejectReason}${left}` };
   }

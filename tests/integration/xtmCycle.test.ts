@@ -1279,6 +1279,25 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(last.note).toContain('cannot finish in time');
   });
 
+  it('Finding #9: the "(left Active …)" suffix renders lastSeenAt (last present cycle), not the missing-detection capturedAt', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    const tight = { dueDate: dueMon12, words: 5000 }; // infeasible → schedule-rejected
+    const PRESENT_AT = '2026-06-22T10:00:00+07:00'; // last cycle the job is actually present
+    const MISSING_AT = '2026-06-22T11:00:00+07:00'; // ~1h later — when the missing transition fires
+    // c1: present + rejected → lastSeenAt pinned to 10:00.
+    await cycle.run(snapAt([xraw(tight)], PRESENT_AT, 'c1'));
+    // c2 flicker, c3 missing — both detected at 11:00 (AFTER the last present cycle). The job left
+    // Active ~MISSING_THRESHOLD × interval before 11:00, so the real "left Active" time is 10:00.
+    await cycle.run(snapAt([], MISSING_AT, 'c2'));
+    await cycle.run(snapAt([], MISSING_AT, 'c3'));
+    expect(only().lifecycleStatus).toBe('missing');
+    const note = sheetRows().at(-1)?.note ?? '';
+    expect(note).toContain('left Active 22/06/2026 10:00'); // lastSeenAt — the real last-present time
+    expect(note).not.toContain('11:00'); // NOT the later missing-detection capturedAt
+  });
+
   it('F1: a still-rejected job whose dueDate changes keeps its reject reason on the field-sync note (I3 — never wiped to null)', async () => {
     fresh();
     new MetaStore(db).markBaselineDone();

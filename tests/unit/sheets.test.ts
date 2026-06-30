@@ -320,16 +320,16 @@ describe('lifecycleToSheetStatus', () => {
 });
 
 describe('resolveSheetStatusAndNote', () => {
-  // TZ-explicit capturedAtMs: 2026-06-30T18:23:00+07:00 → Bangkok "30/06/2026 18:23"
+  // TZ-explicit lastSeenAtMs: 2026-06-30T18:23:00+07:00 → Bangkok "30/06/2026 18:23"
   // Must pass under TZ=UTC because we use an offset-bearing ISO string, not local midnight.
-  const capturedAtMs = new Date('2026-06-30T18:23:00+07:00').getTime();
+  const lastSeenAtMs = new Date('2026-06-30T18:23:00+07:00').getTime();
   const rejectNote = 'group blocked: x';
 
   it('rejected + missing → Rejected with (left Active DD/MM/YYYY HH:mm) suffix', () => {
     expect(
       resolveSheetStatusAndNote(
         { lifecycleStatus: 'missing', acceptStatus: 'none', rejectReason: rejectNote },
-        { note: null, capturedAtMs },
+        { note: null, lastSeenAtMs },
       ),
     ).toEqual({ status: 'Rejected', note: 'group blocked: x (left Active 30/06/2026 18:23)' });
   });
@@ -338,7 +338,7 @@ describe('resolveSheetStatusAndNote', () => {
     expect(
       resolveSheetStatusAndNote(
         { lifecycleStatus: 'closed', acceptStatus: 'none', rejectReason: rejectNote },
-        { note: null, capturedAtMs },
+        { note: null, lastSeenAtMs },
       ),
     ).toEqual({ status: 'Rejected', note: 'group blocked: x (left Active 30/06/2026 18:23)' });
   });
@@ -347,7 +347,7 @@ describe('resolveSheetStatusAndNote', () => {
     expect(
       resolveSheetStatusAndNote(
         { lifecycleStatus: 'removed', acceptStatus: 'none', rejectReason: rejectNote },
-        { note: null, capturedAtMs },
+        { note: null, lastSeenAtMs },
       ),
     ).toEqual({ status: 'Rejected', note: 'group blocked: x (left Active 30/06/2026 18:23)' });
   });
@@ -356,7 +356,7 @@ describe('resolveSheetStatusAndNote', () => {
     expect(
       resolveSheetStatusAndNote(
         { lifecycleStatus: 'new', acceptStatus: 'none', rejectReason: rejectNote },
-        { note: null, capturedAtMs },
+        { note: null, lastSeenAtMs },
       ),
     ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
   });
@@ -365,7 +365,7 @@ describe('resolveSheetStatusAndNote', () => {
     expect(
       resolveSheetStatusAndNote(
         { lifecycleStatus: 'accepted', acceptStatus: 'accepted', rejectReason: rejectNote },
-        { note: 'snatched', capturedAtMs },
+        { note: 'snatched', lastSeenAtMs },
       ),
     ).toEqual({ status: 'Accepted', note: 'snatched' });
   });
@@ -374,25 +374,25 @@ describe('resolveSheetStatusAndNote', () => {
     expect(
       resolveSheetStatusAndNote(
         { lifecycleStatus: 'closed', acceptStatus: 'none', rejectReason: null },
-        { note: 'done fine', capturedAtMs },
+        { note: 'done fine', lastSeenAtMs },
       ),
     ).toEqual({ status: 'Closed', note: 'done fine' });
   });
 
-  it('rejected + missing + non-finite capturedAtMs (NaN) → Rejected, bare reason, no suffix, no throw', () => {
-    // A guard against `new Date(NaN).toISOString()` throwing a RangeError when the captured
+  it('rejected + missing + non-finite lastSeenAtMs (NaN) → Rejected, bare reason, no suffix, no throw', () => {
+    // A guard against `new Date(NaN).toISOString()` throwing a RangeError when the last-seen
     // timestamp is missing/invalid. The "(left Active …)" suffix needs a finite ms; without
     // one we still emit Rejected + the bare reason rather than crashing the row build.
     expect(() =>
       resolveSheetStatusAndNote(
         { lifecycleStatus: 'missing', acceptStatus: 'none', rejectReason: rejectNote },
-        { note: null, capturedAtMs: NaN },
+        { note: null, lastSeenAtMs: NaN },
       ),
     ).not.toThrow();
     expect(
       resolveSheetStatusAndNote(
         { lifecycleStatus: 'missing', acceptStatus: 'none', rejectReason: rejectNote },
-        { note: null, capturedAtMs: NaN },
+        { note: null, lastSeenAtMs: NaN },
       ),
     ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
   });
@@ -404,7 +404,7 @@ describe('resolveSheetStatusAndNote', () => {
     expect(
       resolveSheetStatusAndNote(
         { lifecycleStatus: 'new', acceptStatus: 'accepting', rejectReason: rejectNote },
-        { note: null, capturedAtMs },
+        { note: null, lastSeenAtMs },
       ),
     ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
   });
@@ -413,7 +413,7 @@ describe('resolveSheetStatusAndNote', () => {
     expect(
       resolveSheetStatusAndNote(
         { lifecycleStatus: 'new', acceptStatus: 'failed', rejectReason: rejectNote },
-        { note: null, capturedAtMs },
+        { note: null, lastSeenAtMs },
       ),
     ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
   });
