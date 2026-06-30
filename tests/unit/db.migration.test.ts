@@ -320,6 +320,83 @@ describe('jobs.lifecycle_status widened for rejected', () => {
     expect(row.s).toBe('rejected');
     b.db.close();
   });
+
+  it('migrates an OLD db missing BOTH file_wwc AND the rejected lifecycle value (guards column-add-before-rebuild order)', () => {
+    const dir = tmp();
+    // The riskiest combined migration path: a jobs table that BOTH predates the
+    // file_wwc column AND whose lifecycle_status CHECK lacks 'rejected'. The
+    // lifecycle-CHECK widener rebuilds the table with
+    // `SELECT ... file_wwc ... FROM jobs_old`, which throws if ensureJobColumns has
+    // NOT already added file_wwc. This test pins the call-order invariant
+    // (ensureJobColumns BEFORE widenLifecycleCheck) against a future reorder.
+    const old = new Database(join(dir, 'acolad.db'));
+    old.exec(`
+      CREATE TABLE jobs (
+        job_key TEXT PRIMARY KEY, portal_job_id TEXT, title TEXT NOT NULL,
+        language_pair TEXT, deadline TEXT, deadline_raw TEXT, fee TEXT, url TEXT,
+        status TEXT NOT NULL CHECK (status IN ('visible','missing')),
+        first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+        snapshot_hash TEXT NOT NULL, consecutive_misses INTEGER NOT NULL DEFAULT 0,
+        xtm_task_id TEXT, project_name TEXT NOT NULL DEFAULT '', file_name TEXT NOT NULL DEFAULT '',
+        source_lang TEXT, target_lang TEXT, due_date TEXT, due_raw TEXT, words INTEGER,
+        step TEXT, role TEXT, eligible INTEGER NOT NULL DEFAULT 0,
+        lifecycle_status TEXT CHECK (lifecycle_status IN ('new','accepted','skipped','missing','accept_failed','closed','removed')),
+        accept_status TEXT NOT NULL DEFAULT 'none' CHECK (accept_status IN ('none','accepting','accepted','failed')),
+        accepted_at TEXT, sheet_synced_status TEXT
+      );
+      CREATE TABLE outbox (
+        outbox_id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,
+        channel TEXT NOT NULL CHECK (channel IN ('chat','sheets','team')), payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dead')),
+        attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL,
+        created_at TEXT NOT NULL, sent_at TEXT
+      );
+      CREATE UNIQUE INDEX idx_outbox_dedup ON outbox (event_id, channel);
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    `);
+    // A real pre-existing row that must survive the table rebuild intact.
+    old
+      .prepare(
+        `INSERT INTO jobs (job_key, title, file_name, status, first_seen_at, last_seen_at, snapshot_hash, words, lifecycle_status)
+         VALUES ('combo-j', 'real job', 'captions.json', 'visible', ?, ?, 'h', 1234, 'accepted')`,
+      )
+      .run(NOW, NOW);
+    old.close();
+
+    // (a) Migration must not throw despite BOTH gaps.
+    let opened: ReturnType<typeof openDatabase> | undefined;
+    expect(() => {
+      opened = openDatabase(dir, NOW);
+    }).not.toThrow();
+    const db = opened!.db;
+
+    // (b) file_wwc was added (by ensureJobColumns, before the rebuild's SELECT).
+    expect(cols(db, 'jobs')).toContain('file_wwc');
+
+    // (c) lifecycle CHECK widened: 'rejected' now writes without a CHECK violation.
+    expect(() =>
+      db.prepare("UPDATE jobs SET lifecycle_status='rejected' WHERE job_key='combo-j'").run(),
+    ).not.toThrow();
+
+    // (d) the pre-existing row survived the rebuild with its data intact.
+    const r = db
+      .prepare(
+        "SELECT title, file_name, words, file_wwc, lifecycle_status FROM jobs WHERE job_key='combo-j'",
+      )
+      .get() as {
+      title: string;
+      file_name: string;
+      words: number;
+      file_wwc: number | null;
+      lifecycle_status: string;
+    };
+    expect(r.title).toBe('real job');
+    expect(r.file_name).toBe('captions.json');
+    expect(r.words).toBe(1234);
+    expect(r.file_wwc).toBeNull();
+    expect(r.lifecycle_status).toBe('rejected');
+    db.close();
+  });
 });
 
 describe('db migration v1 -> v2 (existing production db)', () => {

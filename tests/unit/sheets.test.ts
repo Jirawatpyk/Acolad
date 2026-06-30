@@ -4,6 +4,7 @@ import {
   GoogleSheetSender,
   V2_HEADER,
   V3_HEADER,
+  LAST_COL_LETTER,
   formatSheetDate,
   lifecycleToSheetStatus,
   type SheetsApi,
@@ -121,7 +122,8 @@ describe('SheetSink.ensureHeader (v3 migration, FR-016)', () => {
     expect(api.calls).toEqual(afterFirst); // no further insert/setHeader
   });
 
-  it('upgrades a v1 (8-column) header by appending I–M (legacy cold path)', async () => {
+  it('v1 → v3: migrates an 8-column header straight to v3 in one step (no broken v2 intermediate, Finding #3)', async () => {
+    // v1 A–H labels are identical to V3's first 8, so relabeling to V3_HEADER is correct.
     const v1 = [
       'Received date',
       'Status',
@@ -134,16 +136,49 @@ describe('SheetSink.ensureHeader (v3 migration, FR-016)', () => {
     ];
     const api = new FakeSheets([v1]);
     await new SheetSink(api).ensureHeader();
-    expect(api.rows[0]?.slice(0, 8)).toEqual(v1); // user columns untouched
-    expect(api.rows[0]).toHaveLength(13); // v2 shape
-    expect(api.rows[0]?.[12]).toBe('_job_key');
-    // A later start lifts the now-v2 sheet to v3.
+    // One step to v3: setHeader(V3_HEADER) and NO insertColumn (there is no _job_key to preserve).
+    expect(api.calls).toEqual(['setHeader(14)']);
+    expect(api.rows[0]).toEqual(V3_HEADER);
+    // Idempotent on the resulting v3 — a later start does nothing more.
     await new SheetSink(api).ensureHeader();
+    expect(api.calls).toEqual(['setHeader(14)']);
+  });
+
+  it('v2 with a trailing user column (14 cols, _job_key still at M) migrates to v3 — does not throw (Finding #5)', async () => {
+    // Pre-PR18 this >=13 shape was tolerated; an exact ===13 check would mis-route it to the
+    // fail-loud throw → outbox retries forever → dead → heartbeat pages.
+    const v2Trailing = [...V2_HEADER, 'Extra notes']; // _job_key at M (12), user col at N (13)
+    const api = new FakeSheets([v2Trailing]);
+    await new SheetSink(api).ensureHeader();
+    expect(api.calls).toEqual(['insertColumn(8)', 'setHeader(14)']);
     expect(api.rows[0]).toEqual(V3_HEADER);
   });
 
-  it('fails loud on an unrecognized header rather than overwriting', async () => {
+  it('repairs a partial v2→v3 migration: 14 cols, _job_key at N but a BLANK File WWC header — relabels only, no second insertColumn (Finding #6)', async () => {
+    // Crash between insertColumn(8) and setHeader: the v2 header got a blank cell shoved in at
+    // index 8 (so _job_key shifted M→N) but was never relabeled. header[13]==='_job_key' MATCHES
+    // the old length-based guard, yet header[8] is blank, not 'File WWC' → must relabel, not re-shift.
+    const partial = [...V2_HEADER.slice(0, 8), '', ...V2_HEADER.slice(8)];
+    expect(partial).toHaveLength(14);
+    expect(partial[8]).toBe(''); // blank File WWC label
+    expect(partial[13]).toBe('_job_key'); // _job_key already shifted to N
+    const api = new FakeSheets([partial]);
+    await new SheetSink(api).ensureHeader();
+    expect(api.calls).toEqual(['setHeader(14)']); // relabel ONLY — no second insertColumn (would double-shift)
+    expect(api.rows[0]).toEqual(V3_HEADER);
+    // Idempotent afterward.
+    await new SheetSink(api).ensureHeader();
+    expect(api.calls).toEqual(['setHeader(14)']);
+  });
+
+  it('fails loud on an unrecognized header rather than overwriting (10 cols, no _job_key)', async () => {
     const weird = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']; // 10 cols, no _job_key
+    const api = new FakeSheets([weird]);
+    await expect(new SheetSink(api).ensureHeader()).rejects.toThrow();
+  });
+
+  it('fails loud on a genuinely unrecognized header (5 random cols) (Finding #5)', async () => {
+    const weird = ['a', 'b', 'c', 'd', 'e']; // 5 cols, no _job_key anywhere
     const api = new FakeSheets([weird]);
     await expect(new SheetSink(api).ensureHeader()).rejects.toThrow();
   });
@@ -291,5 +326,12 @@ describe('schema constants', () => {
     expect(V3_HEADER).toHaveLength(14);
     expect(V3_HEADER[8]).toBe('File WWC');
     expect(V3_HEADER[13]).toBe('_job_key');
+  });
+
+  it('LAST_COL_LETTER is derived from the v3 header width — N today (Finding #15)', () => {
+    // The three GoogleSheetsApi range methods key off this single constant, so a future header
+    // change updates one place instead of three hardcoded N literals.
+    expect(LAST_COL_LETTER).toBe('N');
+    expect(V3_HEADER).toHaveLength(14); // guard: if the header grows, the letter must track it
   });
 });

@@ -5,6 +5,7 @@ import { LayoutChangedError, PortalTimeoutError, PaginationDetectedError } from 
 import { computeXtmJobKey } from '../detection/jobKey.js';
 import { BKK_OFFSET_MS } from '../schedule/bangkokCalendar.js';
 import type { XtmRawJob, XtmJobSnapshot } from '../detection/types.js';
+import type { Logger } from '../monitoring/logger.js';
 
 /**
  * Either a Page or a Frame works — production reads the Active grid inside
@@ -51,6 +52,25 @@ export function parseXtmWords(raw: string | null): number | null {
   if (digits === '') return null;
   const n = Number(digits);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Weighted-word-count parser for File WWC — DECIMAL-TOLERANT, unlike {@link parseXtmWords}
+ * (which strips ALL non-digits and is correct for the always-integer Words column). File WWC is
+ * a WEIGHTED count that CAN render fractional (e.g. en_GB "1,234.5"): the digits-only parser
+ * would read that as 12345 — a ~10x inflation — and `z.number().int()` would accept it silently.
+ * So here we strip thousands separators (comma / NBSP / spaces) but KEEP the decimal point,
+ * parseFloat, then round to an integer. The DB column is INTEGER and live values are integers,
+ * so the rounding only bites on the rare fractional render — and it kills the 10x bug. Null when
+ * absent. NOTE: en_GB uses "." for the decimal and "," for thousands (recon-confirmed); a comma-
+ * decimal locale is not expected here and is out of scope (would need a locale-aware parser).
+ */
+export function parseXtmWwc(raw: string | null): number | null {
+  if (!raw) return null;
+  const cleaned = raw.replace(/[^\d.]/g, '');
+  if (cleaned === '' || cleaned === '.') return null;
+  const n = Number.parseFloat(cleaned);
+  return Number.isFinite(n) ? Math.round(n) : null;
 }
 
 /** Pull the XTM `ID-<hex>` token out of the File cell (reference only — not the key). */
@@ -182,7 +202,13 @@ export async function readActiveSnapshot(
       dueDate: normalizeXtmDue(row.dueRaw),
       dueRaw: row.dueRaw,
       words: parseXtmWords(row.wordsRaw),
-      fileWwc: parseXtmWords(row.fileWwcRaw),
+      // File WWC is a WEIGHTED count (CAN be fractional) read from a POSITIONAL cell
+      // (selectors.ts active.cell.fileWwc = td:nth-child(3) — recon-confirmed at col 3 on the
+      // LIVE Active grid; a column inserted BEFORE index 3 would silently shift it). Parse with
+      // the decimal-tolerant parseXtmWwc — NOT parseXtmWords — or "1,234.5" inflates ~10x. This
+      // field is logging-only + null-tolerant, so a single null must NOT fail loud (would page on
+      // a cosmetic field); a layout shift surfaces via the project/file fail-loud guards instead.
+      fileWwc: parseXtmWwc(row.fileWwcRaw),
       step: row.step,
       role: row.role,
       // D6 (operator-confirmed): acceptability is NOT in the grid cells — it is the
@@ -258,13 +284,38 @@ async function finalizeSnapshot(
   return { jobs, malformed, capturedAt, pollCycleId, emptyListConfirmed: false };
 }
 
+/** Optional observers for {@link readClosedKeys}, mirroring readActiveSnapshot's evidence
+ * callback. Both are optional so the production caller (xtmClient) need not change to compile,
+ * and the systematic-layout-drift signal is no-op until a logger/evidence sink is wired in. */
+export interface ReadClosedKeysObservers {
+  /** Structured logger for the layout-drift WARN (no-op when absent). */
+  logger?: Pick<Logger, 'warn'>;
+  /** Sanitized-evidence capture, same shape as readActiveSnapshot's `captureEvidence`. */
+  captureEvidence?: (reason: string) => Promise<string | undefined>;
+}
+
 /**
  * Read the job keys currently in the Closed tab (FR-014). Used only when an
  * accepted job disappears from Active, to tell Closed from Removed. Returns an
  * empty set when the grid is genuinely empty; the Closed grid shares the Active
  * column positions (indices 1–11), so the same file/step/role cells apply.
+ *
+ * That shared-layout assumption is LOAD-BEARING but only recon-asserted, and it INCLUDES File
+ * WWC being at col 3 on Closed. If the live Closed grid OMITS File WWC (plausible — a finished
+ * task has no remaining weighted count), step/role shift LEFT by one, the borrowed selectors
+ * read the wrong cells, and the recomputed key never matches the Active `_job_key` → a finished
+ * job silently misclassifies as "removed" (and, with held-derived capacity, fails to return its
+ * quota). We cannot fully fix that without a live Closed-grid recon. As a NON-DESTABILIZING
+ * drift detector: when Closed data rows are present (kebab + non-empty file) but EVERY such row
+ * reads null step AND null role — the systematic-mismatch signature — capture sanitized evidence
+ * and emit a WARN. We do NOT throw/page: a throw here strands the Closed-vs-Removed decision and
+ * pages on a cosmetic mismatch, a worse failure mode than the bug. A single odd row never trips
+ * it (the all-rows check requires every candidate row to be null).
  */
-export async function readClosedKeys(scope: GridScope): Promise<Set<string>> {
+export async function readClosedKeys(
+  scope: GridScope,
+  observers: ReadClosedKeysObservers = {},
+): Promise<Set<string>> {
   await scope
     .locator(XTM.closed.gridContainer)
     .first()
@@ -287,16 +338,42 @@ export async function readClosedKeys(scope: GridScope): Promise<Set<string>> {
     {
       kebab: XTM.closed.rowKebab,
       file: XTM.closed.cell.file,
-      step: XTM.active.cell.step,
-      role: XTM.active.cell.role,
+      // Closed-specific step/role (centralized in selectors.ts). Same strings as Active TODAY,
+      // but keyed off XTM.closed.* so a future Closed-only layout fix lives in one place.
+      step: XTM.closed.cell.step,
+      role: XTM.closed.cell.role,
     },
   );
   const keys = new Set<string>();
+  let candidateCount = 0;
+  let allStepRoleNull = true;
   for (const r of scraped) {
     // A Closed row with no file cell is malformed — never key on an empty file
     // (a degenerate '' key could falsely match another empty-file row).
     if (!r.file || r.file.trim() === '') continue;
+    candidateCount++;
+    if (r.step !== null || r.role !== null) allStepRoleNull = false;
     keys.add(computeXtmJobKey({ fileName: r.file, step: r.step, role: r.role }));
+  }
+  // Systematic selector drift (e.g. live Closed grid omits File WWC col 3 → step/role shift left):
+  // candidate rows exist but EVERY one reads null step AND null role. Fail loud-but-soft —
+  // evidence + WARN, never throw — so a misclassified Closed→Removed is DIAGNOSABLE without
+  // paging on a cosmetic mismatch. The real fix needs a live Closed-grid recon (the column set is
+  // unconfirmed — see selectors.ts `closed.cell` VERIFY note).
+  if (candidateCount > 0 && allStepRoleNull) {
+    const evidencePath = await observers.captureEvidence?.('closed_layout_drift');
+    observers.logger?.warn(
+      {
+        module: 'xtmInbox',
+        action: 'readClosedKeys',
+        outcome: 'layout_drift',
+        rows: candidateCount,
+        evidencePath,
+      },
+      'Closed rows present but step AND role read null across ALL rows — the Closed grid layout ' +
+        'may have drifted (e.g. File WWC column omitted), so recomputed keys will not match ' +
+        'Active. VERIFY closed.cell selectors against live Closed-grid HTML.',
+    );
   }
   return keys;
 }

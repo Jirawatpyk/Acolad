@@ -80,15 +80,20 @@ export class XtmJobStore {
     return out;
   }
 
-  /** Job keys of held (lifecycle 'accepted') jobs whose deadline is null/unparseable — exactly
-   *  the jobs `wordsDueByDeadline()` skips (they contribute NOTHING to the per-deadline-day
-   *  capacity seed). Normally empty (see the F1 invariant above); a non-empty result is the
-   *  over-accept anomaly the cycle alerts on (I1). Reads the same held list as the bucket so the
-   *  two can never disagree about which jobs are held. */
-  heldJobsMissingDeadline(): string[] {
+  /** Job keys of held (lifecycle 'accepted') jobs whose `dayOf` bucket key is null — exactly the
+   *  jobs `wordsDueByDeadline(dayOf)` skips (they contribute NOTHING to the per-deadline-day
+   *  capacity seed). PARTNERS with `wordsDueByDeadline`: a job is classified "missing-deadline"
+   *  iff `dayOf` returns null, so they can never disagree about which held jobs were dropped — the
+   *  cycle MUST pass the SAME mapper to both. Default `deadlineDayOf` (raw date) keeps the store
+   *  usable standalone (ops/tests). Normally empty (see the F1 invariant above); a non-empty result
+   *  is the over-accept anomaly the cycle alerts on (I1). Reads the same held list as the bucket so
+   *  the two can never disagree about which jobs are held. */
+  heldJobsMissingDeadline(
+    dayOf: (dueDate: string | null) => string | null = deadlineDayOf,
+  ): string[] {
     const out: string[] = [];
     for (const s of this.listByLifecycle('accepted')) {
-      if (deadlineDayOf(s.dueDate) === null) out.push(s.jobKey);
+      if (dayOf(s.dueDate) === null) out.push(s.jobKey);
     }
     return out;
   }

@@ -365,6 +365,9 @@ export class XtmPollLoop {
               this.cfg.workdays,
               holidaysForEffectiveDay(nowMs),
             ),
+            // #8: only advertise the per-deadline cap when the schedule gate is ON. With the gate
+            // off the cap is not enforced (accept 24/7), so the headline must not claim a limit.
+            this.cfg.ACCEPT_SCHEDULE_ENABLED,
           );
           this.db.transaction(() => {
             this.outbox.enqueue(`daily:${date}`, JSON.stringify(card), this.clock.nowIso(), 'team');

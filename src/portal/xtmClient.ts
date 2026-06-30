@@ -289,7 +289,18 @@ export class PlaywrightXtmClient implements XtmPortalClient {
       .waitFor({ state: 'attached', timeout: 10_000 })
       .catch(() => undefined);
     await this.settleGrid(page, 'closed'); // Closed rows arrive via a later XHR than its shell, too
-    const keys = await readClosedKeysFromGrid(frame);
+    // Wire the layout-drift observers (logger + sanitized-evidence) the same way the Active path
+    // does. We are still on the Closed tab here (the return-to-Active click is below), so a
+    // capture inside readClosedKeysFromGrid serializes the Closed grid DOM. Without this the
+    // drift WARN/evidence would be DORMANT in production (observers default to no-op).
+    const secrets = secretValues(this.cfg);
+    const keys = await readClosedKeysFromGrid(frame, {
+      // Spread the logger only when present — exactOptionalPropertyTypes forbids an explicit
+      // `logger: undefined` on the optional property (this.logger is Logger | undefined).
+      ...(this.logger ? { logger: this.logger } : {}),
+      captureEvidence: (reason) =>
+        captureEvidence(page, this.cfg.STATE_DIR, reason, this.clock.nowIso(), secrets),
+    });
     // Return to Active so the next fetch reads the right tab — also a grid reload (FR-027).
     this.rate.record(this.clock.nowMs());
     await frame

@@ -70,6 +70,11 @@ export function dueDailyReport(
  *                       so "Due today" matches the cap; the default is the raw deadline date
  *                       (`deadlineDayOf`) so the report stays usable standalone (byte-for-byte
  *                       legacy bucketing for callers without a work calendar).
+ * @param capEnforced    Whether the per-deadline cap is actually enforced — i.e. the schedule gate
+ *                       is ON (`ACCEPT_SCHEDULE_ENABLED=1`). Defaults to true. When false the
+ *                       headline must NOT advertise "cap N/day" (accept runs 24/7 with no cap when
+ *                       the gate is off; claiming an enforced limit would mislead). The effective-
+ *                       day "Due today" workload view is still valid and is shown either way.
  */
 export function buildDailyReportCard(
   held: XtmJobState[],
@@ -77,6 +82,7 @@ export function buildDailyReportCard(
   xtmUrl: string,
   maxWordsPerDay: number,
   effectiveDay: (dueDate: string | null) => string | null = deadlineDayOf,
+  capEnforced = true,
 ): { cardsV2: unknown[] } {
   const today = bangkokDateString(nowMs);
 
@@ -97,8 +103,11 @@ export function buildDailyReportCard(
     if (effectiveDay(j.dueDate) === today) dueTodayWords += j.words ?? 0;
   }
 
+  // Advertise the enforced cap ONLY when the gate is on AND a positive cap is configured.
+  // Gate off (capEnforced=false) → accept is 24/7 with no cap, so "(no cap)" is the honest text;
+  // cap=0 also means no cap. Either way, never claim a limit that isn't enforced.
   const usage =
-    maxWordsPerDay > 0
+    capEnforced && maxWordsPerDay > 0
       ? `${dueTodayWords} words (cap ${maxWordsPerDay}/day per deadline)`
       : `${dueTodayWords} words (no cap)`;
 

@@ -85,9 +85,14 @@ export const XTM = {
     // Indices 1–11 are identical on Active and Closed (omitted cols are trailing).
     cell: {
       project: 'td:nth-child(2)', // RawJob.projectName
-      // File WWC (Weighted Word Count) sits between Project(2) and Customer(4) — logged to
-      // the Sheet only (not used for capacity); read like Words (digits-only, null when absent).
-      fileWwc: 'td:nth-child(3)', // RawJob.fileWwc
+      // File WWC (Weighted Word Count) sits between Project(2) and Customer(4) — logged to the
+      // Sheet only (not used for capacity). POSITIONAL selector (unlike Words, which has a stable
+      // data-testid): RECON-CONFIRMED at col 3 on the LIVE Active grid (PR #18 — file=5/source=6/
+      // target=7 were already there, so this was an add, not a layout shift). A future column
+      // inserted BEFORE index 3 would silently read the WRONG cell and log null — if the grid
+      // layout ever changes, revisit this AND the Closed step/role borrow below. Parsed by the
+      // decimal-tolerant parseXtmWwc (weighted ⇒ may be fractional; see xtmInbox.ts).
+      fileWwc: 'td:nth-child(3)', // RawJob.fileWwc — POSITIONAL, recon-confirmed col 3
       file: 'td:nth-child(5)', // RawJob.fileName + D2 job-key basis
       source: 'td:nth-child(6)', // RawJob.sourceLang ("English (USA)")
       target: 'td:nth-child(7)', // RawJob.targetLang — compared to Malay (config)
@@ -123,6 +128,16 @@ export const XTM = {
       project: 'td:nth-child(2)',
       file: 'td:nth-child(5)', // join key vs the disappeared Active job
       target: 'td:nth-child(7)',
+      // VERIFY against live Closed-grid HTML — step/role are BORROWED from Active on the recon-
+      // asserted shared-layout assumption (Active indices 1–11 == Closed 1–11). That assumption
+      // INCLUDES File WWC at col 3: if the live Closed grid OMITS File WWC (plausible — a finished
+      // task has no remaining weighted count), step/role shift LEFT by one and these MUST change.
+      // readClosedKeys emits a structured WARN + evidence (closed_layout_drift) when every Closed
+      // row reads null step AND role — the systematic-mismatch signal — but the real fix needs a
+      // live Closed-grid recon to confirm the column set. Same strings as Active TODAY = NO
+      // behavior change; this only centralizes + documents the assumption.
+      step: 'td:nth-child(9)', // BORROWED from Active — see VERIFY note above
+      role: 'td:nth-child(11)', // BORROWED from Active — see VERIFY note above
       dueDate: '[data-testid="dueDate-fullDate"]',
     },
   },

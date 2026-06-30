@@ -259,5 +259,22 @@ describe('XtmJobStore', () => {
       ]);
       expect(store.heldJobsMissingDeadline()).toEqual([]);
     });
+
+    it('F10: uses the injected dayOf mapper — a job is "missing" iff its bucket key is null (partners wordsDueByDeadline)', () => {
+      const store = freshStore();
+      store.upsertMany([
+        accepted({ jobKey: 'ok', dueDate: '2026-06-24T18:00:00+07:00', words: 100 }),
+        accepted({ jobKey: 'mapNull', dueDate: '2026-06-25T18:00:00+07:00', words: 200 }),
+      ]);
+      // A mapper that buckets 'ok' but returns null for 'mapNull's (perfectly parseable) deadline.
+      // The SAME mapper must drive BOTH methods, so 'mapNull' is flagged missing AND skipped by the
+      // seed — proving heldJobsMissingDeadline keys off dayOf, not a hardcoded raw-date parse.
+      const dayOf = (d: string | null): string | null =>
+        d === '2026-06-25T18:00:00+07:00' ? null : '2026-06-24';
+      expect(store.heldJobsMissingDeadline(dayOf)).toEqual(['mapNull']);
+      const m = store.wordsDueByDeadline(dayOf);
+      expect(m.get('2026-06-24')).toBe(100); // 'ok' bucketed
+      expect(m.has('2026-06-25')).toBe(false); // 'mapNull' skipped — exactly the missing one
+    });
   });
 });
