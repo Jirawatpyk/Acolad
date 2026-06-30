@@ -33,6 +33,7 @@ const xraw = (over: Partial<XtmRawJob> = {}): XtmRawJob => ({
 const target = (raw: XtmRawJob): AcceptTarget => ({
   jobKey: computeXtmJobKey(raw),
   targetLang: raw.targetLang ?? '',
+  projectName: raw.projectName,
   fileName: raw.fileName,
   step: raw.step,
   role: raw.role,
@@ -42,6 +43,7 @@ const target = (raw: XtmRawJob): AcceptTarget => ({
 const t = (jobKey: string, targetLang: string): AcceptTarget => ({
   jobKey,
   targetLang,
+  projectName: 'P',
   fileName: `${jobKey}.docx`,
   step: 'PE 1',
   role: 'Corrector',
@@ -371,6 +373,7 @@ describe('acceptEligibleTasks — locates the target row by cell text, not order
           }),
           // Claimable target SECOND (menu = "Accept task" + bulk item).
           xtmMenuRow('clm222', 'accept', {
+            project: claimable.projectName,
             file: claimable.fileName,
             step: claimable.step ?? '',
             role: claimable.role ?? '',
@@ -413,6 +416,7 @@ describe('acceptEligibleTasks — locates the target row by cell text, not order
       xtmActivePage(
         [
           xtmMenuRow('clm222', 'finish', {
+            project: claimable.projectName,
             file: claimable.fileName,
             step: claimable.step ?? '',
             role: claimable.role ?? '',
@@ -531,6 +535,7 @@ describe('acceptEligibleTasks — exact cell text match in rowForTarget (C1)', (
           }),
           // Exact target SECOND — this is the one that must be clicked.
           xtmMenuRow('exact222', 'accept', {
+            project: exactTarget.projectName,
             file: exactTarget.fileName,
             step: exactTarget.step ?? '',
             role: exactTarget.role ?? '',
@@ -607,6 +612,85 @@ describe('acceptEligibleTasks — exact cell text match in rowForTarget (C1)', (
     expect(out[0]?.jobKey).toBe(target(exactTarget).jobKey);
     // Exact target absent from re-read → missing (retriable).
     expect(out[0]?.outcome).toBe('missing');
+  });
+});
+
+// ── C1c: rowForTarget disambiguates rows with identical file/step/role by project ──
+// Two Malay rows share the same file name, step, and role but differ only in projectName
+// ("EMAIL" vs "EMAIL_1"). Without the project filter, .first() would always pick the
+// first row in DOM order regardless of which project the target belongs to.
+// After the fix, rowForTarget adds an exact project-cell predicate so each target
+// resolves to its own unique row.
+describe('acceptEligibleTasks — rowForTarget includes project cell in row filter (C1c)', () => {
+  let browser: Browser;
+  let page: Page;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+  });
+  afterAll(async () => {
+    await browser.close();
+  });
+  beforeEach(async () => {
+    page = await browser.newPage();
+  });
+  afterEach(async () => {
+    await page.close();
+  });
+
+  const FILE = 'x.html';
+  const STEP = 'Post-Editing (PE) 1'; // match malayRow default so DOM matches target
+  const ROLE = 'Corrector';
+
+  it('C1c: selects the EMAIL_1 row (not EMAIL) when both share file/step/role', async () => {
+    // Grid: EMAIL row FIRST, EMAIL_1 row SECOND — same file/step/role, only project differs.
+    // Without project filter, rowForTarget picks EMAIL (first). Since EMAIL and EMAIL_1 belong
+    // to different bulk-accept groups, clicking EMAIL's bulk leaves EMAIL_1 still claimable
+    // (acceptAvailable=true in the re-read) → outcome='failed' for the EMAIL_1 target.
+    // With project filter, only EMAIL_1 matches → clicked → acceptAvailable=false → 'accepted'.
+    // EMAIL row is FIRST and shows "Finish task" (already owned — no bulk to click).
+    // EMAIL_1 row is SECOND and shows "Accept task" (claimable).
+    // Without project filter, rowForTarget picks EMAIL (first match on file/step/role).
+    // EMAIL has a finish menu → already-owned → no click → post_accept_click not fired → RED.
+    // With project filter, rowForTarget picks only EMAIL_1 → clicked → GREEN.
+    await page.setContent(
+      xtmActivePage(
+        [
+          xtmMenuRow('email1', 'finish', { project: 'EMAIL', file: FILE, step: STEP, role: ROLE }),
+          xtmMenuRow('email1x', 'accept', {
+            project: 'EMAIL_1',
+            file: FILE,
+            step: STEP,
+            role: ROLE,
+          }),
+        ],
+        { total: 2 },
+      ),
+    );
+
+    const email1Target = xraw({ projectName: 'EMAIL_1', fileName: FILE, step: STEP, role: ROLE });
+    const reReadActive = vi.fn(
+      async (): Promise<XtmRawJob[]> => [xraw({ ...email1Target, acceptAvailable: false })],
+    );
+    const captured: string[] = [];
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async (reason) => {
+        captured.push(reason);
+        return undefined;
+      },
+      nowIso: () => AT,
+      rowAttachTimeoutMs: 2_000,
+    };
+
+    const out = await acceptEligibleTasks(page, [target(email1Target)], deps);
+
+    // The bulk WAS clicked on the EMAIL_1 row (not EMAIL) → post_accept_click fires.
+    expect(captured).toContain('post_accept_click');
+    expect(reReadActive).toHaveBeenCalledTimes(1);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.jobKey).toBe(target(email1Target).jobKey);
+    expect(out[0]?.outcome).toBe('accepted');
   });
 });
 

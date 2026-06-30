@@ -300,6 +300,7 @@ export class XtmPollCycle {
           summary.reconEligible.push({
             jobKey: s.jobKey,
             targetLang: s.targetLang ?? '',
+            projectName: s.projectName,
             fileName: s.fileName,
             step: s.step,
             role: s.role,
@@ -506,6 +507,7 @@ export class XtmPollCycle {
         targets.push({
           jobKey: s.jobKey,
           targetLang: s.targetLang ?? '',
+          projectName: s.projectName,
           fileName: s.fileName,
           step: s.step,
           role: s.role,

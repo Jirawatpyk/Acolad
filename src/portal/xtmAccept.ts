@@ -326,6 +326,7 @@ function exact(s: string): RegExp {
 function rowForTarget(scope: Scope, t: AcceptTarget): Locator {
   let row = scope
     .locator(`${XTM.active.gridContainer} tbody tr`)
+    .filter({ has: scope.locator(XTM.active.cell.project, { hasText: exact(t.projectName) }) })
     .filter({ has: scope.locator(XTM.active.cell.file, { hasText: exact(t.fileName) }) });
   if (t.step)
     row = row.filter({ has: scope.locator(XTM.active.cell.step, { hasText: exact(t.step) }) });
