@@ -213,7 +213,8 @@ export async function readAcceptAvailability(
     if (!fileName) continue;
     const step = (await row.locator(XTM.active.cell.step).first().textContent())?.trim() || null;
     const role = (await row.locator(XTM.active.cell.role).first().textContent())?.trim() || null;
-    const key = computeXtmJobKey({ fileName, step, role });
+    const project = (await row.locator(XTM.active.cell.project).first().textContent()) ?? '';
+    const key = computeXtmJobKey({ projectName: project, fileName, step, role });
     if (!jobKeys.has(key) || result.has(key)) continue;
     await kebab.click({ timeout: ACCEPT_TIMEOUT_MS });
     const openMenu = scope.locator(XTM.accept.menuContainer).first();

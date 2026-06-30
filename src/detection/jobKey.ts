@@ -38,18 +38,22 @@ const normField = (v: string | null): string => (v ?? '').trim().toLowerCase();
 
 /**
  * Stable XTM business identity (R3): the same file may appear as several tasks
- * (different workflow step / role), so identity is the `fileId|step|role`
+ * (different workflow step / role), so identity is the `projectName|fileName|step|role`
  * composite — NOT the volatile `xtm_task_id` (an "ID-xxxx" that can churn). The
  * composite is normalized (trim + lowercase) and pipe-delimited so it is
  * deterministic across sessions.
  *
- * `fileName` stands in for the file identity until recon (D2) confirms whether
- * XTM exposes a distinct file id and whether project disambiguation is needed;
- * the selector/parse layer fails loud if the file column is missing rather than
- * letting two files collide silently.
+ * project disambiguation: DONE (recon 2026-06-30 — two projects can share a file name)
  */
-export function computeXtmJobKey(job: Pick<XtmRawJob, 'fileName' | 'step' | 'role'>): string {
-  return [normField(job.fileName), normField(job.step), normField(job.role)].join('|');
+export function computeXtmJobKey(
+  job: Pick<XtmRawJob, 'projectName' | 'fileName' | 'step' | 'role'>,
+): string {
+  return [
+    normField(job.projectName),
+    normField(job.fileName),
+    normField(job.step),
+    normField(job.role),
+  ].join('|');
 }
 
 /** Hash of displayed XTM fields — detects detail changes on a visible job. */

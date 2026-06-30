@@ -192,6 +192,7 @@ describe('readClosedKeys (Closed-vs-Removed disambiguation)', () => {
     await page.setContent(xtmActivePage([malayRow()]));
     const keys = await readClosedKeys(page, { logger: { warn }, captureEvidence });
     const expectedKey = computeXtmJobKey({
+      projectName: 'Newswire Release 4712942',
       fileName: '4712942-1-21 (ID-1b270f065098)_captions.json',
       step: 'Post-Editing (PE) 1',
       role: 'Corrector',
@@ -213,6 +214,7 @@ describe('readClosedKeys (Closed-vs-Removed disambiguation)', () => {
 
     // The drift still produces a (wrong) key, so it does NOT match the real Active key.
     const realActiveKey = computeXtmJobKey({
+      projectName: 'Newswire Release 4712942',
       fileName: '4712942-1-21 (ID-1b270f065098)_captions.json',
       step: 'Post-Editing (PE) 1',
       role: 'Corrector',

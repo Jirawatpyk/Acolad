@@ -331,6 +331,7 @@ export async function readClosedKeys(
       return (rows as unknown as Queryable[])
         .filter((r) => r.querySelector(sel.kebab) !== null)
         .map((el) => ({
+          project: cell(el, sel.project),
           file: cell(el, sel.file),
           step: cell(el, sel.step),
           role: cell(el, sel.role),
@@ -338,6 +339,7 @@ export async function readClosedKeys(
     },
     {
       kebab: XTM.closed.rowKebab,
+      project: XTM.closed.cell.project,
       file: XTM.closed.cell.file,
       // Closed-specific step/role (centralized in selectors.ts). Same strings as Active TODAY,
       // but keyed off XTM.closed.* so a future Closed-only layout fix lives in one place.
@@ -354,7 +356,14 @@ export async function readClosedKeys(
     if (!r.file || r.file.trim() === '') continue;
     candidateCount++;
     if (r.step !== null || r.role !== null) allStepRoleNull = false;
-    keys.add(computeXtmJobKey({ fileName: r.file, step: r.step, role: r.role }));
+    keys.add(
+      computeXtmJobKey({
+        projectName: r.project ?? '',
+        fileName: r.file,
+        step: r.step,
+        role: r.role,
+      }),
+    );
   }
   // Systematic selector drift (e.g. live Closed grid omits File WWC col 3 → step/role shift left):
   // candidate rows exist but EVERY one reads null step AND null role. Fail loud-but-soft —

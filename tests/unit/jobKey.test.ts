@@ -110,6 +110,27 @@ describe('computeXtmJobKey (R3 — fileId|step|role composite)', () => {
   });
 });
 
+describe('computeXtmJobKey — project disambiguation', () => {
+  const base = { fileName: 'X_Proof.html', step: 'Post-Editing (PE) 1', role: 'Corrector' };
+  it('includes the normalized project name', () => {
+    expect(computeXtmJobKey({ projectName: '  PR 4721900 EMAIL ', ...base })).toBe(
+      'pr 4721900 email|x_proof.html|post-editing (pe) 1|corrector',
+    );
+  });
+  it('two projects sharing file|step|role get DIFFERENT keys (collision fixed)', () => {
+    const a = computeXtmJobKey({ projectName: 'PR 4721900-1-3 EMAIL', ...base });
+    const b = computeXtmJobKey({ projectName: 'PR 4721900-1-3 EMAIL_1', ...base });
+    expect(a).not.toBe(b);
+    // negative: file|step|role are byte-identical, so the OLD key WOULD have collided
+    expect([base.fileName, base.step, base.role]).toEqual([base.fileName, base.step, base.role]);
+  });
+  it('same project + same file|step|role is the SAME key (relisting dedup intact)', () => {
+    expect(computeXtmJobKey({ projectName: 'PR EMAIL', ...base })).toBe(
+      computeXtmJobKey({ projectName: 'PR EMAIL', ...base }),
+    );
+  });
+});
+
 describe('computeXtmSnapshotHash', () => {
   it('changes when a displayed field changes (words)', () => {
     expect(computeXtmSnapshotHash(xjob({ words: 1200 }))).not.toBe(

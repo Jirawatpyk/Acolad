@@ -651,13 +651,17 @@ describe('readAcceptAvailability — scopes acceptTaskItem query to the open men
       xtmActivePage(
         [
           // Non-target row: claimable (Accept-task in DOM) — must NOT affect target's result.
+          // project matches targetRaw.projectName so readAcceptAvailability computes the correct key.
           xtmMenuRow('other111', 'accept', {
+            project: targetRaw.projectName,
             file: 'OTHER (ID-other111)_file.json',
             step: 'Post-Editing (PE) 1',
             role: 'Corrector',
           }),
           // Target row: owned (Finish-task) — the probe must return false for this key.
+          // project matches targetRaw.projectName so the DOM-derived key equals computeXtmJobKey(targetRaw).
           xtmMenuRow('tgt222', 'finish', {
+            project: targetRaw.projectName,
             file: targetRaw.fileName,
             step: targetRaw.step ?? '',
             role: targetRaw.role ?? '',
