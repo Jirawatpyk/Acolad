@@ -75,6 +75,12 @@ export class JobStore {
    * re-read of Active), updating accept_status, accepted_at, and lifecycle_status
    * together. `missing` (snatched) resets accept_status to 'none' since the job
    * was never actually accepted.
+   *
+   * #11 (defense-in-depth): the ACCEPTED outcome also clears reject_reason at the
+   * source, so the "accepted ⇒ reject_reason IS NULL" invariant does not rely solely
+   * on the orchestration clearing it before the accept. A non-accepted outcome (failed
+   * /missing) keeps whatever reason it had — a failed accept on a previously gate-Rejected
+   * group must not lose its reason.
    */
   recordAcceptOutcome(jobKey: string, outcome: AcceptOutcome, at: string | null): void {
     const map: Record<AcceptOutcome, { accept: AcceptStatus; lifecycle: XtmLifecycleStatus }> = {
@@ -83,9 +89,11 @@ export class JobStore {
       failed: { accept: 'failed', lifecycle: 'accept_failed' },
     };
     const m = map[outcome];
-    this.db
-      .prepare('UPDATE jobs SET accept_status=?, accepted_at=?, lifecycle_status=? WHERE job_key=?')
-      .run(m.accept, outcome === 'accepted' ? at : null, m.lifecycle, jobKey);
+    const sql =
+      outcome === 'accepted'
+        ? 'UPDATE jobs SET accept_status=?, accepted_at=?, lifecycle_status=?, reject_reason=NULL WHERE job_key=?'
+        : 'UPDATE jobs SET accept_status=?, accepted_at=?, lifecycle_status=? WHERE job_key=?';
+    this.db.prepare(sql).run(m.accept, outcome === 'accepted' ? at : null, m.lifecycle, jobKey);
   }
 
   getAcceptStatus(jobKey: string): AcceptStatus | undefined {
