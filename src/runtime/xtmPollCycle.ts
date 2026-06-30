@@ -614,26 +614,39 @@ export class XtmPollCycle {
     };
     for (const ev of result.events) reportJob(ev.jobKey, ev);
     for (const jobKey of acceptResults.keys()) reportJob(jobKey, undefined);
-    // I3/C4: announce schedule rejections that produced NO appearance event and NO accept
-    // outcome (a robustness-pass block) — otherwise they would be silently dropped. Only a
-    // transition INTO 'rejected' is announced: a job already 'rejected' last cycle and still
-    // blocked must NOT re-enqueue (the event_id carries pollCycleId, so re-reporting would
-    // duplicate every cycle). A reason change within 'rejected' is intentionally not
-    // re-announced (mirrors the accept_failed dedup philosophy). reportJob dedups by jobKey,
-    // so a job already reported via its event/outcome above is skipped here. blockNotes also
-    // holds skip reasons (F15), but every skipped job already fired via its appearance event
+    // Jobs the field-change re-sync (below) will already refresh on the Sheet — a material Due/Words
+    // change reaches resolveSheetStatusAndNote with the PERSISTED reject reason (a silent Sheet-only
+    // correction). The #15 reason-change re-report must defer to that path for these (it would only
+    // dedup it, and turn a silent correction into a Chat announce). A reason change with NO material
+    // field change has no other path, so #15 owns it.
+    const materialFieldSync = new Set(
+      result.detailsChanges
+        .filter((dc) => hasMaterialSheetChange(dc.changes))
+        .map((dc) => dc.jobKey),
+    );
+    // I3/C4: announce schedule rejections / skips that produced NO appearance event and NO accept
+    // outcome (a robustness-pass block) — otherwise they would be silently dropped. reportJob dedups
+    // by jobKey, so a job already reported via its event/outcome above is skipped here. blockNotes
+    // also holds skip reasons (F15), but every skipped job already fired via its appearance event
     // above, so reportJob's jobKey dedup makes those entries no-ops here.
     for (const jobKey of blockNotes.keys()) {
-      // Re-announce only on a status CHANGE. A job whose lifecycle is UNCHANGED from last cycle
-      // (still 'rejected', or still 'skipped') must NOT re-enqueue every cycle — the event_id carries
-      // pollCycleId, so re-reporting would duplicate. But a was-'rejected'-now-'skipped' transition
-      // (Finding #1: the robustness pass flipping a still-present infeasible job over the word cap) IS
-      // a real change and must be reported — the old `prev === 'rejected'` guard swallowed it, leaving
-      // the Sheet on a stale 'Rejected'. reportJob dedups by jobKey, so a job already reported via its
-      // event/outcome above is skipped here.
-      const prevStatus = prev.get(jobKey)?.lifecycleStatus;
-      const curStatus = result.nextStates.get(jobKey)?.lifecycleStatus;
-      if (prevStatus === curStatus) continue;
+      // Re-announce on a status CHANGE, OR on a reject-REASON change while still 'rejected' (#15: the
+      // Sheet Note shows the binding reason, so a job that stays rejected but for a DIFFERENT reason —
+      // e.g. "cannot finish in time" → "daily cap reached" — must refresh the Note; the persisted
+      // reason is what the Sheet renders). A truly UNCHANGED still-rejected / still-skipped job must
+      // NOT re-enqueue every cycle — the event_id carries pollCycleId, so re-reporting would duplicate
+      // (no every-cycle spam). The old `prev === 'rejected'` guard swallowed BOTH a now-'skipped'
+      // transition (Finding #1) and a reason change (#15), leaving the Sheet on a stale row. A reason
+      // change driven by a MATERIAL field change is left to the field-sync path below (no double-report).
+      const prevState = prev.get(jobKey);
+      const cur = result.nextStates.get(jobKey);
+      const statusUnchanged = prevState?.lifecycleStatus === cur?.lifecycleStatus;
+      const stillRejectedReasonChanged =
+        prevState?.lifecycleStatus === 'rejected' &&
+        cur?.lifecycleStatus === 'rejected' &&
+        prevState.rejectReason !== cur.rejectReason &&
+        !materialFieldSync.has(jobKey);
+      if (statusUnchanged && !stillRejectedReasonChanged) continue;
       reportJob(jobKey, undefined);
     }
     // Field-change re-sync (Bug B): a still-visible job whose Due date/Words XTM set AFTER

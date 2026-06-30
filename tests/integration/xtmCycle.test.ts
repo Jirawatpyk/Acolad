@@ -1298,6 +1298,56 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(note).not.toContain('11:00'); // NOT the later missing-detection capturedAt
   });
 
+  it('#15: a still-rejected job whose reject REASON changes (no field change) re-enqueues the Sheet row; an unchanged reason does not', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    // 1500w (> the 1000 cap) but FEASIBLE by Wed from Monday (multi-day) → capacity reason A.
+    // Fields are FIXED across all cycles (dueWed18, 1500) so there is NO detailsChange/field-sync —
+    // the ONLY path that can refresh the Sheet is the blockNotes re-announce.
+    const job = { dueDate: dueWed18, words: 1500 };
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    const aRows = (): Array<{ status: string; note: string | null }> =>
+      sheetRows().filter((r) => r.file === 'a.docx');
+    // cN (Mon 10:00): feasible but its own size > cap → reason A ("exceed the daily cap").
+    await cycle.run(snapAt([xraw(job)], MON_10, 'cN'));
+    expect(only('a.docx').lifecycleStatus).toBe('rejected');
+    expect(aRows().at(-1)?.note).toContain('exceed the daily cap'); // reason A
+    const afterN = aRows().length;
+    // cN1 (Wed 10:00): SAME fields, later now → too little time left → reason B ("cannot finish").
+    await cycle.run(snapAt([xraw(job)], '2026-06-24T10:00:00+07:00', 'cN1'));
+    expect(only('a.docx').lifecycleStatus).toBe('rejected'); // still rejected…
+    expect(aRows().length).toBeGreaterThan(afterN); // …a NEW row was enqueued on the reason change
+    expect(aRows().at(-1)?.note).toContain('cannot finish in time'); // reason B now on the Sheet
+    const afterN1 = aRows().length;
+    // cN2 (same now + fields): reason UNCHANGED (still B) → NO new row (dedup intact, no spam).
+    await cycle.run(snapAt([xraw(job)], '2026-06-24T10:00:00+07:00', 'cN2'));
+    expect(aRows().length).toBe(afterN1);
+  });
+
+  it('B#7 regression: accepting a previously-rejected Malay job clears the PERSISTED reject_reason to null (Sheet Accepted)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const acc = new StubAcceptor();
+    const cycle = new XtmPollCycle(db, schedCfg(), acc);
+    const jobKey = computeXtmJobKey(xraw());
+    const persistedReason = (): string | null =>
+      (
+        db.prepare('SELECT reject_reason AS r FROM jobs WHERE job_key = ?').get(jobKey) as {
+          r: string | null;
+        }
+      ).r;
+    // c1: too-tight → schedule-rejected, reject_reason persisted non-null.
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c1'));
+    expect(persistedReason()).not.toBeNull(); // precondition: a real reason was stored
+    // c2: SAME job, now feasible (deadline extended + small) → accepted via the robustness pass.
+    await cycle.run(snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10, 'c2'));
+    expect(acc.calls.flat()).toHaveLength(1);
+    expect(only().lifecycleStatus).toBe('accepted');
+    // Locks the clear-before-accept: a refactor dropping `s.rejectReason = null` would fail here.
+    expect(persistedReason()).toBeNull();
+    expect(sheetRows().at(-1)?.status).toBe('Accepted'); // not stale 'Rejected'
+  });
+
   it('F1: a still-rejected job whose dueDate changes keeps its reject reason on the field-sync note (I3 — never wiped to null)', async () => {
     fresh();
     new MetaStore(db).markBaselineDone();
