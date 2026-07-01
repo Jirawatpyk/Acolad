@@ -17,6 +17,7 @@ import {
 } from '../schedule/thaiHolidays.js';
 import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { deadlineMsOf, makeEffectiveDayOf } from '../schedule/deadlineDay.js';
+import { effortOf, type EffortMetric } from '../schedule/effort.js';
 import { resolveSheetStatusAndNote, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
@@ -64,7 +65,7 @@ export interface AcceptLatencySample {
  */
 export interface AcceptedDueDay {
   day: string;
-  resultingBucketWords: number;
+  resultingBucketEffort: number;
 }
 
 export interface XtmCycleSummary {
@@ -101,15 +102,19 @@ export interface XtmCycleSummary {
     reason: string;
     words: number | null;
     dueDate: string | null;
+    /** Effort under the ACTIVE metric (effortOf result) — matches `metric` below. */
+    effort: number | null;
+    /** The effort metric active this cycle (from cfg.ACCEPT_EFFORT_METRIC). */
+    metric: EffortMetric;
   }[];
   /**
    * §9 audit trail for the held-read → over-accept residual risk (deadline-bucketed capacity).
-   * One entry per deadline day an accepted group advanced this cycle, carrying `wordsDueOn(day)`
-   * — the RESULTING held + optimistically-advanced bucket the accept decision was based on. The
-   * loop logs this array of {day, resultingBucketWords} entries so a bucket that dropped then
-   * over-filled (e.g. a transient grid 0-read mis-disappearing a held job; cf. the late-XHR bug)
-   * leaves an auditable trail. The cycle stays logger-free (like acceptLatencies/scheduleRejects).
-   * Empty on every non-accepting / disabled / early path.
+   * One entry per deadline day an accepted group advanced this cycle, carrying `dueBuckets.get(day)`
+   * — the RESULTING per-deadline-day effort bucket the accept decision was based on (held + this
+   * cycle's optimistic advances). The loop logs this array of {day, resultingBucketEffort} entries
+   * so a bucket that dropped then over-filled (e.g. a transient grid 0-read mis-disappearing a
+   * held job; cf. the late-XHR bug) leaves an auditable trail. The cycle stays logger-free (like
+   * acceptLatencies/scheduleRejects). Empty on every non-accepting / disabled / early path.
    */
   acceptedDueDays: AcceptedDueDay[];
   /**
@@ -229,24 +234,36 @@ export class XtmPollCycle {
     // BEFORE this cycle records any new 'accepted' row — otherwise a job accepted this cycle
     // would be counted both in the seed and the optimistic advance (design §3). When the
     // gate is disabled the kill-switch path seeds nothing. A null/unparseable deadline is
-    // already skipped by wordsDueByDeadline (no NaN key).
+    // already skipped by effortDueByDeadline (no NaN key).
     const scheduleEnabled = this.cfg.ACCEPT_SCHEDULE_ENABLED;
     // Running per-day buckets for THIS cycle: a shallow copy of the held seed (`new Map(...)` so
     // optimistic advances below mutate OUR map, never the store's read-only one), or empty when
     // the gate is off (the kill-switch enforces no cap).
     const dueBuckets = scheduleEnabled
-      ? new Map<string, number>(this.store.wordsDueByDeadline(effDayOf))
+      ? new Map<string, number>(
+          this.store.effortDueByDeadline(
+            effDayOf,
+            (s) => effortOf(s, this.cfg.ACCEPT_EFFORT_METRIC) ?? 0,
+          ),
+        )
       : new Map<string, number>();
     const bucketFor = (d: string): number => dueBuckets.get(d) ?? 0;
     // I1 (fail loud, never silent on the irreversible accept path): a held (accepted) job with a
     // null/unparseable deadline contributes NOTHING to the per-deadline-day seed above
-    // (wordsDueByDeadline skips it), so its deadline day under-counts and a later same-day Malay
+    // (effortDueByDeadline skips it), so its deadline day under-counts and a later same-day Malay
     // group could over-accept past the cap on the bulk-claim path. The §9 audit trail does NOT
     // cover this (it only logs days a NEW group advanced), so surface it explicitly: a deduped
     // warn alert (once per Bangkok day). Only meaningful while the gate is ON (the cap is
     // enforced); the gate-OFF kill-switch has no cap, so a missing deadline cannot over-accept.
     // Normally zero — the F1 lock keeps a held job's deadline; a non-zero count means a
     // deadline-less job was held on the gate-OFF path (or the lock was bypassed) — investigate.
+    // Metric-specific cap env-var name — used in both the held-job alert block and the
+    // daily_cap_reached alert below so ops sees the right knob to fix. Hoisted here so
+    // both schedule-enabled sections share the same const without repeating the ternary.
+    const capVar =
+      this.cfg.ACCEPT_EFFORT_METRIC === 'wwc'
+        ? 'ACCEPT_MAX_WWC_PER_DAY'
+        : 'ACCEPT_MAX_WORDS_PER_DAY';
     if (scheduleEnabled) {
       // Pass the SAME effDayOf mapper the seed uses (F10): a held job is "missing-deadline" iff its
       // bucket key is null, so the detector and the seed can never disagree about which jobs were
@@ -261,6 +278,29 @@ export class XtmPollCycle {
           `${heldNoDeadline.length} accepted job(s) have no parseable deadline — the per-deadline-day capacity may under-count; accept same-day jobs manually / fix the due date`,
           {},
           `held_job_no_deadline:${bangkokDateString(detectedMs)}`,
+          this.cfg.unit,
+          capVar,
+        );
+      }
+      // I-1 (null-effort companion): a held job with null effort under the ACTIVE metric
+      // contributes NOTHING to its deadline-day bucket (effortDueByDeadline uses `?? 0` for
+      // the seed; see the effortOf call there). This can under-count the cap → over-accept past
+      // it on the irreversible bulk-claim path. Alert once per Bangkok day (deduped), same
+      // pattern as held_job_no_deadline. Only meaningful while the gate is ON.
+      const heldNoEffort = this.store.heldJobsMissingEffort((s) =>
+        effortOf(s, this.cfg.ACCEPT_EFFORT_METRIC),
+      );
+      if (heldNoEffort.length > 0) {
+        raiseAlert(
+          this.db,
+          this.outbox,
+          'held_job_no_effort',
+          snapshot.capturedAt,
+          `${heldNoEffort.length} accepted job(s) have no effort count under the active metric — the per-deadline-day capacity may under-count; accept same-day jobs manually / fix the words/WWC count`,
+          {},
+          `held_job_no_effort:${bangkokDateString(detectedMs)}`,
+          this.cfg.unit,
+          capVar,
         );
       }
     }
@@ -351,7 +391,9 @@ export class XtmPollCycle {
       // job becomes a candidate, no capacity cap, no seed (dueSeed is empty when disabled).
       for (const s of wouldAccept) candidates.push(s);
     } else {
-      const cap = this.cfg.ACCEPT_MAX_WORDS_PER_DAY;
+      const cap = this.cfg.activeMaxPerDay;
+      const metric = this.cfg.ACCEPT_EFFORT_METRIC;
+      const eff = (s: XtmJobState) => effortOf(s, metric);
       const groups = new Map<string, XtmJobState[]>();
       for (const s of wouldAccept) {
         const key = this.bulkGroupKey(s);
@@ -387,12 +429,12 @@ export class XtmPollCycle {
               nullDeadlineMember = s;
               break;
             }
-            capMembers.push({ words: s.words ?? 0, deadlineDate: day });
+            capMembers.push({ effort: eff(s) ?? 0, deadlineDate: day });
           }
           if (nullDeadlineMember) {
             blockReason = `'${nullDeadlineMember.fileName}': internal: held member has no deadline at capacity stage`;
           } else {
-            const v = decideGroupCapacity(capMembers, bucketFor, cap);
+            const v = decideGroupCapacity(capMembers, bucketFor, cap, this.cfg.unit);
             if (!v.accept) {
               // F6: a capacity block is DAY-level, not file-level — `v.reason` already names the
               // overflowing day + numbers. Do NOT prefix an arbitrary `members[0]` file (it is not
@@ -410,7 +452,7 @@ export class XtmPollCycle {
               // independent, so reading day d right after setting it yields its final value.
               for (const [day, sub] of v.subtotalsByDay) {
                 dueBuckets.set(day, bucketFor(day) + sub);
-                summary.acceptedDueDays.push({ day, resultingBucketWords: bucketFor(day) });
+                summary.acceptedDueDays.push({ day, resultingBucketEffort: bucketFor(day) });
               }
             }
           }
@@ -435,6 +477,8 @@ export class XtmPollCycle {
               reason: blockReason,
               words: s.words,
               dueDate: s.dueDate,
+              effort: eff(s),
+              metric,
             });
           }
           // I3b: a deadline day's budget is genuinely exhausted (not a single over-cap job) —
@@ -447,9 +491,11 @@ export class XtmPollCycle {
               this.outbox,
               'daily_cap_reached',
               snapshot.capturedAt,
-              `the ${cap}-word daily cap is reached for ${capExhaustedDay}`,
+              `the ${cap}-${this.cfg.unit.adj} daily cap is reached for ${capExhaustedDay}`,
               {},
               `daily_cap_reached:${capExhaustedDay}`,
+              this.cfg.unit,
+              capVar,
             );
           }
         }
@@ -859,8 +905,8 @@ export class XtmPollCycle {
       enabled: true,
       nowMs,
       dueAtMs,
-      words: s.words,
-      throughputWordsPerHour: this.cfg.throughputWordsPerHour,
+      effort: effortOf(s, this.cfg.ACCEPT_EFFORT_METRIC),
+      throughputPerHour: this.cfg.throughputPerHour,
       calendar: {
         workdays: this.cfg.workdays,
         hoursStartMin: this.cfg.hoursStartMin,
@@ -868,6 +914,7 @@ export class XtmPollCycle {
         holidays,
       },
       holidaysCuratedForSpan: curated,
+      unit: this.cfg.unit,
     });
   }
 

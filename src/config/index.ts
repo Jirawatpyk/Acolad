@@ -115,6 +115,12 @@ const schema = z
         }
       }, 'ACCEPT_WORKDAYS must be a valid day-of-week spec (e.g. 1-5 or 1,3,5)'),
     ACCEPT_MAX_WORDS_PER_DAY: z.coerce.number().int().min(0).default(1000),
+    ACCEPT_EFFORT_METRIC: z.enum(['wwc', 'words']).default('wwc'),
+    ACCEPT_MAX_WWC_PER_DAY: z.coerce.number().int().min(0).default(1000),
+    ACCEPT_THROUGHPUT_WWC_PER_HOUR: z.preprocess(
+      (v) => (v === '' || v === undefined ? undefined : v),
+      z.coerce.number().positive().optional(),
+    ),
     // Use preprocess to distinguish "unset" from empty string — Number('') === 0 which
     // would look like an explicit zero and not trigger the derived-throughput path.
     ACCEPT_THROUGHPUT_WORDS_PER_HOUR: z.preprocess(
@@ -130,16 +136,31 @@ const schema = z
     // ReadonlySet: consumers only `.has()` it; typing it read-only stops a caller from
     // mutating the shared derived config (Set is assignable to ReadonlySet).
     const workdays: ReadonlySet<number> = parseWorkdays(c.ACCEPT_WORKDAYS);
-    const throughputWordsPerHour = resolveThroughput({
-      // exactOptionalPropertyTypes: only include 'explicit' when it has a number value
-      ...(c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR !== undefined
-        ? { explicit: c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR }
-        : {}),
-      maxWordsPerDay: c.ACCEPT_MAX_WORDS_PER_DAY,
+    const activeMaxPerDay =
+      c.ACCEPT_EFFORT_METRIC === 'wwc' ? c.ACCEPT_MAX_WWC_PER_DAY : c.ACCEPT_MAX_WORDS_PER_DAY;
+    const activeOverride =
+      c.ACCEPT_EFFORT_METRIC === 'wwc'
+        ? c.ACCEPT_THROUGHPUT_WWC_PER_HOUR
+        : c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR;
+    const throughputPerHour = resolveThroughput({
+      ...(activeOverride !== undefined ? { explicit: activeOverride } : {}),
+      maxWordsPerDay: activeMaxPerDay, // param name is legacy; it is the ACTIVE cap
       hoursStartMin,
       hoursEndMin,
     });
-    return { ...c, hoursStartMin, hoursEndMin, workdays, throughputWordsPerHour };
+    const unit =
+      c.ACCEPT_EFFORT_METRIC === 'wwc'
+        ? { adj: 'WWC', noun: 'WWC' }
+        : { adj: 'word', noun: 'words' };
+    return {
+      ...c,
+      hoursStartMin,
+      hoursEndMin,
+      workdays,
+      activeMaxPerDay,
+      throughputPerHour,
+      unit,
+    };
   })
   // Only enforce the window floor when yield is ENABLED — otherwise a stale/small window
   // value would block the kill-switch (an operator must always be able to disable the
@@ -158,6 +179,8 @@ const schema = z
   .refine(
     (c) =>
       !c.ACCEPT_SCHEDULE_ENABLED ||
+      // wwc: words-params inactive; throughput validated by the active-cap refines below
+      c.ACCEPT_EFFORT_METRIC === 'wwc' ||
       c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR !== undefined ||
       c.ACCEPT_MAX_WORDS_PER_DAY > 0,
     {
@@ -165,7 +188,28 @@ const schema = z
       message:
         'set ACCEPT_THROUGHPUT_WORDS_PER_HOUR (>0) or ACCEPT_MAX_WORDS_PER_DAY (>0) so throughput is resolvable',
     },
-  );
+  )
+  // Capacity cap must be positive when the gate is on — an override must NOT except it, so this is
+  // a SEPARATE refine from throughput-resolvability. Both gate behind ACCEPT_SCHEDULE_ENABLED so the
+  // kill-switch always lets an operator disable without fixing unrelated values.
+  // I-2: superRefine so the error path names the ACTIVE metric's var (ACCEPT_MAX_WWC_PER_DAY in
+  // wwc mode, ACCEPT_MAX_WORDS_PER_DAY in words mode) — an operator in words mode seeing the wrong
+  // var name would fix the wrong knob → prolonged outage.
+  .superRefine((c, ctx) => {
+    if (c.ACCEPT_SCHEDULE_ENABLED && c.activeMaxPerDay <= 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [
+          c.ACCEPT_EFFORT_METRIC === 'wwc' ? 'ACCEPT_MAX_WWC_PER_DAY' : 'ACCEPT_MAX_WORDS_PER_DAY',
+        ],
+        message: 'the active daily cap must be > 0 when the schedule gate is on',
+      });
+    }
+  })
+  .refine((c) => !c.ACCEPT_SCHEDULE_ENABLED || c.throughputPerHour > 0, {
+    path: ['ACCEPT_THROUGHPUT_WWC_PER_HOUR'],
+    message: 'throughput must be resolvable to > 0 for the active metric',
+  });
 
 export type AppConfig = z.infer<typeof schema>;
 

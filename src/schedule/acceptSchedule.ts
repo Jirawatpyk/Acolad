@@ -5,11 +5,15 @@ export interface AcceptScheduleInput {
   enabled: boolean;
   nowMs: number;
   dueAtMs: number | null;
-  words: number | null;
-  throughputWordsPerHour: number;
+  effort: number | null;
+  throughputPerHour: number;
   /** Working-day window + holidays. Embeds WorkCalendar directly (no flattened copy). */
   calendar: WorkCalendar;
   holidaysCuratedForSpan: boolean;
+  /** Active metric unit — drives user-facing reason strings.
+   *  Defaults to `{ adj: 'word' }` (words mode) when omitted so all existing callers
+   *  continue to emit the same byte-for-byte strings they do today. */
+  unit?: { adj: string };
 }
 
 export type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: string };
@@ -17,12 +21,13 @@ export type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: st
 export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVerdict {
   if (!i.enabled) return { allow: true };
 
+  const unit = i.unit ?? { adj: 'word' };
   if (i.dueAtMs === null) return { allow: false, reason: 'deadline unknown' };
-  if (i.words === null) return { allow: false, reason: 'word count unknown' };
-  if (i.throughputWordsPerHour <= 0)
+  if (i.effort === null) return { allow: false, reason: `${unit.adj} count unknown` };
+  if (i.throughputPerHour <= 0)
     return {
       allow: false,
-      reason: 'throughput not configured (throughputWordsPerHour must be positive)',
+      reason: 'throughput not configured (throughputPerHour must be positive)',
     };
   if (!i.holidaysCuratedForSpan) {
     // Name the whole now→deadline span (F8) — naming only the deadline year is wrong
@@ -54,7 +59,7 @@ export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVe
   // naive ceil would round up to N+1, falsely demanding one extra minute at the
   // boundary. The epsilon collapses N+ε back to N without affecting a genuine
   // fractional (N.5 stays N+1).
-  const requiredMin = Math.ceil((i.words / i.throughputWordsPerHour) * 60 - 1e-9);
+  const requiredMin = Math.ceil((i.effort / i.throughputPerHour) * 60 - 1e-9);
   const availMin = workingMinutesBetween(i.nowMs, i.dueAtMs, i.calendar, requiredMin);
   if (availMin >= requiredMin) return { allow: true };
   return {

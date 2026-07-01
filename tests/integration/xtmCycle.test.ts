@@ -84,13 +84,14 @@ afterEach(() => {
 });
 
 // Held-job seed + lifecycle helpers for the deadline-day capacity tests (Task 6). A held
-// job (lifecycle 'accepted') is what wordsDueByDeadline() buckets; finishJob moves it out
+// job (lifecycle 'accepted') is what effortDueByDeadline() buckets; finishJob moves it out
 // of 'accepted' (freeing its deadline-day quota); acceptedKeys/jobKeyFor read the result.
 const accepted = (over: {
   jobKey: string;
   dueDate: string | null;
   words: number | null;
   fileName?: string;
+  fileWwc?: number | null;
 }): XtmJobState => ({
   jobKey: over.jobKey,
   xtmTaskId: null,
@@ -101,7 +102,7 @@ const accepted = (over: {
   dueDate: over.dueDate,
   dueRaw: null,
   words: over.words,
-  fileWwc: null,
+  fileWwc: over.fileWwc ?? null,
   step: 'PE 1',
   role: 'Corrector',
   eligible: true,
@@ -657,10 +658,15 @@ describe('XtmPollCycle crash recovery (review #1/#2)', () => {
 const SCHED_FIELDS = {
   ACCEPT_SCHEDULE_ENABLED: true,
   ACCEPT_MAX_WORDS_PER_DAY: 1000,
+  ACCEPT_EFFORT_METRIC: 'words' as const,
   hoursStartMin: 9 * 60,
   hoursEndMin: 18 * 60,
   workdays: new Set([1, 2, 3, 4, 5]),
-  throughputWordsPerHour: 1000 / 9,
+  // Task 6: derived active-metric fields (mirrors what loadConfig.transform computes in
+  // production; must be supplied explicitly here since cfg() is a bare cast, not a transform).
+  activeMaxPerDay: 1000,
+  throughputPerHour: 1000 / 9,
+  unit: { adj: 'word', noun: 'words' },
 };
 const schedCfg = (over: Partial<AppConfig> = {}): AppConfig =>
   cfg({ ...SCHED_FIELDS, ...over } as Partial<AppConfig>);
@@ -677,6 +683,11 @@ const snapAt = (jobs: XtmRawJob[], capturedAt: string, cycle = 'c1'): XtmJobSnap
 
 describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
   const MON_10 = '2026-06-22T10:00:00+07:00'; // Bangkok Monday 10:00 (working hours)
+  // Task 6: job 4721900 — 861 raw words, 169 File WWC, deadline Mon 15:24.
+  // Words mode: need ceil(861/(1000/9)*60)=466min≈7.8h, have 324min≈5.4h → REJECTED.
+  // WWC mode:   need ceil(169/(1000/9)*60)=92min≈1.5h,  have 324min≈5.4h → ACCEPTED.
+  const dueMon1524 = '2026-06-22T15:24:00+07:00';
+  const j4721900 = () => xraw({ words: 861, fileWwc: 169, dueDate: dueMon1524 });
   const dueWed18 = '2026-06-24T18:00:00+07:00'; // Wed 18:00 — far, finishable for small jobs
   const dueTue18 = '2026-06-23T18:00:00+07:00'; // Tue 18:00 — far, finishable for small jobs
   const dueMon12 = '2026-06-22T12:00:00+07:00'; // same Monday noon — tight (120 working min)
@@ -709,7 +720,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     // The held list (the single source of truth for capacity) now carries the accepted
     // job's words under its DEADLINE day — not a meta accept-day counter.
     expect(
-      new XtmJobStore(db).wordsDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
+      new XtmJobStore(db).effortDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
     ).toBe(100);
   });
 
@@ -729,7 +740,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(sheetRows().at(-1)?.note).toContain('cannot finish in time'); // reason surfaced
     expect(chatHasTitle('🆕')).toBe(true); // rendered as a new-job card
     expect(chatText()).toContain('Rejected —'); // reason threaded into Chat (I3)
-    expect(new XtmJobStore(db).wordsDueByDeadline().size).toBe(0); // nothing held → no bucket
+    expect(new XtmJobStore(db).effortDueByDeadline().size).toBe(0); // nothing held → no bucket
   });
 
   it('B#2/B#6: a gate-Rejected job that later becomes feasible but FAILS to accept shows Accept failed, not stale Rejected', async () => {
@@ -851,7 +862,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
       ),
     ).rejects.toThrow();
     // The record txn rolled back → job A's 'accepted' write was undone, so nothing is held.
-    expect(new XtmJobStore(db).wordsDueByDeadline().size).toBe(0);
+    expect(new XtmJobStore(db).effortDueByDeadline().size).toBe(0);
   });
 
   it('I3a: a single group whose OWN words exceed the daily cap → "exceed" message (accept manually)', async () => {
@@ -1065,7 +1076,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(acc.calls.flat()).toHaveLength(0); // group rejected as a unit (combined > cap)
     const states = [...new XtmJobStore(db).loadAll().values()];
     expect(states.every((s) => s.lifecycleStatus === 'rejected')).toBe(true);
-    expect(new XtmJobStore(db).wordsDueByDeadline().size).toBe(0); // nothing accepted → no held words
+    expect(new XtmJobStore(db).effortDueByDeadline().size).toBe(0); // nothing accepted → no held words
   });
 
   it('capacity: a group whose combined words would exceed the remaining deadline-day cap is rejected', async () => {
@@ -1079,7 +1090,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(acc.calls.flat()).toHaveLength(0);
     expect(only('a.docx').lifecycleStatus).toBe('rejected');
     expect(
-      new XtmJobStore(db).wordsDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
+      new XtmJobStore(db).effortDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
     ).toBe(950); // unchanged — the rejected job is not held
   });
 
@@ -1093,7 +1104,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(acc.calls.flat()).toHaveLength(1);
     expect(only('a.docx').lifecycleStatus).toBe('accepted');
     expect(
-      new XtmJobStore(db).wordsDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
+      new XtmJobStore(db).effortDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
     ).toBe(1000); // 950 held + 50 newly accepted, both due Wed
   });
 
@@ -1523,7 +1534,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     // 800 + 800 = 1600 > the 1000 cap, but each DEADLINE day holds only 800 → both accepted
     // (the old per-accept-day cap would have rejected the pair).
     expect(acc.calls.flat()).toHaveLength(2);
-    const m = new XtmJobStore(db).wordsDueByDeadline();
+    const m = new XtmJobStore(db).effortDueByDeadline();
     expect(m.get(bangkokDateString(Date.parse(dueTue18)))).toBe(800);
     expect(m.get(bangkokDateString(Date.parse(dueWed18)))).toBe(800);
   });
@@ -1648,6 +1659,49 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(activeHeldNoDeadlineAlerts()).toBe(0);
   });
 
+  // I-1b: null-effort companion alert
+  const activeHeldNoEffortAlerts = (): number =>
+    (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key LIKE 'held_job_no_effort:%' AND resolved_at IS NULL",
+        )
+        .get() as { n: number }
+    ).n;
+
+  it('I-1: a held job with null effort raises a deduped held_job_no_effort warn alert', async () => {
+    fresh();
+    // A held job with words=null → effortOf(words)=null → seeds 0 → under-count.
+    // schedCfg() uses words mode (SCHED_FIELDS.ACCEPT_EFFORT_METRIC='words'), so null words triggers it.
+    new XtmJobStore(db).upsertMany([
+      accepted({ jobKey: 'null-eff', dueDate: dueWed18, words: null }),
+    ]);
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    await cycle.run(snapAt([], MON_10, 'c1'));
+    expect(activeHeldNoEffortAlerts()).toBe(1);
+    // deduped — second cycle same Bangkok day should not add a second alert
+    await cycle.run(snapAt([], MON_10, 'c2'));
+    expect(activeHeldNoEffortAlerts()).toBe(1);
+  });
+
+  it('I-1: no held_job_no_effort alert when every held job has non-null effort', async () => {
+    fresh();
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'ok', dueDate: dueWed18, words: 100 })]);
+    await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(snapAt([], MON_10));
+    expect(activeHeldNoEffortAlerts()).toBe(0);
+  });
+
+  it('I-1: the held_job_no_effort alert is guarded behind scheduleEnabled (gate OFF never raises it)', async () => {
+    fresh();
+    new XtmJobStore(db).upsertMany([
+      accepted({ jobKey: 'null-eff', dueDate: dueWed18, words: null }),
+    ]);
+    await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), new StubAcceptor()).run(
+      snapAt([], MON_10),
+    );
+    expect(activeHeldNoEffortAlerts()).toBe(0);
+  });
+
   it('§9 audit trail: an accepted Malay job surfaces {day, wordsDueOn(day)} in summary.acceptedDueDays', async () => {
     fresh();
     // Held seed 200 due Wed, then accept a 100w-due-Wed job → the resulting Wed bucket is 300.
@@ -1659,7 +1713,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(only('a.docx').lifecycleStatus).toBe('accepted');
     // The audit entry records the resulting Wed bucket the accept decision used (held + advance).
     expect(summary.acceptedDueDays).toEqual([
-      { day: bangkokDateString(Date.parse(dueWed18)), resultingBucketWords: 300 },
+      { day: bangkokDateString(Date.parse(dueWed18)), resultingBucketEffort: 300 },
     ]);
   });
 
@@ -1715,6 +1769,125 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     );
     expect(acc.calls.flat()).toHaveLength(1); // clicked — its own day is under cap
     expect(only('C.docx').lifecycleStatus).toBe('accepted');
+  });
+
+  // --- Task 6: effort-metric wiring (4721900 lock + D1 guards + capacity + D9 telemetry) ----
+  // The real job 4721900 (861 raw words, 169 File WWC) pinned this regression: words mode
+  // rejects it (need ~7.8h / have ~5.4h Mon 10:00→15:24), wwc mode accepts it (169 WWC, ~1.5h).
+
+  it('4721900: metric=words rejects (feasibility keys off raw words)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg({ ACCEPT_EFFORT_METRIC: 'words' }), acc).run(
+      snapAt([j4721900()], MON_10),
+    );
+    expect(acc.calls.flat()).toHaveLength(0);
+    const s = only();
+    expect(s.lifecycleStatus).toBe('rejected');
+    expect(s.rejectReason).toContain('cannot finish in time');
+    expect(s.rejectReason).toContain('need ~7.8h');
+    expect(s.rejectReason).toContain('have ~5.4h');
+  });
+
+  it('4721900: metric=wwc accepts the same job (effort=169 WWC)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(
+      db,
+      schedCfg({ ACCEPT_EFFORT_METRIC: 'wwc', ACCEPT_MAX_WWC_PER_DAY: 1000 } as Partial<AppConfig>),
+      acc,
+    ).run(snapAt([j4721900()], MON_10));
+    expect(acc.calls.flat()).toHaveLength(1);
+    expect(only().lifecycleStatus).toBe('accepted');
+  });
+
+  it('D1 null-fallback: metric=wwc + fileWwc=null → rejected via raw words 861 (not accepted as 0)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(
+      db,
+      schedCfg({ ACCEPT_EFFORT_METRIC: 'wwc', ACCEPT_MAX_WWC_PER_DAY: 1000 } as Partial<AppConfig>),
+      acc,
+    ).run(snapAt([xraw({ words: 861, fileWwc: null, dueDate: dueMon1524 })], MON_10));
+    expect(acc.calls.flat()).toHaveLength(0);
+    expect(only().rejectReason).toContain('cannot finish in time');
+  });
+
+  it('D1 zero-guard: metric=wwc + fileWwc=0 → rejected (falls back to raw words, not treated as 0)', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(
+      db,
+      schedCfg({ ACCEPT_EFFORT_METRIC: 'wwc', ACCEPT_MAX_WWC_PER_DAY: 1000 } as Partial<AppConfig>),
+      acc,
+    ).run(snapAt([xraw({ words: 861, fileWwc: 0, dueDate: dueMon1524 })], MON_10));
+    expect(acc.calls.flat()).toHaveLength(0);
+  });
+
+  it('capacity keys off effort: WWC fits cap while raw words exceed it', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    // words=1500 > cap=1000 (old code would reject); fileWwc=800 ≤ 1000 + far deadline → accepted
+    await new XtmPollCycle(
+      db,
+      schedCfg({ ACCEPT_EFFORT_METRIC: 'wwc', ACCEPT_MAX_WWC_PER_DAY: 1000 } as Partial<AppConfig>),
+      acc,
+    ).run(snapAt([xraw({ words: 1500, fileWwc: 800, dueDate: dueWed18 })], MON_10));
+    expect(acc.calls.flat()).toHaveLength(1); // accepted (effort=800 ≤ cap=1000)
+    expect(only().lifecycleStatus).toBe('accepted');
+  });
+
+  it('malformed job: metric=wwc + words=null + fileWwc=null → rejected "WWC count unknown"', async () => {
+    fresh();
+    const acc = new StubAcceptor();
+    // Must supply unit so the rejection reason uses the active metric's label.
+    await new XtmPollCycle(
+      db,
+      schedCfg({
+        ACCEPT_EFFORT_METRIC: 'wwc',
+        ACCEPT_MAX_WWC_PER_DAY: 1000,
+        unit: { adj: 'WWC', noun: 'WWC' },
+      } as Partial<AppConfig>),
+      acc,
+    ).run(snapAt([xraw({ words: null, fileWwc: null, dueDate: dueWed18 })], MON_10));
+    expect(acc.calls.flat()).toHaveLength(0);
+    expect(only().rejectReason).toContain('WWC count unknown');
+  });
+
+  it('D9 telemetry: a words-mode reject carries raw words + effort + metric in scheduleRejects', async () => {
+    fresh();
+    const summary = await new XtmPollCycle(
+      db,
+      schedCfg({ ACCEPT_EFFORT_METRIC: 'words' }),
+      new StubAcceptor(),
+    ).run(snapAt([j4721900()], MON_10));
+    const r = summary.scheduleRejects[0]!;
+    expect(r.words).toBe(861);
+    expect(r.effort).toBe(861); // words mode: effort === words
+    expect(r.metric).toBe('words');
+  });
+
+  it('D9-wwc telemetry: a wwc-mode reject carries fileWwc as effort (not raw words)', async () => {
+    fresh();
+    // Tight deadline Mon 11:30 = 90 working minutes from MON_10 (10:00).
+    // wwc=169, throughput=1000/9≈111/h: need ceil(169/111*60)=92 min > 90 → feasibility REJECTED.
+    // Pins: effort in scheduleRejects must be fileWwc=169, NOT raw words=861.
+    const summary = await new XtmPollCycle(
+      db,
+      schedCfg({
+        ACCEPT_EFFORT_METRIC: 'wwc',
+        ACCEPT_MAX_WWC_PER_DAY: 1000,
+        activeMaxPerDay: 1000,
+        unit: { adj: 'WWC', noun: 'WWC' },
+      } as Partial<AppConfig>),
+      new StubAcceptor(),
+    ).run(
+      snapAt([xraw({ words: 861, fileWwc: 169, dueDate: '2026-06-22T11:30:00+07:00' })], MON_10),
+    );
+    const r = summary.scheduleRejects[0]!;
+    expect(r.words).toBe(861);
+    expect(r.effort).toBe(169); // wwc mode: effort = fileWwc, NOT raw words
+    expect(r.metric).toBe('wwc');
   });
 });
 

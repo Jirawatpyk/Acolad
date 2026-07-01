@@ -24,8 +24,8 @@ const base = (
     enabled: true,
     nowMs: at('2026-06-22T15:00:00+07:00'), // Monday 15:00
     dueAtMs: at('2026-06-22T18:00:00+07:00'),
-    words: 300,
-    throughputWordsPerHour: 100, // round so requiredMin = words * 0.6
+    effort: 300,
+    throughputPerHour: 100, // round so requiredMin = effort * 0.6
     holidaysCuratedForSpan: true,
     ...rest,
     calendar: { ...DEFAULT_CAL, ...calendar },
@@ -42,7 +42,7 @@ describe('evaluateAcceptSchedule', () => {
     expect(evaluateAcceptSchedule(base({ dueAtMs: null })).allow).toBe(false);
   });
   it('word count unknown → block', () => {
-    expect(evaluateAcceptSchedule(base({ words: null })).allow).toBe(false);
+    expect(evaluateAcceptSchedule(base({ effort: null })).allow).toBe(false);
   });
   it('uncurated span year → block', () => {
     expect(evaluateAcceptSchedule(base({ holidaysCuratedForSpan: false })).allow).toBe(false);
@@ -89,8 +89,8 @@ describe('evaluateAcceptSchedule', () => {
       base({
         nowMs: at('2026-06-22T09:00:00+07:00'),
         dueAtMs: at('2026-06-22T14:51:00+07:00'), // 351 working minutes (09:00→14:51)
-        words: 65,
-        throughputWordsPerHour: 100 / 9,
+        effort: 65,
+        throughputPerHour: 100 / 9,
       }),
     );
     expect(v).toEqual({ allow: true });
@@ -112,9 +112,9 @@ describe('evaluateAcceptSchedule', () => {
   });
   it('feasibility boundary: avail==required → allow, required-1 → block', () => {
     // 300 words @ 100/h = 180 min required; 15:00→18:00 = 180 avail
-    expect(evaluateAcceptSchedule(base({ words: 300 })).allow).toBe(true);
+    expect(evaluateAcceptSchedule(base({ effort: 300 })).allow).toBe(true);
     // 301 words → ceil(180.6)=181 > 180 → block
-    expect(evaluateAcceptSchedule(base({ words: 301 })).allow).toBe(false);
+    expect(evaluateAcceptSchedule(base({ effort: 301 })).allow).toBe(false);
   });
   it('deadline already passed → block', () => {
     expect(evaluateAcceptSchedule(base({ dueAtMs: at('2026-06-22T14:00:00+07:00') })).allow).toBe(
@@ -122,15 +122,15 @@ describe('evaluateAcceptSchedule', () => {
     );
   });
   it('words=0 → allow (deliverable instantly)', () => {
-    expect(evaluateAcceptSchedule(base({ words: 0 })).allow).toBe(true);
+    expect(evaluateAcceptSchedule(base({ effort: 0 })).allow).toBe(true);
   });
-  it('throughputWordsPerHour=0 with words>0 → block with "throughput not configured" reason', () => {
+  it('throughputPerHour=0 with effort>0 → block with "throughput not configured" reason', () => {
     // Guard: a caller passing 0 throughput with words>0 would yield Infinity hours required,
     // which should block with a clear reason rather than a confusing NaN/Infinity in the output.
-    const v = evaluateAcceptSchedule(base({ throughputWordsPerHour: 0, words: 300 }));
+    const v = evaluateAcceptSchedule(base({ throughputPerHour: 0, effort: 300 }));
     expect(v.allow).toBe(false);
     if (!v.allow)
-      expect(v.reason).toBe('throughput not configured (throughputWordsPerHour must be positive)');
+      expect(v.reason).toBe('throughput not configured (throughputPerHour must be positive)');
   });
   it('far-deadline weekend job is feasible → allow', () => {
     expect(
@@ -138,7 +138,7 @@ describe('evaluateAcceptSchedule', () => {
         base({
           nowMs: at('2026-06-21T14:00:00+07:00'),
           dueAtMs: at('2026-06-26T18:00:00+07:00'),
-          words: 600,
+          effort: 600,
         }),
       ),
     ).toEqual({ allow: true });
@@ -153,7 +153,7 @@ describe('evaluateAcceptSchedule', () => {
       base({
         nowMs: at('2026-06-22T19:00:00+07:00'), // Monday, after the 18:00 close
         dueAtMs: at('2026-06-22T23:00:00+07:00'), // same Monday, still in the future
-        words: 300, // needs ~3h, but 0h remain today
+        effort: 300, // needs ~3h, but 0h remain today
       }),
     );
     expect(v.allow).toBe(false);
@@ -161,6 +161,18 @@ describe('evaluateAcceptSchedule', () => {
       expect(v.reason).toContain('cannot finish in time');
       expect(v.reason).toContain('have ~0h'); // 0 working minutes remain after the window closed
     }
+  });
+
+  it('null-effort reason uses the active unit adjective (words byte-for-byte; wwc uses WWC)', () => {
+    // words mode: reason must be byte-for-byte 'word count unknown' (no regression)
+    const words = evaluateAcceptSchedule(base({ effort: null, unit: { adj: 'word' } }));
+    expect(words).toEqual({ allow: false, reason: 'word count unknown' });
+    // wwc mode: reason must say 'WWC count unknown'
+    const wwc = evaluateAcceptSchedule(base({ effort: null, unit: { adj: 'WWC' } }));
+    expect(wwc).toEqual({ allow: false, reason: 'WWC count unknown' });
+    // default (no unit): must also give the old exact string for backward-compat
+    const def = evaluateAcceptSchedule(base({ effort: null }));
+    expect(def).toEqual({ allow: false, reason: 'word count unknown' });
   });
 
   it('S2 (PIN): a date-only dueDate "2026-07-15" is treated as 07:00 Bangkok — before the 09:00 work start', () => {
@@ -178,7 +190,7 @@ describe('evaluateAcceptSchedule', () => {
       base({
         nowMs: at('2026-07-15T06:00:00+07:00'),
         dueAtMs,
-        words: 1,
+        effort: 1,
       }),
     );
     expect(v.allow).toBe(false);

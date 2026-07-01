@@ -4,9 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, type DB } from '../../src/state/db.js';
 import { XtmJobStore } from '../../src/state/xtmJobStore.js';
+import { effortOf } from '../../src/schedule/effort.js';
 import type { XtmJobState } from '../../src/detection/types.js';
 
 const NOW = '2026-06-19T10:00:00.000Z';
+const DUE = '2026-06-24T18:00:00+07:00';
 const dirs: string[] = [];
 let db: DB;
 
@@ -218,7 +220,7 @@ describe('XtmJobStore', () => {
     });
   });
 
-  describe('wordsDueByDeadline', () => {
+  describe('effortDueByDeadline', () => {
     it('buckets held words by Bangkok deadline date and skips null/unparseable', () => {
       const store = freshStore();
       store.upsertMany([
@@ -228,7 +230,7 @@ describe('XtmJobStore', () => {
         accepted({ jobKey: 'd', dueDate: null, words: 999 }), // skipped
         accepted({ jobKey: 'e', dueDate: 'garbage', words: 999 }), // skipped
       ]);
-      const m = store.wordsDueByDeadline();
+      const m = store.effortDueByDeadline();
       expect(m.get('2026-06-24')).toBe(300);
       expect(m.get('2026-06-25')).toBe(50);
       expect(m.size).toBe(2);
@@ -241,7 +243,7 @@ describe('XtmJobStore', () => {
       store.upsertMany([
         accepted({ jobKey: 'h', dueDate: '2026-06-24T18:00:00+07:00', words: 600 }),
       ]);
-      const m = store.wordsDueByDeadline();
+      const m = store.effortDueByDeadline();
       expect(m.get('2026-06-24')).toBe(600);
       expect(m.size).toBe(1);
     });
@@ -253,15 +255,74 @@ describe('XtmJobStore', () => {
         accepted({ jobKey: 'n', dueDate: '2026-06-24T09:00:00+07:00', words: null }), // null → 0
         accepted({ jobKey: 'z', dueDate: '2026-06-26T18:00:00+07:00', words: null }), // null → 0
       ]);
-      const m = store.wordsDueByDeadline();
+      const m = store.effortDueByDeadline();
       expect(m.get('2026-06-24')).toBe(100); // null co-day job adds 0, not NaN
       expect(Number.isNaN(m.get('2026-06-24'))).toBe(false);
       expect(m.get('2026-06-26')).toBe(0); // a day with only a null-words job sums to 0
     });
+
+    it('effortDueByDeadline buckets via the injected mapper (WWC vs words)', () => {
+      const store = freshStore();
+      store.upsertMany([accepted({ jobKey: 'a', dueDate: DUE, words: 1500, fileWwc: 800 })]);
+      const day = (d: string | null) => d && d.slice(0, 10);
+      const wwc = store.effortDueByDeadline(day, (s) => effortOf(s, 'wwc') ?? 0);
+      const words = store.effortDueByDeadline(day, (s) => effortOf(s, 'words') ?? 0);
+      expect(wwc.get(DUE.slice(0, 10))).toBe(800);
+      expect(words.get(DUE.slice(0, 10))).toBe(1500);
+    });
+
+    it('a both-null (words=null, fileWwc=null) row via the injected mapper sums to 0, not NaN', () => {
+      const store = freshStore();
+      store.upsertMany([accepted({ jobKey: 'a', dueDate: DUE, words: null, fileWwc: null })]);
+      const day = (d: string | null) => d && d.slice(0, 10);
+      const m = store.effortDueByDeadline(day, (s) => effortOf(s, 'wwc') ?? 0);
+      expect(m.get(DUE.slice(0, 10))).toBe(0);
+      expect(Number.isNaN(m.get(DUE.slice(0, 10)))).toBe(false);
+    });
+  });
+
+  describe('heldJobsMissingEffort (I-1 — null-effort held-job guard)', () => {
+    it('returns held jobs whose effortOf is null (wwc mode: both-null → missing)', () => {
+      const store = freshStore();
+      store.upsertMany([
+        accepted({ jobKey: 'ok-wwc', dueDate: DUE, words: 100, fileWwc: 50 }), // effortOf(wwc)=50
+        accepted({ jobKey: 'null-both', dueDate: DUE, words: null, fileWwc: null }), // effortOf(wwc)=null
+        // wwc falls back to words when fileWwc is null/0, so this one resolves to words=100
+        accepted({ jobKey: 'null-wwc', dueDate: DUE, words: 100, fileWwc: null }),
+      ]);
+      const missing = store.heldJobsMissingEffort((s) => effortOf(s, 'wwc'));
+      expect(missing.map((s) => s.jobKey)).toEqual(['null-both']);
+    });
+
+    it('words mode: returns held jobs with null words', () => {
+      const store = freshStore();
+      store.upsertMany([
+        accepted({ jobKey: 'ok', dueDate: DUE, words: 100 }),
+        accepted({ jobKey: 'null-words', dueDate: DUE, words: null, fileWwc: 50 }),
+      ]);
+      const missing = store.heldJobsMissingEffort((s) => effortOf(s, 'words'));
+      expect(missing.map((s) => s.jobKey)).toEqual(['null-words']);
+    });
+
+    it('is empty when every held job has non-null effort', () => {
+      const store = freshStore();
+      store.upsertMany([accepted({ jobKey: 'a', dueDate: DUE, words: 100, fileWwc: 42 })]);
+      expect(store.heldJobsMissingEffort((s) => effortOf(s, 'wwc'))).toEqual([]);
+    });
+
+    it('only inspects held (accepted lifecycle) jobs — non-held jobs with null effort are not flagged', () => {
+      const store = freshStore();
+      store.upsertMany([
+        xstate({ jobKey: 'new-no-words', fileName: 'new.docx', words: null }),
+        accepted({ jobKey: 'held-no-words', dueDate: DUE, words: null, fileWwc: null }),
+      ]);
+      const missing = store.heldJobsMissingEffort((s) => effortOf(s, 'wwc'));
+      expect(missing.map((s) => s.jobKey)).toEqual(['held-no-words']);
+    });
   });
 
   describe('heldJobsMissingDeadline (I1 — fail-loud over-accept guard)', () => {
-    it('returns the keys of held jobs with a null/unparseable deadline (those wordsDueByDeadline skips)', () => {
+    it('returns the keys of held jobs with a null/unparseable deadline (those effortDueByDeadline skips)', () => {
       const store = freshStore();
       store.upsertMany([
         accepted({ jobKey: 'ok', dueDate: '2026-06-24T18:00:00+07:00', words: 100 }), // bucketed
@@ -279,7 +340,7 @@ describe('XtmJobStore', () => {
       expect(store.heldJobsMissingDeadline()).toEqual([]);
     });
 
-    it('F10: uses the injected dayOf mapper — a job is "missing" iff its bucket key is null (partners wordsDueByDeadline)', () => {
+    it('F10: uses the injected dayOf mapper — a job is "missing" iff its bucket key is null (partners effortDueByDeadline)', () => {
       const store = freshStore();
       store.upsertMany([
         accepted({ jobKey: 'ok', dueDate: '2026-06-24T18:00:00+07:00', words: 100 }),
@@ -291,7 +352,7 @@ describe('XtmJobStore', () => {
       const dayOf = (d: string | null): string | null =>
         d === '2026-06-25T18:00:00+07:00' ? null : '2026-06-24';
       expect(store.heldJobsMissingDeadline(dayOf)).toEqual(['mapNull']);
-      const m = store.wordsDueByDeadline(dayOf);
+      const m = store.effortDueByDeadline(dayOf);
       expect(m.get('2026-06-24')).toBe(100); // 'ok' bucketed
       expect(m.has('2026-06-25')).toBe(false); // 'mapNull' skipped — exactly the missing one
     });

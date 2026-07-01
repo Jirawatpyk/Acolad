@@ -373,7 +373,7 @@ export class XtmPollLoop {
             held,
             nowMs,
             this.cfg.XTM_ACOLAD_OFFERS_URL,
-            this.cfg.ACCEPT_MAX_WORDS_PER_DAY,
+            this.cfg.activeMaxPerDay,
             makeEffectiveDayOf(
               this.cfg.hoursStartMin,
               this.cfg.workdays,
@@ -382,6 +382,7 @@ export class XtmPollLoop {
             // #8: only advertise the per-deadline cap when the schedule gate is ON. With the gate
             // off the cap is not enforced (accept 24/7), so the headline must not claim a limit.
             this.cfg.ACCEPT_SCHEDULE_ENABLED,
+            this.cfg.ACCEPT_EFFORT_METRIC,
           );
           this.db.transaction(() => {
             this.outbox.enqueue(`daily:${date}`, JSON.stringify(card), this.clock.nowIso(), 'team');
@@ -498,9 +499,9 @@ export class XtmPollLoop {
           skipped: summary.skipped,
           scheduleBlocked: summary.scheduleBlocked,
           holidayCalendarStale: summary.holidayCalendarStale,
-          // §9 audit trail: an array of {day, resultingBucketWords} entries (wordsDueOn(day) — the bucket the
-          // accept decisions used this cycle) so a held-read drift that over-fills a bucket leaves
-          // a grep-able trail.
+          // §9 audit trail: an array of {day, resultingBucketEffort} entries (effort under the
+          // active metric per deadline day — the bucket the accept decisions used this cycle) so a
+          // held-read drift that over-fills a bucket leaves a grep-able trail.
           acceptedDueDays: summary.acceptedDueDays,
           failed: summary.failed,
           dead: disp.dead,

@@ -246,6 +246,64 @@ describe('raiseAlert — daily_cap_reached (I3b)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Task 7: daily_cap_reached — metric-aware cap alert strings
+// ---------------------------------------------------------------------------
+
+describe('raiseAlert — daily_cap_reached — metric-aware (Task 7)', () => {
+  it('wwc mode: title contains "Daily WWC cap" + action names ACCEPT_MAX_WWC_PER_DAY, NOT ACCEPT_MAX_WORDS_PER_DAY', () => {
+    raiseAlert(
+      db,
+      outbox,
+      'daily_cap_reached',
+      NOW,
+      'the 1000-WWC daily cap is reached for 2026-06-10',
+      {},
+      'daily_cap_reached:2026-06-10',
+      { adj: 'WWC' },
+      'ACCEPT_MAX_WWC_PER_DAY',
+    );
+    const json = cardJson(firstPayload());
+    expect(json).toContain('Daily WWC cap');
+    expect(json).toContain('ACCEPT_MAX_WWC_PER_DAY');
+    expect(json).not.toContain('ACCEPT_MAX_WORDS_PER_DAY');
+  });
+
+  it('words mode: title is byte-for-byte "Daily word cap reached — auto-accept paused for today" + action names ACCEPT_MAX_WORDS_PER_DAY', () => {
+    raiseAlert(
+      db,
+      outbox,
+      'daily_cap_reached',
+      NOW,
+      'the 1000-word daily cap is reached for 2026-06-10',
+      {},
+      'daily_cap_reached:2026-06-10',
+      { adj: 'word' },
+      'ACCEPT_MAX_WORDS_PER_DAY',
+    );
+    const json = cardJson(firstPayload());
+    expect(json).toContain('Daily word cap reached — auto-accept paused for today');
+    expect(json).toContain('ACCEPT_MAX_WORDS_PER_DAY');
+  });
+
+  it('held_job_no_deadline wwc mode: impact contains "daily WWC cap" (not "daily word cap")', () => {
+    raiseAlert(
+      db,
+      outbox,
+      'held_job_no_deadline',
+      NOW,
+      '1 accepted job(s) have no parseable deadline',
+      {},
+      'held_job_no_deadline:2026-06-10',
+      { adj: 'WWC' },
+      'ACCEPT_MAX_WWC_PER_DAY',
+    );
+    const json = cardJson(firstPayload());
+    expect(json).toContain('daily WWC cap');
+    expect(json).not.toContain('daily word cap');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Task 10: holiday_calendar_stale trigger
 // ---------------------------------------------------------------------------
 

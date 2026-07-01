@@ -22,7 +22,12 @@ const cfg = (over: Partial<AppConfig> = {}): AppConfig =>
     ACCEPT_LANGUAGES: ['Malay (Malaysia)'],
     ACCEPT_MAX_WORDS: 0,
     ACCEPT_MAX_PER_CYCLE: 0,
-    ACCEPT_MAX_WORDS_PER_DAY: 1000, // so the daily-report capacity row shows "N / 1000", not "(no cap)"
+    ACCEPT_MAX_WORDS_PER_DAY: 1000,
+    // Task 8: activeMaxPerDay replaces ACCEPT_MAX_WORDS_PER_DAY at the call site;
+    // set it explicitly so the daily-report capacity row shows "cap 1000/day", not "(no cap)".
+    activeMaxPerDay: 1000,
+    ACCEPT_EFFORT_METRIC: 'words', // words-mode keeps byte-for-byte "N words" assertions
+    unit: { adj: 'word', noun: 'words' }, // words-mode unit labels
     OUTBOX_RETRY_CAP: 10,
     OUTBOX_DEAD_AFTER_HOURS: 6,
     LOGIN_MAX_RETRY: 3,
@@ -346,6 +351,46 @@ describe('XtmPollLoop — daily report', () => {
       .prepare("SELECT * FROM outbox WHERE channel = 'team' AND event_id LIKE 'daily:%'")
       .all();
     expect(rows).toHaveLength(0); // nothing enqueued before 09:00
+  });
+
+  it('wwc-mode: daily-report payload labels effort as "WWC" when ACCEPT_EFFORT_METRIC=wwc', async () => {
+    fresh();
+    // Seed a job with fileWwc=120, due today (25 Jun 2026 Bangkok) so it lands in the
+    // "Due today" bucket. The loop must thread metric='wwc' to buildDailyReportCard so
+    // the output contains "120 WWC" (effortOf in wwc mode = fileWwc), not "120 words".
+    seedAcceptedJob(db, {
+      jobKey: 'J-WWC',
+      dueDate: '2026-06-25T15:00:00+07:00',
+      words: 500,
+      fileWwc: 120,
+    });
+
+    const clockAt10 = { nowMs: () => BKK_10_00, nowIso: () => new Date(BKK_10_00).toISOString() };
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({
+        XTM_ACOLAD_OFFERS_URL: 'https://xtm.example.com',
+        ACCEPT_EFFORT_METRIC: 'wwc',
+        unit: { adj: 'WWC', noun: 'WWC' },
+        activeMaxPerDay: 1000,
+      } as Partial<AppConfig>),
+      noopLogger,
+      clockAt10,
+      { chatSender: okChat, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    await loop.runOnce();
+
+    const rows = db
+      .prepare("SELECT * FROM outbox WHERE event_id = 'daily:2026-06-25' AND channel = 'team'")
+      .all() as { payload_json: string }[];
+    expect(rows).toHaveLength(1);
+    // Loop must thread metric='wwc' to buildDailyReportCard → effort = fileWwc=120, noun="WWC".
+    expect(rows[0]!.payload_json).toContain('120 WWC');
+    expect(rows[0]!.payload_json).not.toContain('500 words');
   });
 
   it('a daily-report build throw does not page (no heartbeat.fail) and does not advance lastDailyReportDate', async () => {
@@ -810,7 +855,6 @@ describe('XtmPollLoop — holiday_calendar_stale pages on-call (C1)', () => {
     hoursStartMin: 9 * 60,
     hoursEndMin: 18 * 60,
     workdays: new Set([1, 2, 3, 4, 5]),
-    throughputWordsPerHour: 1000 / 9,
   };
   // The gate keys its Bangkok-year check off snapshot.capturedAt; the loop clock (NOW, 2026)
   // only drives daily-report/heartbeat timing — kept at 2026 so the daily report path is
@@ -882,7 +926,6 @@ describe('XtmPollLoop — schedule-gate reject logging (I1)', () => {
     hoursStartMin: 9 * 60,
     hoursEndMin: 18 * 60,
     workdays: new Set([1, 2, 3, 4, 5]),
-    throughputWordsPerHour: 1000 / 9,
   };
 
   it('logs one warn line per reject with the binding reason/words/dueDate', async () => {

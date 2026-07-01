@@ -162,7 +162,7 @@ describe('ACCEPT_SCHEDULE config', () => {
     expect(c.hoursStartMin).toBe(540);
     expect(c.hoursEndMin).toBe(1080);
     expect([...c.workdays]).toEqual([1, 2, 3, 4, 5]);
-    expect(c.throughputWordsPerHour).toBeCloseTo(1000 / 9, 5);
+    expect(c.throughputPerHour).toBeCloseTo(1000 / 9, 5);
   });
 
   it("kill-switch '0' disables", () => {
@@ -171,15 +171,21 @@ describe('ACCEPT_SCHEDULE config', () => {
     );
   });
 
-  it('empty throughput → derived (not 0)', () => {
+  it('empty throughput → derived from cap (not 0)', () => {
+    // words mode: empty ACCEPT_THROUGHPUT_WORDS_PER_HOUR → derived from cap (1000/9h)
     expect(
-      loadConfig({ ...base, ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '' }).throughputWordsPerHour,
+      loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'words', ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '' })
+        .throughputPerHour,
     ).toBeCloseTo(1000 / 9, 5);
   });
 
-  it('explicit throughput override wins', () => {
+  it('explicit throughput override wins over derived (words mode)', () => {
     expect(
-      loadConfig({ ...base, ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '100' }).throughputWordsPerHour,
+      loadConfig({
+        ...base,
+        ACCEPT_EFFORT_METRIC: 'words',
+        ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '100',
+      }).throughputPerHour,
     ).toBe(100);
   });
 
@@ -189,13 +195,120 @@ describe('ACCEPT_SCHEDULE config', () => {
     ).toThrow();
   });
 
-  it('refine: capacity=0 without explicit throughput rejected when enabled', () => {
-    expect(() => loadConfig({ ...base, ACCEPT_MAX_WORDS_PER_DAY: '0' })).toThrow();
+  it('refine: words-mode capacity=0 without explicit throughput rejected when enabled', () => {
+    // Must specify words mode explicitly — the default metric is wwc, and the words-cap
+    // refine is correctly gated to words mode only (I-2).
+    expect(() =>
+      loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'words', ACCEPT_MAX_WORDS_PER_DAY: '0' }),
+    ).toThrow();
   });
 
   it('disabled: bad values do NOT block startup (kill-switch always works)', () => {
     expect(() =>
       loadConfig({ ...base, ACCEPT_SCHEDULE_ENABLED: '0', ACCEPT_MAX_WORDS_PER_DAY: '0' }),
+    ).not.toThrow();
+  });
+});
+
+describe('ACCEPT_EFFORT_METRIC config', () => {
+  it('defaults ACCEPT_EFFORT_METRIC to wwc', () => {
+    expect(loadConfig(base).ACCEPT_EFFORT_METRIC).toBe('wwc');
+  });
+  it('rejects an invalid ACCEPT_EFFORT_METRIC at startup (fail-fast)', () => {
+    expect(() => loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'weighted' })).toThrow();
+  });
+  it('metric=wwc → active cap = ACCEPT_MAX_WWC_PER_DAY, throughput derived from it', () => {
+    const c = loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'wwc', ACCEPT_MAX_WWC_PER_DAY: '900' });
+    expect(c.activeMaxPerDay).toBe(900);
+    expect(c.throughputPerHour).toBeCloseTo(900 / 9, 5);
+    expect(c.unit).toEqual({ adj: 'WWC', noun: 'WWC' });
+  });
+  it('metric=words → active cap = ACCEPT_MAX_WORDS_PER_DAY (byte-for-byte), unit words', () => {
+    const c = loadConfig({
+      ...base,
+      ACCEPT_EFFORT_METRIC: 'words',
+      ACCEPT_MAX_WORDS_PER_DAY: '1000',
+    });
+    expect(c.activeMaxPerDay).toBe(1000);
+    expect(c.throughputPerHour).toBeCloseTo(1000 / 9, 5);
+    expect(c.unit).toEqual({ adj: 'word', noun: 'words' });
+  });
+  it('D7 override isolation: a WORDS override does not leak into wwc throughput', () => {
+    const c = loadConfig({
+      ...base,
+      ACCEPT_EFFORT_METRIC: 'wwc',
+      ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '50',
+      ACCEPT_MAX_WWC_PER_DAY: '900',
+    });
+    expect(c.throughputPerHour).toBeCloseTo(100, 5); // 900/9, NOT 50
+  });
+
+  it('D-new: explicit ACCEPT_THROUGHPUT_WWC_PER_HOUR overrides derived throughput in wwc mode', () => {
+    // Mirrors D7: the WWC explicit override must win over the cap-derived value (900/9≈100).
+    // Without this pin the override path could silently revert to derived — a capacity
+    // regression that over-accepts past the intended 50/h limit.
+    const c = loadConfig({
+      ...base,
+      ACCEPT_EFFORT_METRIC: 'wwc',
+      ACCEPT_MAX_WWC_PER_DAY: '900',
+      ACCEPT_THROUGHPUT_WWC_PER_HOUR: '50',
+    });
+    expect(c.throughputPerHour).toBe(50); // explicit override wins, NOT 900/9 ≈ 100
+  });
+  it('explicit-0 WWC cap fails fast even with an override set', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        ACCEPT_EFFORT_METRIC: 'wwc',
+        ACCEPT_MAX_WWC_PER_DAY: '0',
+        ACCEPT_THROUGHPUT_WWC_PER_HOUR: '111',
+      }),
+    ).toThrow();
+  });
+
+  it('I-2 dynamic path: words mode + cap 0 + explicit throughput → error names ACCEPT_MAX_WORDS_PER_DAY (not WWC)', () => {
+    // When ACCEPT_EFFORT_METRIC=words and ACCEPT_MAX_WORDS_PER_DAY=0, the superRefine must
+    // name ACCEPT_MAX_WORDS_PER_DAY in the error path, not ACCEPT_MAX_WWC_PER_DAY. An operator
+    // in words mode seeing the wrong var name would fix the wrong knob → prolonged outage.
+    const err = (() => {
+      try {
+        loadConfig({
+          ...base,
+          ACCEPT_EFFORT_METRIC: 'words',
+          ACCEPT_MAX_WORDS_PER_DAY: '0',
+          ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '111',
+        });
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    })();
+    expect(err).not.toBeNull();
+    expect(err).toContain('ACCEPT_MAX_WORDS_PER_DAY');
+    expect(err).not.toContain('ACCEPT_MAX_WWC_PER_DAY');
+  });
+  it('kill-switch escape: schedule disabled + wwc + cap 0 does NOT throw', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        ACCEPT_SCHEDULE_ENABLED: '0',
+        ACCEPT_EFFORT_METRIC: 'wwc',
+        ACCEPT_MAX_WWC_PER_DAY: '0',
+      }),
+    ).not.toThrow();
+  });
+
+  it('wwc mode + zeroed words cap is valid (I-2: words-cap refine must not fire in wwc mode)', () => {
+    // An operator in wwc mode who sets ACCEPT_MAX_WORDS_PER_DAY=0 ("unused in wwc") must NOT
+    // hit the words-throughput-resolvability refine — that refine only guards words mode.
+    // The wwc active-cap refines already guard throughput resolvability in wwc mode.
+    expect(() =>
+      loadConfig({
+        ...base,
+        ACCEPT_EFFORT_METRIC: 'wwc',
+        ACCEPT_MAX_WORDS_PER_DAY: '0',
+        ACCEPT_MAX_WWC_PER_DAY: '1000',
+      }),
     ).not.toThrow();
   });
 });

@@ -28,7 +28,8 @@ export type TriggerKind =
   | 'yield_stuck'
   | 'holiday_calendar_stale'
   | 'daily_cap_reached'
-  | 'held_job_no_deadline';
+  | 'held_job_no_deadline'
+  | 'held_job_no_effort';
 
 interface TriggerSpec {
   severity: 'warn' | 'critical';
@@ -37,6 +38,18 @@ interface TriggerSpec {
   action: string;
   /** Whether this trigger emits a SYSTEM_RECOVERED when the condition clears. */
   hasRecovered: boolean;
+  /**
+   * Optional builder for metric-aware title/impact/action strings.
+   * Called when `unit` + `capVar` are supplied to `raiseAlert`.
+   * The static title/impact/action above serve as the words-mode defaults
+   * (backward-compatible when the builder is not invoked).
+   * Returns a Partial so builders that only customise one field can omit the rest
+   * (the merge in raiseAlert fills missing fields from the static spec).
+   */
+  builder?: (
+    unit: { adj: string },
+    capVar: string,
+  ) => Partial<{ title: string; impact: string; action: string }>;
 }
 
 /** Action text per trigger (contracts/notifications.md §4). */
@@ -158,11 +171,19 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
   // auto-resolves; the next Bangkok day's dedupKey re-arms it.
   daily_cap_reached: {
     severity: 'warn',
+    // Static strings are the words-mode defaults (backward-compatible when raiseAlert
+    // is called without unit/capVar, e.g. from the all-triggers test loop).
     title: 'Daily word cap reached — auto-accept paused for today',
     impact: 'No more Malay jobs are auto-accepted until the Bangkok-day counter resets at midnight',
     action:
       'Accept further jobs manually if needed; the cap resets at Bangkok midnight. To raise it, set ACCEPT_MAX_WORDS_PER_DAY in .env then npm run deploy',
     hasRecovered: false,
+    builder: (unit, capVar) => ({
+      title: `Daily ${unit.adj} cap reached — auto-accept paused for today`,
+      impact:
+        'No more Malay jobs are auto-accepted until the Bangkok-day counter resets at midnight',
+      action: `Accept further jobs manually if needed; the cap resets at Bangkok midnight. To raise it, set ${capVar} in .env then npm run deploy`,
+    }),
   },
   // Raised (deduped once per Bangkok day, dedupKey `held_job_no_deadline:<date>`) when a HELD
   // (accepted) job has a null/unparseable deadline so it drops out of the per-deadline-day
@@ -172,24 +193,45 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
   // (like daily_cap_reached) — it never auto-resolves; the next Bangkok day's dedupKey re-arms it.
   held_job_no_deadline: {
     severity: 'warn',
+    // Static strings are the words-mode defaults.
     title: 'Accepted job has no deadline — capacity may under-count',
     impact: 'A later job due the same day could be over-accepted past the daily word cap',
     action:
       'Open XTM, find the accepted job(s) missing a due date, and accept further same-day jobs manually until the due date is fixed',
     hasRecovered: false,
+    builder: (unit, _capVar) => ({
+      impact: `A later job due the same day could be over-accepted past the daily ${unit.adj} cap`,
+    }),
+  },
+  // Raised (deduped once per Bangkok day, dedupKey `held_job_no_effort:<date>`) when a HELD
+  // (accepted) job has null effort under the ACTIVE metric (effortOf → null) so it is seeded
+  // as 0 in the per-deadline-day capacity bucket — that day under-counts and a later same-day
+  // Malay group could over-accept past the cap on the IRREVERSIBLE bulk path. warn (not
+  // critical): auto-accept still runs; ops should fix the word/WWC count or accept manually.
+  // hasRecovered:false (like held_job_no_deadline) — the next Bangkok day re-arms it.
+  held_job_no_effort: {
+    severity: 'warn',
+    title: 'Accepted job has no effort count — capacity may under-count',
+    impact: 'A later job due the same day could be over-accepted past the daily word cap',
+    action:
+      'Open XTM, find the accepted job(s) missing a word/WWC count, and accept further same-day jobs manually until the count is fixed',
+    hasRecovered: false,
+    builder: (unit, _capVar) => ({
+      impact: `A later job due the same day could be over-accepted past the daily ${unit.adj} cap`,
+    }),
   },
 };
 
 /** Build a cardsV2 alert payload for the given fields and dedup key. */
 function buildAlertCard(
-  spec: TriggerSpec,
+  spec: Pick<TriggerSpec, 'severity'>,
   fields: SystemAlertFields,
   dedupKey: string,
 ): { cardsV2: unknown[] } {
   const emoji = spec.severity === 'critical' ? '🔴' : '⚠️';
   return buildCard({
     cardId: sanitizeCardId(`alert-${dedupKey}`),
-    headerTitle: `${emoji} ${spec.title}`,
+    headerTitle: `${emoji} ${fields.title}`,
     rows: [
       { label: 'Impact', value: fields.impact },
       { label: 'Action', value: fields.action },
@@ -202,6 +244,11 @@ function buildAlertCard(
  * Raise a system alert through the outbox (never sent directly — Constitution IV).
  * Deduped per trigger via the active-alert index. Returns true if a new alert
  * was enqueued (false if already active).
+ *
+ * For metric-aware triggers (`daily_cap_reached`, `held_job_no_deadline`) pass
+ * `unit` (e.g. `{ adj: 'WWC' }`) and `capVar` (the ACTIVE cap env-var name,
+ * e.g. `'ACCEPT_MAX_WWC_PER_DAY'`) so the card names the right knob.
+ * When omitted the static words-mode strings are used (backward-compatible).
  */
 export function raiseAlert(
   db: DB,
@@ -213,16 +260,22 @@ export function raiseAlert(
   /** Override the dedup key (default = kind). Use a per-job key for incidents
    *  that recur per job (e.g. accept_failed) so distinct failures each alert. */
   dedupKey?: string,
+  /** Effort-unit label (e.g. `{ adj: 'WWC' }` or `{ adj: 'word' }`). */
+  unit?: { adj: string },
+  /** Active cap env-var name (e.g. `'ACCEPT_MAX_WWC_PER_DAY'`). */
+  capVar?: string,
 ): boolean {
   const spec = TRIGGERS[kind];
+  const built =
+    unit != null && capVar != null && spec.builder ? spec.builder(unit, capVar) : undefined;
   const system = new SystemEventStore(db);
   return db.transaction(() => {
     const fields: SystemAlertFields = {
       severity: spec.severity,
-      title: spec.title,
+      title: built?.title ?? spec.title,
       cause: detail,
-      impact: extra.impact ?? spec.impact,
-      action: extra.action ?? spec.action,
+      impact: extra.impact ?? built?.impact ?? spec.impact,
+      action: extra.action ?? built?.action ?? spec.action,
       occurredAt,
     };
     const resolvedDedup = dedupKey ?? kind;

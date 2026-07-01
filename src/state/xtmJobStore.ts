@@ -52,7 +52,7 @@ export class XtmJobStore {
     return rows.map(rowToState);
   }
 
-  /** Σ words of held (lifecycle 'accepted') jobs grouped by the day a `dayOf` mapper assigns each
+  /** Σ effort of held (lifecycle 'accepted') jobs grouped by the day a `dayOf` mapper assigns each
    *  deadline to. The cycle injects an EFFECTIVE-deadline-day mapper (the working day the work
    *  lands on) so the bucket key matches feasibility; the default is the raw Bangkok deadline date
    *  (`deadlineDayOf`) so the store stays usable standalone (ops/tests) without a work calendar.
@@ -69,21 +69,22 @@ export class XtmJobStore {
    *  trail (`summary.acceptedDueDays`, which only records days a NEW group advanced).
    *  `heldJobsMissingDeadline()` exposes exactly which held jobs were skipped so the cycle can
    *  FAIL LOUD (I1: a deduped warn alert) instead of silently dropping them. */
-  wordsDueByDeadline(
+  effortDueByDeadline(
     dayOf: (dueDate: string | null) => string | null = deadlineDayOf,
+    effortOf: (s: XtmJobState) => number = (s) => s.words ?? 0,
   ): ReadonlyMap<string, number> {
     const out = new Map<string, number>();
     for (const s of this.listByLifecycle('accepted')) {
       const d = dayOf(s.dueDate); // null = null/unparseable deadline (skipped, surfaced by heldJobsMissingDeadline)
       if (d === null) continue;
-      out.set(d, (out.get(d) ?? 0) + (s.words ?? 0));
+      out.set(d, (out.get(d) ?? 0) + effortOf(s));
     }
     return out;
   }
 
   /** Job keys of held (lifecycle 'accepted') jobs whose `dayOf` bucket key is null — exactly the
-   *  jobs `wordsDueByDeadline(dayOf)` skips (they contribute NOTHING to the per-deadline-day
-   *  capacity seed). PARTNERS with `wordsDueByDeadline`: a job is classified "missing-deadline"
+   *  jobs `effortDueByDeadline(dayOf)` skips (they contribute NOTHING to the per-deadline-day
+   *  capacity seed). PARTNERS with `effortDueByDeadline`: a job is classified "missing-deadline"
    *  iff `dayOf` returns null, so they can never disagree about which held jobs were dropped — the
    *  cycle MUST pass the SAME mapper to both. Default `deadlineDayOf` (raw date) keeps the store
    *  usable standalone (ops/tests). Normally empty (see the F1 invariant above); a non-empty result
@@ -95,6 +96,25 @@ export class XtmJobStore {
     const out: string[] = [];
     for (const s of this.listByLifecycle('accepted')) {
       if (dayOf(s.dueDate) === null) out.push(s.jobKey);
+    }
+    return out;
+  }
+
+  /** Held (lifecycle 'accepted') jobs whose `effortOf` returns null — exactly the jobs
+   *  `effortDueByDeadline(dayOf, effortOf)` credits with 0 effort instead of their real
+   *  count. PARTNERS with `effortDueByDeadline` and `heldJobsMissingDeadline`: a job is
+   *  classified "missing-effort" iff `effortOf(s)` returns null. When the schedule gate is
+   *  ON a null-effort held job under-counts the per-deadline-day capacity seed → a later
+   *  same-day group could over-accept past the cap on the IRREVERSIBLE bulk path. The cycle
+   *  MUST call this (alongside heldJobsMissingDeadline) and raise a deduped warn alert.
+   *  Normally empty (gate-ON held jobs come through the feasibility check first, which
+   *  blocks null-effort jobs); a non-empty result is the anomaly to alert on (I-1). */
+  heldJobsMissingEffort(
+    effortOf: (s: XtmJobState) => number | null,
+  ): XtmJobState[] {
+    const out: XtmJobState[] = [];
+    for (const s of this.listByLifecycle('accepted')) {
+      if (effortOf(s) === null) out.push(s);
     }
     return out;
   }

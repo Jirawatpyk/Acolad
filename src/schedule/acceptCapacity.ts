@@ -1,5 +1,5 @@
 export interface CapacityMember {
-  words: number;
+  effort: number;
   deadlineDate: string;
 }
 export type GroupCapacityVerdict =
@@ -8,7 +8,7 @@ export type GroupCapacityVerdict =
   | { accept: false; kind: 'budget_reached'; reason: string; capExhaustedDay: string };
 
 /** Decide a whole bulk group all-or-nothing, bucketed by deadline day. `bucketFor(d)` =
- *  words already due on day d (held + this cycle's optimistic advances).
+ *  effort already due on day d (under the active metric; held + this cycle's optimistic advances).
  *  PRECONDITION: `bucketFor` returns a NON-NEGATIVE count (a negative bucket would
  *  understate per-day load and let an over-cap group slip through).
  *
@@ -18,14 +18,23 @@ export type GroupCapacityVerdict =
  *     clears it, so ops must accept it manually. Carries NO `capExhaustedDay` (nothing re-arms it).
  *   - 'budget_reached': the day fits alone but the running bucket + subtotal overflows — retryable
  *     as held jobs finish. Carries the overflowing `capExhaustedDay` (drives the deduped alert). */
+/** Active metric unit for user-facing reason strings.
+ *  Defaults to words mode so all existing callers stay byte-for-byte identical. */
+export interface CapacityUnit {
+  adj: string;
+  noun: string;
+}
+const DEFAULT_UNIT: CapacityUnit = { adj: 'word', noun: 'words' };
+
 export function decideGroupCapacity(
   members: CapacityMember[],
   bucketFor: (deadlineDate: string) => number,
   cap: number,
+  unit: CapacityUnit = DEFAULT_UNIT,
 ): GroupCapacityVerdict {
   const subtotalsByDay = new Map<string, number>();
   for (const mem of members)
-    subtotalsByDay.set(mem.deadlineDate, (subtotalsByDay.get(mem.deadlineDate) ?? 0) + mem.words);
+    subtotalsByDay.set(mem.deadlineDate, (subtotalsByDay.get(mem.deadlineDate) ?? 0) + mem.effort);
 
   if (cap > 0) {
     // Days in ascending deadline-date order so the named day is the EARLIEST relevant one
@@ -41,7 +50,7 @@ export function decideGroupCapacity(
         return {
           accept: false,
           kind: 'over_cap_permanent',
-          reason: `group words due ${day} (${subtotal}) exceed the daily cap (${cap}) — accept manually`,
+          reason: `group ${unit.noun} due ${day} (${subtotal}) exceed the daily cap (${cap}) — accept manually`,
         };
     }
 
@@ -53,7 +62,7 @@ export function decideGroupCapacity(
         return {
           accept: false,
           kind: 'budget_reached',
-          reason: `daily word cap reached for ${day} (${bucket}+${subtotal} > ${cap})`,
+          reason: `daily ${unit.adj} cap reached for ${day} (${bucket}+${subtotal} > ${cap})`,
           capExhaustedDay: day,
         };
     }

@@ -80,6 +80,17 @@ function buttonUrl(result: { cardsV2: unknown[] }): string | undefined {
   return undefined;
 }
 
+/** Find the text value of the first decorated-text widget whose topLabel === label. */
+function rowValue(result: { cardsV2: unknown[] }, label: string): string | undefined {
+  const e = entry(result);
+  for (const s of e.card.sections) {
+    for (const w of s.widgets) {
+      if (w.decoratedText?.topLabel === label) return w.decoratedText.text;
+    }
+  }
+  return undefined;
+}
+
 describe('XTM notifier — English cardsV2 (FR-019)', () => {
   // ---------------------------------------------------------------------------
   // renderXtmNewJob
@@ -207,6 +218,27 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
       expect(labels.some((l) => l.includes('Detected'))).toBe(true);
       expect(texts.some((t) => t.includes('19/06/2026 10:00'))).toBe(true);
     });
+
+    it('shows a "File WWC" row with the numeric value when fileWwc is set (D11)', () => {
+      const result = renderXtmNewJob(
+        xstate({ words: 861, fileWwc: 169 }),
+        '2026-06-19T03:00:00.000Z',
+        'Malay (MS) — accepting',
+        XTM_URL,
+      );
+      expect(rowLabels(result).some((l) => l.includes('File WWC'))).toBe(true);
+      expect(rowTexts(result).some((t) => t.includes('169'))).toBe(true);
+    });
+
+    it('null fileWwc renders "—" in the File WWC row (D11)', () => {
+      const result = renderXtmNewJob(
+        xstate({ words: 861, fileWwc: null }),
+        '2026-06-19T03:00:00.000Z',
+        'Malay (MS) — accepting',
+        XTM_URL,
+      );
+      expect(rowValue(result, 'File WWC')).toBe('—');
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -311,6 +343,27 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
       const labels = rowLabels(result);
       expect(labels.some((l) => l.includes('Status'))).toBe(false);
     });
+
+    it('shows a "File WWC" row with the numeric value when fileWwc is set (D11)', () => {
+      const result = renderXtmRelisted(
+        xstate({ words: 500, fileWwc: 95 }),
+        undefined,
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      expect(rowLabels(result).some((l) => l.includes('File WWC'))).toBe(true);
+      expect(rowTexts(result).some((t) => t.includes('95'))).toBe(true);
+    });
+
+    it('null fileWwc renders "—" in the File WWC row (D11)', () => {
+      const result = renderXtmRelisted(
+        xstate({ words: 500, fileWwc: null }),
+        undefined,
+        '2026-06-19T03:00:00.000Z',
+        XTM_URL,
+      );
+      expect(rowValue(result, 'File WWC')).toBe('—');
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -354,6 +407,23 @@ describe('XTM notifier — English cardsV2 (FR-019)', () => {
     it('cardId starts with "accepted-"', () => {
       const result = renderXtmAccepted(xstate({ acceptedAt: null }), XTM_URL);
       expect(entry(result).cardId).toMatch(/^accepted-/);
+    });
+
+    it('shows a "File WWC" row with the numeric value when fileWwc is set (D11)', () => {
+      const result = renderXtmAccepted(
+        xstate({ acceptedAt: '2026-06-19T03:00:05.000Z', words: 300, fileWwc: 58 }),
+        XTM_URL,
+      );
+      expect(rowLabels(result).some((l) => l.includes('File WWC'))).toBe(true);
+      expect(rowTexts(result).some((t) => t.includes('58'))).toBe(true);
+    });
+
+    it('null fileWwc renders "—" in the File WWC row (D11)', () => {
+      const result = renderXtmAccepted(
+        xstate({ acceptedAt: '2026-06-19T03:00:05.000Z', words: 300, fileWwc: null }),
+        XTM_URL,
+      );
+      expect(rowValue(result, 'File WWC')).toBe('—');
     });
   });
 

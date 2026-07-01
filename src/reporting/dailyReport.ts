@@ -12,6 +12,7 @@ import { dash } from './cardText.js';
 import { bangkokCalendar, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { deadlineMsOf, deadlineDayOf } from '../schedule/deadlineDay.js';
 import { isNonWorkingDay } from '../schedule/workingHours.js';
+import { effortOf, type EffortMetric } from '../schedule/effort.js';
 import type { XtmJobState } from '../detection/types.js';
 
 // ---------------------------------------------------------------------------
@@ -64,7 +65,7 @@ export function dueDailyReport(
  * @param held           Jobs currently in lifecycle_status='accepted'.
  * @param nowMs          Current epoch ms (for the date header / card ID / overdue).
  * @param xtmUrl         Deep-link to XTM Active task list.
- * @param maxWordsPerDay Daily word cap from config (0 = no cap).
+ * @param maxPerDay      Daily effort cap (words or WWC per the active metric); 0 = no cap.
  * @param effectiveDay   Maps a dueDate → the Bangkok working day its work lands on (or null
  *                       for null/unparseable). The loop passes the effective-deadline-day mapper
  *                       so "Due today" matches the cap; the default is the raw deadline date
@@ -75,24 +76,30 @@ export function dueDailyReport(
  *                       headline must NOT advertise "cap N/day" (accept runs 24/7 with no cap when
  *                       the gate is off; claiming an enforced limit would mislead). The effective-
  *                       day "Due today" workload view is still valid and is shown either way.
+ * @param metric         The active effort metric ('words' | 'wwc'). Controls how effort is summed,
+ *                       the unit noun in the headline, and how the per-job value is formatted.
+ *                       Defaults to 'words'.
  */
 export function buildDailyReportCard(
   held: XtmJobState[],
   nowMs: number,
   xtmUrl: string,
-  maxWordsPerDay: number,
+  maxPerDay: number,
   effectiveDay: (dueDate: string | null) => string | null = deadlineDayOf,
   capEnforced = true,
+  metric: EffortMetric = 'words',
 ): { cardsV2: unknown[] } {
   const today = bangkokDateString(nowMs);
+  // Derive the unit noun from the metric so callers need only pass `metric`.
+  const noun = metric === 'wwc' ? 'WWC' : 'words';
 
   // Returns the deadline as epoch ms, or +Infinity for null/unparseable (sorts last).
   // Canonical parse (F8) — same one the capacity gate + store bucket use.
   const dueMs = (j: XtmJobState): number => deadlineMsOf(j.dueDate) ?? Number.POSITIVE_INFINITY;
 
-  // Pass 1: compute "Due today" word bucket and collect overdue jobs.
+  // Pass 1: compute "Due today" effort bucket and collect overdue jobs.
   // Only jobs with a parseable finite deadline contribute to either metric.
-  let dueTodayWords = 0;
+  let dueTodayEffort = 0;
   const overdue: XtmJobState[] = [];
   for (const j of held) {
     const ms = dueMs(j);
@@ -100,22 +107,26 @@ export function buildDailyReportCard(
     if (ms < nowMs) overdue.push(j);
     // Bucket by the EFFECTIVE day (the work-day the work lands on) so the headline matches the
     // capacity cap — a before-09:00 deadline tomorrow is today's work; an after-09:00 one is not.
-    if (effectiveDay(j.dueDate) === today) dueTodayWords += j.words ?? 0;
+    if (effectiveDay(j.dueDate) === today) dueTodayEffort += effortOf(j, metric) ?? 0;
   }
 
   // Advertise the enforced cap ONLY when the gate is on AND a positive cap is configured.
   // Gate off (capEnforced=false) → accept is 24/7 with no cap, so "(no cap)" is the honest text;
   // cap=0 also means no cap. Either way, never claim a limit that isn't enforced.
   const usage =
-    capEnforced && maxWordsPerDay > 0
-      ? `${dueTodayWords} words (cap ${maxWordsPerDay}/day per deadline)`
-      : `${dueTodayWords} words (no cap)`;
+    capEnforced && maxPerDay > 0
+      ? `${dueTodayEffort} ${noun} (cap ${maxPerDay}/day per deadline)`
+      : `${dueTodayEffort} ${noun} (no cap)`;
 
   const rows: CardRow[] = [{ label: 'Due today', value: usage }];
 
   if (overdue.length > 0) {
-    const w = overdue.reduce((a, j) => a + (j.words ?? 0), 0);
-    rows.push({ emoji: '⚠️', label: 'Overdue', value: `${overdue.length} job(s) · ${w} words` });
+    const w = overdue.reduce((a, j) => a + (effortOf(j, metric) ?? 0), 0);
+    rows.push({
+      emoji: '⚠️',
+      label: 'Overdue',
+      value: `${overdue.length} job(s) · ${w} ${noun}`,
+    });
   }
 
   // Pass 2: top-5 job rows, sorted by deadline asc (tie-break by jobKey).
@@ -124,7 +135,12 @@ export function buildDailyReportCard(
   const overdueSet = new Set(overdue.map((j) => j.jobKey));
   for (const j of top) {
     const label = dash(j.projectName);
-    const value = `${formatReadableDate(j.dueDate ?? j.dueRaw ?? null) || '—'} · ${dash(j.fileName)} · ${j.words != null ? `${j.words}w` : '—'}`;
+    // Per-job effort: metric-conditional format (NOT a plain unit interpolation).
+    // words-mode → "Nw" (compact), wwc-mode → "N WWC" (full label). Null → "—".
+    const effortVal = effortOf(j, metric);
+    const effortStr =
+      effortVal != null ? (metric === 'wwc' ? `${effortVal} WWC` : `${effortVal}w`) : '—';
+    const value = `${formatReadableDate(j.dueDate ?? j.dueRaw ?? null) || '—'} · ${dash(j.fileName)} · ${effortStr}`;
     // Use a ternary rather than `emoji: undefined` — exactOptionalPropertyTypes forbids the latter.
     rows.push(overdueSet.has(j.jobKey) ? { emoji: '⚠️', label, value } : { label, value });
   }
