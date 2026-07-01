@@ -28,7 +28,8 @@ export type TriggerKind =
   | 'yield_stuck'
   | 'holiday_calendar_stale'
   | 'daily_cap_reached'
-  | 'held_job_no_deadline';
+  | 'held_job_no_deadline'
+  | 'held_job_no_effort';
 
 interface TriggerSpec {
   severity: 'warn' | 'critical';
@@ -201,6 +202,26 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
       impact: `A later job due the same day could be over-accepted past the daily ${unit.adj} cap`,
       action:
         'Open XTM, find the accepted job(s) missing a due date, and accept further same-day jobs manually until the due date is fixed',
+    }),
+  },
+  // Raised (deduped once per Bangkok day, dedupKey `held_job_no_effort:<date>`) when a HELD
+  // (accepted) job has null effort under the ACTIVE metric (effortOf → null) so it is seeded
+  // as 0 in the per-deadline-day capacity bucket — that day under-counts and a later same-day
+  // Malay group could over-accept past the cap on the IRREVERSIBLE bulk path. warn (not
+  // critical): auto-accept still runs; ops should fix the word/WWC count or accept manually.
+  // hasRecovered:false (like held_job_no_deadline) — the next Bangkok day re-arms it.
+  held_job_no_effort: {
+    severity: 'warn',
+    title: 'Accepted job has no effort count — capacity may under-count',
+    impact: 'A later job due the same day could be over-accepted past the daily word cap',
+    action:
+      'Open XTM, find the accepted job(s) missing a word/WWC count, and accept further same-day jobs manually until the count is fixed',
+    hasRecovered: false,
+    builder: (unit, _capVar) => ({
+      title: 'Accepted job has no effort count — capacity may under-count',
+      impact: `A later job due the same day could be over-accepted past the daily ${unit.adj} cap`,
+      action:
+        'Open XTM, find the accepted job(s) missing a word/WWC count, and accept further same-day jobs manually until the count is fixed',
     }),
   },
 };

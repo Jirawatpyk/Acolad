@@ -277,6 +277,29 @@ export class XtmPollCycle {
             : 'ACCEPT_MAX_WORDS_PER_DAY',
         );
       }
+      // I-1 (null-effort companion): a held job with null effort under the ACTIVE metric
+      // contributes NOTHING to its deadline-day bucket (effortDueByDeadline uses `?? 0` for
+      // the seed; see the effortOf call there). This can under-count the cap → over-accept past
+      // it on the irreversible bulk-claim path. Alert once per Bangkok day (deduped), same
+      // pattern as held_job_no_deadline. Only meaningful while the gate is ON.
+      const heldNoEffort = this.store.heldJobsMissingEffort(
+        (s) => effortOf(s, this.cfg.ACCEPT_EFFORT_METRIC),
+      );
+      if (heldNoEffort.length > 0) {
+        raiseAlert(
+          this.db,
+          this.outbox,
+          'held_job_no_effort',
+          snapshot.capturedAt,
+          `${heldNoEffort.length} accepted job(s) have no effort count under the active metric — the per-deadline-day capacity may under-count; accept same-day jobs manually / fix the words/WWC count`,
+          {},
+          `held_job_no_effort:${bangkokDateString(detectedMs)}`,
+          this.cfg.unit,
+          this.cfg.ACCEPT_EFFORT_METRIC === 'wwc'
+            ? 'ACCEPT_MAX_WWC_PER_DAY'
+            : 'ACCEPT_MAX_WORDS_PER_DAY',
+        );
+      }
     }
     // Jobs whose decideAccept() → accept, collected from BOTH passes BEFORE the schedule
     // gate (C4 — one gate, no per-site drift). The gate then groups them per bulk-accept

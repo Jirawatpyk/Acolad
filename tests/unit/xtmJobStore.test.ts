@@ -281,6 +281,46 @@ describe('XtmJobStore', () => {
     });
   });
 
+  describe('heldJobsMissingEffort (I-1 — null-effort held-job guard)', () => {
+    it('returns held jobs whose effortOf is null (wwc mode: both-null → missing)', () => {
+      const store = freshStore();
+      store.upsertMany([
+        accepted({ jobKey: 'ok-wwc', dueDate: DUE, words: 100, fileWwc: 50 }), // effortOf(wwc)=50
+        accepted({ jobKey: 'null-both', dueDate: DUE, words: null, fileWwc: null }), // effortOf(wwc)=null
+        // wwc falls back to words when fileWwc is null/0, so this one resolves to words=100
+        accepted({ jobKey: 'null-wwc', dueDate: DUE, words: 100, fileWwc: null }),
+      ]);
+      const missing = store.heldJobsMissingEffort((s) => effortOf(s, 'wwc'));
+      expect(missing.map((s) => s.jobKey)).toEqual(['null-both']);
+    });
+
+    it('words mode: returns held jobs with null words', () => {
+      const store = freshStore();
+      store.upsertMany([
+        accepted({ jobKey: 'ok', dueDate: DUE, words: 100 }),
+        accepted({ jobKey: 'null-words', dueDate: DUE, words: null, fileWwc: 50 }),
+      ]);
+      const missing = store.heldJobsMissingEffort((s) => effortOf(s, 'words'));
+      expect(missing.map((s) => s.jobKey)).toEqual(['null-words']);
+    });
+
+    it('is empty when every held job has non-null effort', () => {
+      const store = freshStore();
+      store.upsertMany([accepted({ jobKey: 'a', dueDate: DUE, words: 100, fileWwc: 42 })]);
+      expect(store.heldJobsMissingEffort((s) => effortOf(s, 'wwc'))).toEqual([]);
+    });
+
+    it('only inspects held (accepted lifecycle) jobs — non-held jobs with null effort are not flagged', () => {
+      const store = freshStore();
+      store.upsertMany([
+        xstate({ jobKey: 'new-no-words', fileName: 'new.docx', words: null }),
+        accepted({ jobKey: 'held-no-words', dueDate: DUE, words: null, fileWwc: null }),
+      ]);
+      const missing = store.heldJobsMissingEffort((s) => effortOf(s, 'wwc'));
+      expect(missing.map((s) => s.jobKey)).toEqual(['held-no-words']);
+    });
+  });
+
   describe('heldJobsMissingDeadline (I1 — fail-loud over-accept guard)', () => {
     it('returns the keys of held jobs with a null/unparseable deadline (those effortDueByDeadline skips)', () => {
       const store = freshStore();

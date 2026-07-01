@@ -100,6 +100,25 @@ export class XtmJobStore {
     return out;
   }
 
+  /** Held (lifecycle 'accepted') jobs whose `effortOf` returns null — exactly the jobs
+   *  `effortDueByDeadline(dayOf, effortOf)` credits with 0 effort instead of their real
+   *  count. PARTNERS with `effortDueByDeadline` and `heldJobsMissingDeadline`: a job is
+   *  classified "missing-effort" iff `effortOf(s)` returns null. When the schedule gate is
+   *  ON a null-effort held job under-counts the per-deadline-day capacity seed → a later
+   *  same-day group could over-accept past the cap on the IRREVERSIBLE bulk path. The cycle
+   *  MUST call this (alongside heldJobsMissingDeadline) and raise a deduped warn alert.
+   *  Normally empty (gate-ON held jobs come through the feasibility check first, which
+   *  blocks null-effort jobs); a non-empty result is the anomaly to alert on (I-1). */
+  heldJobsMissingEffort(
+    effortOf: (s: XtmJobState) => number | null,
+  ): XtmJobState[] {
+    const out: XtmJobState[] = [];
+    for (const s of this.listByLifecycle('accepted')) {
+      if (effortOf(s) === null) out.push(s);
+    }
+    return out;
+  }
+
   /** Upsert by job_key (no duplicate rows, Constitution VII). Runs in one txn. */
   upsertMany(states: Iterable<XtmJobState>): void {
     const stmt = this.db.prepare(`

@@ -1660,6 +1660,49 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(activeHeldNoDeadlineAlerts()).toBe(0);
   });
 
+  // I-1b: null-effort companion alert
+  const activeHeldNoEffortAlerts = (): number =>
+    (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key LIKE 'held_job_no_effort:%' AND resolved_at IS NULL",
+        )
+        .get() as { n: number }
+    ).n;
+
+  it('I-1: a held job with null effort raises a deduped held_job_no_effort warn alert', async () => {
+    fresh();
+    // A held job with words=null → effortOf(words)=null → seeds 0 → under-count.
+    // schedCfg() uses words mode (SCHED_FIELDS.ACCEPT_EFFORT_METRIC='words'), so null words triggers it.
+    new XtmJobStore(db).upsertMany([
+      accepted({ jobKey: 'null-eff', dueDate: dueWed18, words: null }),
+    ]);
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    await cycle.run(snapAt([], MON_10, 'c1'));
+    expect(activeHeldNoEffortAlerts()).toBe(1);
+    // deduped — second cycle same Bangkok day should not add a second alert
+    await cycle.run(snapAt([], MON_10, 'c2'));
+    expect(activeHeldNoEffortAlerts()).toBe(1);
+  });
+
+  it('I-1: no held_job_no_effort alert when every held job has non-null effort', async () => {
+    fresh();
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'ok', dueDate: dueWed18, words: 100 })]);
+    await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(snapAt([], MON_10));
+    expect(activeHeldNoEffortAlerts()).toBe(0);
+  });
+
+  it('I-1: the held_job_no_effort alert is guarded behind scheduleEnabled (gate OFF never raises it)', async () => {
+    fresh();
+    new XtmJobStore(db).upsertMany([
+      accepted({ jobKey: 'null-eff', dueDate: dueWed18, words: null }),
+    ]);
+    await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), new StubAcceptor()).run(
+      snapAt([], MON_10),
+    );
+    expect(activeHeldNoEffortAlerts()).toBe(0);
+  });
+
   it('§9 audit trail: an accepted Malay job surfaces {day, wordsDueOn(day)} in summary.acceptedDueDays', async () => {
     fresh();
     // Held seed 200 due Wed, then accept a 100w-due-Wed job → the resulting Wed bucket is 300.
