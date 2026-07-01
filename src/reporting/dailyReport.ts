@@ -65,7 +65,7 @@ export function dueDailyReport(
  * @param held           Jobs currently in lifecycle_status='accepted'.
  * @param nowMs          Current epoch ms (for the date header / card ID / overdue).
  * @param xtmUrl         Deep-link to XTM Active task list.
- * @param maxWordsPerDay Daily word cap from config (0 = no cap).
+ * @param maxPerDay      Daily effort cap (words or WWC per the active metric); 0 = no cap.
  * @param effectiveDay   Maps a dueDate → the Bangkok working day its work lands on (or null
  *                       for null/unparseable). The loop passes the effective-deadline-day mapper
  *                       so "Due today" matches the cap; the default is the raw deadline date
@@ -76,23 +76,22 @@ export function dueDailyReport(
  *                       headline must NOT advertise "cap N/day" (accept runs 24/7 with no cap when
  *                       the gate is off; claiming an enforced limit would mislead). The effective-
  *                       day "Due today" workload view is still valid and is shown either way.
- * @param unit           Display labels for the active effort metric, e.g. `{ adj: 'word', noun: 'words' }`
- *                       (words-mode) or `{ adj: 'WWC', noun: 'WWC' }` (wwc-mode). Defaults to
- *                       words-mode so callers that omit this param are byte-for-byte unchanged.
- * @param metric         The active effort metric ('words' | 'wwc'). Controls how effort is summed
- *                       and how the per-job value is formatted. Defaults to 'words'.
+ * @param metric         The active effort metric ('words' | 'wwc'). Controls how effort is summed,
+ *                       the unit noun in the headline, and how the per-job value is formatted.
+ *                       Defaults to 'words'.
  */
 export function buildDailyReportCard(
   held: XtmJobState[],
   nowMs: number,
   xtmUrl: string,
-  maxWordsPerDay: number,
+  maxPerDay: number,
   effectiveDay: (dueDate: string | null) => string | null = deadlineDayOf,
   capEnforced = true,
-  unit: { adj: string; noun: string } = { adj: 'word', noun: 'words' },
   metric: EffortMetric = 'words',
 ): { cardsV2: unknown[] } {
   const today = bangkokDateString(nowMs);
+  // Derive the unit noun from the metric so callers need only pass `metric`.
+  const noun = metric === 'wwc' ? 'WWC' : 'words';
 
   // Returns the deadline as epoch ms, or +Infinity for null/unparseable (sorts last).
   // Canonical parse (F8) — same one the capacity gate + store bucket use.
@@ -115,9 +114,9 @@ export function buildDailyReportCard(
   // Gate off (capEnforced=false) → accept is 24/7 with no cap, so "(no cap)" is the honest text;
   // cap=0 also means no cap. Either way, never claim a limit that isn't enforced.
   const usage =
-    capEnforced && maxWordsPerDay > 0
-      ? `${dueTodayEffort} ${unit.noun} (cap ${maxWordsPerDay}/day per deadline)`
-      : `${dueTodayEffort} ${unit.noun} (no cap)`;
+    capEnforced && maxPerDay > 0
+      ? `${dueTodayEffort} ${noun} (cap ${maxPerDay}/day per deadline)`
+      : `${dueTodayEffort} ${noun} (no cap)`;
 
   const rows: CardRow[] = [{ label: 'Due today', value: usage }];
 
@@ -126,7 +125,7 @@ export function buildDailyReportCard(
     rows.push({
       emoji: '⚠️',
       label: 'Overdue',
-      value: `${overdue.length} job(s) · ${w} ${unit.noun}`,
+      value: `${overdue.length} job(s) · ${w} ${noun}`,
     });
   }
 

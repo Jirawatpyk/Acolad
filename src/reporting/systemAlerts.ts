@@ -43,11 +43,13 @@ interface TriggerSpec {
    * Called when `unit` + `capVar` are supplied to `raiseAlert`.
    * The static title/impact/action above serve as the words-mode defaults
    * (backward-compatible when the builder is not invoked).
+   * Returns a Partial so builders that only customise one field can omit the rest
+   * (the merge in raiseAlert fills missing fields from the static spec).
    */
   builder?: (
     unit: { adj: string },
     capVar: string,
-  ) => { title: string; impact: string; action: string };
+  ) => Partial<{ title: string; impact: string; action: string }>;
 }
 
 /** Action text per trigger (contracts/notifications.md §4). */
@@ -198,10 +200,7 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
       'Open XTM, find the accepted job(s) missing a due date, and accept further same-day jobs manually until the due date is fixed',
     hasRecovered: false,
     builder: (unit, _capVar) => ({
-      title: 'Accepted job has no deadline — capacity may under-count',
       impact: `A later job due the same day could be over-accepted past the daily ${unit.adj} cap`,
-      action:
-        'Open XTM, find the accepted job(s) missing a due date, and accept further same-day jobs manually until the due date is fixed',
     }),
   },
   // Raised (deduped once per Bangkok day, dedupKey `held_job_no_effort:<date>`) when a HELD
@@ -218,24 +217,21 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
       'Open XTM, find the accepted job(s) missing a word/WWC count, and accept further same-day jobs manually until the count is fixed',
     hasRecovered: false,
     builder: (unit, _capVar) => ({
-      title: 'Accepted job has no effort count — capacity may under-count',
       impact: `A later job due the same day could be over-accepted past the daily ${unit.adj} cap`,
-      action:
-        'Open XTM, find the accepted job(s) missing a word/WWC count, and accept further same-day jobs manually until the count is fixed',
     }),
   },
 };
 
 /** Build a cardsV2 alert payload for the given fields and dedup key. */
 function buildAlertCard(
-  spec: TriggerSpec,
+  spec: Pick<TriggerSpec, 'severity'>,
   fields: SystemAlertFields,
   dedupKey: string,
 ): { cardsV2: unknown[] } {
   const emoji = spec.severity === 'critical' ? '🔴' : '⚠️';
   return buildCard({
     cardId: sanitizeCardId(`alert-${dedupKey}`),
-    headerTitle: `${emoji} ${spec.title}`,
+    headerTitle: `${emoji} ${fields.title}`,
     rows: [
       { label: 'Impact', value: fields.impact },
       { label: 'Action', value: fields.action },
@@ -283,8 +279,7 @@ export function raiseAlert(
       occurredAt,
     };
     const resolvedDedup = dedupKey ?? kind;
-    const effectiveSpec = built ? { ...spec, title: built.title } : spec;
-    const card = buildAlertCard(effectiveSpec, fields, resolvedDedup);
+    const card = buildAlertCard(spec, fields, resolvedDedup);
     const payload = JSON.stringify(card);
     const eventId = system.create({
       eventType: 'system_alert',

@@ -258,6 +258,12 @@ export class XtmPollCycle {
     // Normally zero — the F1 lock keeps a held job's deadline; a non-zero count means a
     // deadline-less job was held on the gate-OFF path (or the lock was bypassed) — investigate.
     if (scheduleEnabled) {
+      // Metric-specific cap env-var name — used in both the held-job-no-deadline and
+      // daily-cap-reached alert messages so ops sees the right knob to fix.
+      const capVar =
+        this.cfg.ACCEPT_EFFORT_METRIC === 'wwc'
+          ? 'ACCEPT_MAX_WWC_PER_DAY'
+          : 'ACCEPT_MAX_WORDS_PER_DAY';
       // Pass the SAME effDayOf mapper the seed uses (F10): a held job is "missing-deadline" iff its
       // bucket key is null, so the detector and the seed can never disagree about which jobs were
       // dropped from the per-deadline-day capacity count.
@@ -272,9 +278,7 @@ export class XtmPollCycle {
           {},
           `held_job_no_deadline:${bangkokDateString(detectedMs)}`,
           this.cfg.unit,
-          this.cfg.ACCEPT_EFFORT_METRIC === 'wwc'
-            ? 'ACCEPT_MAX_WWC_PER_DAY'
-            : 'ACCEPT_MAX_WORDS_PER_DAY',
+          capVar,
         );
       }
       // I-1 (null-effort companion): a held job with null effort under the ACTIVE metric
@@ -295,9 +299,7 @@ export class XtmPollCycle {
           {},
           `held_job_no_effort:${bangkokDateString(detectedMs)}`,
           this.cfg.unit,
-          this.cfg.ACCEPT_EFFORT_METRIC === 'wwc'
-            ? 'ACCEPT_MAX_WWC_PER_DAY'
-            : 'ACCEPT_MAX_WORDS_PER_DAY',
+          capVar,
         );
       }
     }
@@ -492,9 +494,7 @@ export class XtmPollCycle {
               {},
               `daily_cap_reached:${capExhaustedDay}`,
               this.cfg.unit,
-              this.cfg.ACCEPT_EFFORT_METRIC === 'wwc'
-                ? 'ACCEPT_MAX_WWC_PER_DAY'
-                : 'ACCEPT_MAX_WORDS_PER_DAY',
+              capVar,
             );
           }
         }

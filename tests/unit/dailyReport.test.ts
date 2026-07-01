@@ -478,7 +478,6 @@ describe('buildDailyReportCard — metric-aware effort (Task 8)', () => {
         1000,
         deadlineDayOf,
         true,
-        { adj: 'WWC', noun: 'WWC' },
         'wwc',
       ),
     );
@@ -496,7 +495,6 @@ describe('buildDailyReportCard — metric-aware effort (Task 8)', () => {
         1000,
         deadlineDayOf,
         true,
-        { adj: 'word', noun: 'words' },
         'words',
       ),
     );
@@ -514,7 +512,6 @@ describe('buildDailyReportCard — metric-aware effort (Task 8)', () => {
         1000,
         deadlineDayOf,
         true,
-        { adj: 'WWC', noun: 'WWC' },
         'wwc',
       ),
     );
@@ -531,7 +528,6 @@ describe('buildDailyReportCard — metric-aware effort (Task 8)', () => {
       0,
       undefined,
       true,
-      { adj: 'WWC', noun: 'WWC' },
       'wwc',
     );
     const widget = firstEntry(card).card.sections[0]!.widgets[1] as AnyWidget;
@@ -548,7 +544,6 @@ describe('buildDailyReportCard — metric-aware effort (Task 8)', () => {
       0,
       undefined,
       true,
-      { adj: 'word', noun: 'words' },
       'words',
     );
     const widget = firstEntry(card).card.sections[0]!.widgets[1] as AnyWidget;
@@ -567,7 +562,6 @@ describe('buildDailyReportCard — metric-aware effort (Task 8)', () => {
         1000,
         deadlineDayOf,
         true,
-        { adj: 'WWC', noun: 'WWC' },
         'wwc',
       ),
     );

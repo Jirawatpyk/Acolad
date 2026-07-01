@@ -382,7 +382,6 @@ export class XtmPollLoop {
             // #8: only advertise the per-deadline cap when the schedule gate is ON. With the gate
             // off the cap is not enforced (accept 24/7), so the headline must not claim a limit.
             this.cfg.ACCEPT_SCHEDULE_ENABLED,
-            this.cfg.unit,
             this.cfg.ACCEPT_EFFORT_METRIC,
           );
           this.db.transaction(() => {
