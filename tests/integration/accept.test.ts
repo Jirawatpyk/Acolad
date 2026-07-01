@@ -33,6 +33,7 @@ const xraw = (over: Partial<XtmRawJob> = {}): XtmRawJob => ({
 const target = (raw: XtmRawJob): AcceptTarget => ({
   jobKey: computeXtmJobKey(raw),
   targetLang: raw.targetLang ?? '',
+  projectName: raw.projectName,
   fileName: raw.fileName,
   step: raw.step,
   role: raw.role,
@@ -42,6 +43,7 @@ const target = (raw: XtmRawJob): AcceptTarget => ({
 const t = (jobKey: string, targetLang: string): AcceptTarget => ({
   jobKey,
   targetLang,
+  projectName: 'P',
   fileName: `${jobKey}.docx`,
   step: 'PE 1',
   role: 'Corrector',
@@ -371,6 +373,7 @@ describe('acceptEligibleTasks — locates the target row by cell text, not order
           }),
           // Claimable target SECOND (menu = "Accept task" + bulk item).
           xtmMenuRow('clm222', 'accept', {
+            project: claimable.projectName,
             file: claimable.fileName,
             step: claimable.step ?? '',
             role: claimable.role ?? '',
@@ -413,6 +416,7 @@ describe('acceptEligibleTasks — locates the target row by cell text, not order
       xtmActivePage(
         [
           xtmMenuRow('clm222', 'finish', {
+            project: claimable.projectName,
             file: claimable.fileName,
             step: claimable.step ?? '',
             role: claimable.role ?? '',
@@ -524,13 +528,17 @@ describe('acceptEligibleTasks — exact cell text match in rowForTarget (C1)', (
       xtmActivePage(
         [
           // Superstring row FIRST — file name CONTAINS the target name but is not equal.
+          // Same project as the target so project is a NON-discriminator here; the file-exact
+          // (.bak superstring) rejection is the gate this test isolates.
           xtmMenuRow('sup111', 'accept', {
+            project: exactTarget.projectName,
             file: 'F1 (ID-aaa)_captions.json.bak',
             step: 'Post-Editing (PE) 1',
             role: 'Corrector',
           }),
           // Exact target SECOND — this is the one that must be clicked.
           xtmMenuRow('exact222', 'accept', {
+            project: exactTarget.projectName,
             file: exactTarget.fileName,
             step: exactTarget.step ?? '',
             role: exactTarget.role ?? '',
@@ -572,7 +580,10 @@ describe('acceptEligibleTasks — exact cell text match in rowForTarget (C1)', (
     await page.setContent(
       xtmActivePage(
         [
+          // Same project as the target so project is a non-discriminator — the file-exact
+          // rejection (not a project mismatch) is what makes the target absent.
           xtmMenuRow('sup111', 'accept', {
+            project: exactTarget.projectName,
             file: 'F1 (ID-aaa)_captions.json.bak', // superstring only — exact target absent
             step: 'Post-Editing (PE) 1',
             role: 'Corrector',
@@ -607,6 +618,77 @@ describe('acceptEligibleTasks — exact cell text match in rowForTarget (C1)', (
     expect(out[0]?.jobKey).toBe(target(exactTarget).jobKey);
     // Exact target absent from re-read → missing (retriable).
     expect(out[0]?.outcome).toBe('missing');
+  });
+});
+
+// ── C1c: rowForTarget disambiguates rows with identical file/step/role by project ──
+// Two Malay rows share the same file name, step, and role but differ only in projectName
+// ("EMAIL" vs "EMAIL_1"). Without the project filter, .first() would always pick the
+// first row in DOM order regardless of which project the target belongs to.
+// After the fix, rowForTarget adds an exact project-cell predicate so each target
+// resolves to its own unique row.
+describe('acceptEligibleTasks — rowForTarget includes project cell in row filter (C1c)', () => {
+  let browser: Browser;
+  let page: Page;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+  });
+  afterAll(async () => {
+    await browser.close();
+  });
+  beforeEach(async () => {
+    page = await browser.newPage();
+  });
+  afterEach(async () => {
+    await page.close();
+  });
+
+  const FILE = 'x.html';
+  const STEP = 'Post-Editing (PE) 1'; // match malayRow default so DOM matches target
+  const ROLE = 'Corrector';
+
+  it('C1c: selects the EMAIL_1 row (not EMAIL) when both share file/step/role', async () => {
+    // Setup: EMAIL row FIRST (owned/"Finish task"), EMAIL_1 SECOND (claimable) — without the
+    // project filter rowForTarget picks EMAIL (no click → RED); with it, EMAIL_1 is clicked → GREEN.
+    await page.setContent(
+      xtmActivePage(
+        [
+          xtmMenuRow('email1', 'finish', { project: 'EMAIL', file: FILE, step: STEP, role: ROLE }),
+          xtmMenuRow('email1x', 'accept', {
+            project: 'EMAIL_1',
+            file: FILE,
+            step: STEP,
+            role: ROLE,
+          }),
+        ],
+        { total: 2 },
+      ),
+    );
+
+    const email1Target = xraw({ projectName: 'EMAIL_1', fileName: FILE, step: STEP, role: ROLE });
+    const reReadActive = vi.fn(
+      async (): Promise<XtmRawJob[]> => [xraw({ ...email1Target, acceptAvailable: false })],
+    );
+    const captured: string[] = [];
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async (reason) => {
+        captured.push(reason);
+        return undefined;
+      },
+      nowIso: () => AT,
+      rowAttachTimeoutMs: 2_000,
+    };
+
+    const out = await acceptEligibleTasks(page, [target(email1Target)], deps);
+
+    // The bulk WAS clicked on the EMAIL_1 row (not EMAIL) → post_accept_click fires.
+    expect(captured).toContain('post_accept_click');
+    expect(reReadActive).toHaveBeenCalledTimes(1);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.jobKey).toBe(target(email1Target).jobKey);
+    expect(out[0]?.outcome).toBe('accepted');
   });
 });
 
@@ -651,13 +733,17 @@ describe('readAcceptAvailability — scopes acceptTaskItem query to the open men
       xtmActivePage(
         [
           // Non-target row: claimable (Accept-task in DOM) — must NOT affect target's result.
+          // project matches targetRaw.projectName so readAcceptAvailability computes the correct key.
           xtmMenuRow('other111', 'accept', {
+            project: targetRaw.projectName,
             file: 'OTHER (ID-other111)_file.json',
             step: 'Post-Editing (PE) 1',
             role: 'Corrector',
           }),
           // Target row: owned (Finish-task) — the probe must return false for this key.
+          // project matches targetRaw.projectName so the DOM-derived key equals computeXtmJobKey(targetRaw).
           xtmMenuRow('tgt222', 'finish', {
+            project: targetRaw.projectName,
             file: targetRaw.fileName,
             step: targetRaw.step ?? '',
             role: targetRaw.role ?? '',
@@ -676,5 +762,105 @@ describe('readAcceptAvailability — scopes acceptTaskItem query to the open men
     // false — only the TARGET row's open menu items are visible to the count.
     expect(result.has(targetKey)).toBe(true);
     expect(result.get(targetKey)).toBe(false);
+  });
+});
+
+// ── #13: an empty project on the accept re-read must not silently mis-key the target ──
+// readAcceptAvailability computes each row's key from project|file|step|role. If the project
+// cell reads empty (a transient render / positional drift) while file/step/role are real, the
+// key '|file|step|role' matches NO real target → the target is silently treated as snatched
+// and re-accepted. The fix: detect empty-project-with-real-file, surface a structured WARN +
+// evidence (a drift signal, consistent with #2), and SKIP the row rather than emit a
+// mismatched key — so it is loud, never a silent false 'missing'.
+describe('readAcceptAvailability — empty project on the re-read must not silently mis-key (#13)', () => {
+  let browser: Browser;
+  let page: Page;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+  });
+  afterAll(async () => {
+    await browser.close();
+  });
+  beforeEach(async () => {
+    page = await browser.newPage();
+  });
+  afterEach(async () => {
+    await page.close();
+  });
+
+  const targetRaw = xraw({
+    projectName: 'Real Project',
+    fileName: 'F1 (ID-realproj)_captions.json',
+    step: 'Post-Editing (PE) 1',
+    role: 'Corrector',
+  });
+
+  it('#13: emits a drift WARN + evidence and emits NO key when a row has empty project but real file/step/role', async () => {
+    // The row carries the target's real file/step/role but an EMPTY project cell + a claimable
+    // ("Accept task") menu. Computing the key with project='' would yield a key that matches no
+    // real target → silent false snatched. The fix must surface it and skip — not mis-key it.
+    await page.setContent(
+      xtmActivePage(
+        [
+          xtmMenuRow('emptyproj1', 'accept', {
+            project: '', // ← empty project cell (the drift)
+            file: targetRaw.fileName,
+            step: targetRaw.step ?? '',
+            role: targetRaw.role ?? '',
+          }),
+        ],
+        { total: 1 },
+      ),
+    );
+
+    const targetKey = computeXtmJobKey(targetRaw);
+    const warn = vi.fn();
+    const captureEvidence = vi.fn(async () => 'state/evidence/accept_reread_empty_project');
+    const result = await readAcceptAvailability(page, page, new Set([targetKey]), {
+      logger: { warn },
+      captureEvidence,
+    });
+
+    // No mismatched key produced — the target is NOT resolved by the empty-project row.
+    expect(result.has(targetKey)).toBe(false);
+    // It is SURFACED, not silent: structured WARN + evidence fired (a drift/transient signal).
+    expect(captureEvidence).toHaveBeenCalledWith('accept_reread_empty_project');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toMatchObject({
+      module: 'xtmAccept',
+      action: 'readAcceptAvailability',
+      outcome: 'empty_project_drift',
+    });
+  });
+
+  it('#13: a real-project claimable row is still probed normally (no false drift signal)', async () => {
+    // Same target but with its REAL project cell present → no drift; the probe resolves the key
+    // and returns true (claimable). Guards against the empty-project guard over-firing.
+    await page.setContent(
+      xtmActivePage(
+        [
+          xtmMenuRow('realproj1', 'accept', {
+            project: targetRaw.projectName,
+            file: targetRaw.fileName,
+            step: targetRaw.step ?? '',
+            role: targetRaw.role ?? '',
+          }),
+        ],
+        { total: 1 },
+      ),
+    );
+
+    const targetKey = computeXtmJobKey(targetRaw);
+    const warn = vi.fn();
+    const captureEvidence = vi.fn(async () => undefined);
+    const result = await readAcceptAvailability(page, page, new Set([targetKey]), {
+      logger: { warn },
+      captureEvidence,
+    });
+
+    expect(result.get(targetKey)).toBe(true); // claimable, resolved normally
+    expect(warn).not.toHaveBeenCalled();
+    expect(captureEvidence).not.toHaveBeenCalled();
   });
 });

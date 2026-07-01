@@ -363,6 +363,7 @@ const makeJob = (over: Partial<XtmJobState> = {}): XtmJobState => ({
   lifecycleStatus: 'accepted',
   acceptStatus: 'accepted',
   acceptedAt: '2026-06-25T02:00:00Z',
+  rejectReason: null,
   status: 'visible',
   firstSeenAt: '2026-06-24T10:00:00Z',
   lastSeenAt: '2026-06-25T03:00:00Z',

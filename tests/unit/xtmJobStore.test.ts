@@ -34,6 +34,7 @@ const xstate = (over: Partial<XtmJobState> = {}): XtmJobState => ({
   lifecycleStatus: 'new',
   acceptStatus: 'none',
   acceptedAt: null,
+  rejectReason: null,
   status: 'visible',
   firstSeenAt: NOW,
   lastSeenAt: NOW,
@@ -68,6 +69,24 @@ describe('XtmJobStore', () => {
     expect(s?.acceptStatus).toBe('none');
     expect(s?.status).toBe('visible');
     expect(s?.firstSeenAt).toBe(NOW);
+  });
+
+  it('round-trips rejectReason — a non-null reason survives write→read, null clears it', () => {
+    const store = freshStore();
+    // A non-null reason MUST survive a write→read (catches a missing reject_reason in the
+    // hand-written upsertMany SQL — the four-place trap: column list, VALUES, ON CONFLICT, params).
+    store.upsertMany([
+      xstate({
+        jobKey: 'rr',
+        fileName: 'rr.docx',
+        rejectReason: 'group blocked: holiday_calendar_stale',
+      }),
+    ]);
+    expect(store.loadAll().get('rr')?.rejectReason).toBe('group blocked: holiday_calendar_stale');
+
+    // Clearing it (null) must persist too (the ON CONFLICT … DO UPDATE SET path).
+    store.upsertMany([xstate({ jobKey: 'rr', fileName: 'rr.docx', rejectReason: null })]);
+    expect(store.loadAll().get('rr')?.rejectReason).toBeNull();
   });
 
   it('updates in place on conflict (no duplicate row per job_key)', () => {

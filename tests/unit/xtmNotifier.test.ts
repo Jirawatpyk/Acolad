@@ -27,6 +27,7 @@ const xstate = (over: Partial<XtmJobState> = {}): XtmJobState => ({
   lifecycleStatus: 'new',
   acceptStatus: 'none',
   acceptedAt: null,
+  rejectReason: null,
   status: 'visible',
   firstSeenAt: '2026-06-19T03:00:00.000Z',
   lastSeenAt: '2026-06-19T03:00:00.000Z',

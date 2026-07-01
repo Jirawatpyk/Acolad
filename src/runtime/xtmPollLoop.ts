@@ -83,6 +83,10 @@ export class XtmPollLoop {
     this.store = new XtmJobStore(db);
     this.meta = new MetaStore(db);
     this.cycle = new XtmPollCycle(db, cfg, client, {
+      // The Closed read can still throw LayoutChangedError on a real structural drift (#8 header
+      // guard); it propagates through cycle.run() to this loop's handleError (layout_changed alert
+      // + heartbeat.fail). A zero cross-key match is the routine Removed case, not drift (reverted
+      // #2b — see xtmInbox.ts), so no disappeared-accepted keys are forwarded.
       readClosedKeys: () => client.readClosedKeys(),
     });
     this.heartbeat =

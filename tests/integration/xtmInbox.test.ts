@@ -12,6 +12,8 @@ import {
   xtmEmptyActivePage,
   xtmBrokenActivePage,
   xtmLoadingActivePage,
+  xtmHeaderInsertedBeforeProject,
+  xtmHeaderPartial,
   malayRow,
   thaiRow,
   xtmRow,
@@ -150,6 +152,48 @@ describe('readActiveSnapshot (XTM Active grid)', () => {
     expect(snap.jobs).toHaveLength(1);
     expect(snap.jobs[0]?.targetLang).toBe('Vietnamese');
   });
+
+  // ── #8: header-layout verification — catch a column shift before trusting positional reads ──
+  it('#8: fails loud (LayoutChangedError) when a column is inserted before Project (header drift)', async () => {
+    // The cell selectors are positional (td:nth-child(N)). A column inserted before Project
+    // shifts every later cell right by one; since projectName (col 2) is part of the job KEY,
+    // a silent shift would corrupt identity (re-accept everything / misclassify everything).
+    // The header assertion must catch the drift BEFORE scraping and fail loud.
+    await page.setContent(
+      xtmActivePage([malayRow()], { total: 1, headerLabels: xtmHeaderInsertedBeforeProject() }),
+    );
+    await expect(
+      readActiveSnapshot(page, 'cycle-1', '2026-06-19T10:00:00+07:00', noEvidence, FAST),
+    ).rejects.toBeInstanceOf(LayoutChangedError);
+  });
+
+  it('#8: captures evidence on a header-layout drift so the error path pages on-call', async () => {
+    const captureEvidence = vi.fn(async () => 'state/evidence/layout_changed-2026');
+    await page.setContent(
+      xtmActivePage([malayRow()], { total: 1, headerLabels: xtmHeaderInsertedBeforeProject() }),
+    );
+    await expect(
+      readActiveSnapshot(page, 'cycle-1', '2026-06-19T10:00:00+07:00', captureEvidence, FAST),
+    ).rejects.toBeInstanceOf(LayoutChangedError);
+    expect(captureEvidence).toHaveBeenCalledWith('layout_changed');
+  });
+
+  it('#8 (MINOR): does NOT throw on a present-but-INCOMPLETE Active header (fewer th than expected)', async () => {
+    // A transient partial render: only Project (col 2) + File WWC (col 3) headers exist; the later
+    // checked columns (File/Step/Role) have no <th> yet. A missing th must be skipped, NOT read as
+    // undefined → false LayoutChangedError. The body row is complete, so the scrape proceeds.
+    const snap = await snapshotOf(
+      xtmActivePage([malayRow()], { headerLabels: xtmHeaderPartial() }),
+    );
+    expect(snap.jobs).toHaveLength(1);
+  });
+
+  it('#8: proceeds normally when the header layout is intact (no false positive)', async () => {
+    // Canonical header → identity columns are where the positional selectors expect → scrape OK.
+    const snap = await snapshotOf(xtmActivePage([malayRow()]));
+    expect(snap.jobs).toHaveLength(1);
+    expect(snap.jobs[0]?.projectName).toBe('Newswire Release 4712942');
+  });
 });
 
 // parseXtmWwc is PURE (no Chromium) — kept here so all File WWC behaviour lives with the
@@ -192,6 +236,7 @@ describe('readClosedKeys (Closed-vs-Removed disambiguation)', () => {
     await page.setContent(xtmActivePage([malayRow()]));
     const keys = await readClosedKeys(page, { logger: { warn }, captureEvidence });
     const expectedKey = computeXtmJobKey({
+      projectName: 'Newswire Release 4712942',
       fileName: '4712942-1-21 (ID-1b270f065098)_captions.json',
       step: 'Post-Editing (PE) 1',
       role: 'Corrector',
@@ -213,6 +258,7 @@ describe('readClosedKeys (Closed-vs-Removed disambiguation)', () => {
 
     // The drift still produces a (wrong) key, so it does NOT match the real Active key.
     const realActiveKey = computeXtmJobKey({
+      projectName: 'Newswire Release 4712942',
       fileName: '4712942-1-21 (ID-1b270f065098)_captions.json',
       step: 'Post-Editing (PE) 1',
       role: 'Corrector',
@@ -242,5 +288,95 @@ describe('readClosedKeys (Closed-vs-Removed disambiguation)', () => {
     expect(keys.size).toBe(2);
     expect(warn).not.toHaveBeenCalled();
     expect(captureEvidence).not.toHaveBeenCalled();
+  });
+
+  it('emits a layout-drift WARN + evidence when ALL Closed rows have a null project cell', async () => {
+    // Project-null drift: malayRow({ project: '' }) → project cell textContent is empty
+    // so cell() returns null; but step/role columns remain populated (File WWC at col 3 keeps
+    // step=col9/role=col11 aligned). Therefore allStepRoleNull stays false, but allProjectNull
+    // stays true → the new branch of the drift condition must fire the WARN.
+    const warn = vi.fn();
+    const captureEvidence = vi.fn(async () => 'evidence/closed_project_drift.html');
+    await page.setContent(xtmActivePage([malayRow({ project: '' })]));
+    const keys = await readClosedKeys(page, { logger: { warn }, captureEvidence });
+
+    expect(keys.size).toBe(1); // key is still emitted (project defaults to '' in computeXtmJobKey)
+    expect(captureEvidence).toHaveBeenCalledWith('closed_layout_drift');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toMatchObject({
+      module: 'xtmInbox',
+      action: 'readClosedKeys',
+      outcome: 'layout_drift',
+    });
+  });
+
+  it('does NOT include an Active-job key when the Closed grid has a different project for the same file/step/role (negative match)', async () => {
+    // With projectName in the key (Task 1), a Closed row keyed projectB|file|step|role
+    // must NOT match an Active job keyed projectA|file|step|role — ensuring a cross-project
+    // file-name collision never causes a finished job from one project to suppress a Removed
+    // alert from another.
+    const activeKey = computeXtmJobKey({
+      projectName: 'Project Alpha',
+      fileName: '4712942-1-21 (ID-1b270f065098)_captions.json',
+      step: 'Post-Editing (PE) 1',
+      role: 'Corrector',
+    });
+    // Closed grid contains the same file/step/role but under "Project Beta".
+    await page.setContent(xtmActivePage([malayRow({ project: 'Project Beta' })]));
+    const keys = await readClosedKeys(page);
+    expect(keys.has(activeKey)).toBe(false);
+  });
+
+  // ── #2a: truthy drift detector — whitespace-only project counts as "drifted" ──
+  it('#2a: fires the drift signal when EVERY project cell is whitespace-only (truthy check)', async () => {
+    // A whitespace-only project ('  ') trims to '' — cell() returns '' (a TRUTHY-then-trimmed
+    // value, NOT null), so the old `r.project !== null` check kept allProjectNull=false and the
+    // WARN never fired. The truthy fix counts '' as drifted → the WARN + evidence fire.
+    const warn = vi.fn();
+    const captureEvidence = vi.fn(async () => 'evidence/closed_ws_project.html');
+    await page.setContent(xtmActivePage([malayRow({ project: '  ' })]));
+    await readClosedKeys(page, { logger: { warn }, captureEvidence });
+    expect(captureEvidence).toHaveBeenCalledWith('closed_layout_drift');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toMatchObject({
+      module: 'xtmInbox',
+      action: 'readClosedKeys',
+      outcome: 'layout_drift',
+    });
+  });
+
+  // ── #8: header-layout verification also guards the Closed scrape ──
+  it('#8: fails loud (LayoutChangedError) when the Closed grid header drifts (Project not at col 2)', async () => {
+    const captureEvidence = vi.fn(async () => 'state/evidence/layout_changed-closed');
+    await page.setContent(
+      xtmActivePage([malayRow()], { headerLabels: xtmHeaderInsertedBeforeProject() }),
+    );
+    await expect(readClosedKeys(page, { captureEvidence })).rejects.toBeInstanceOf(
+      LayoutChangedError,
+    );
+    expect(captureEvidence).toHaveBeenCalledWith('layout_changed');
+  });
+
+  // ── reverted #2b: zero cross-key match is the NORMAL Removed case, NOT drift — never throw ──
+  it('returns the Closed key set WITHOUT throwing even when no row matches any prior job (zero cross-key match = routine Removed, not drift)', async () => {
+    // A cancelled accepted job → its key is absent from the Closed tab, which still holds OTHER
+    // finished rows (V10b). The reverted cross-key escalation must NOT turn this routine case into
+    // a LayoutChangedError: readClosedKeys returns the keys and never pages. The #8 header guard
+    // (real structural drift) and the #2a all-null WARN remain the only drift signals.
+    const captureEvidence = vi.fn(async () => undefined);
+    await page.setContent(xtmActivePage([malayRow({ project: 'Some Other Finished Project' })]));
+    const keys = await readClosedKeys(page, { captureEvidence });
+    expect(keys.size).toBe(1); // key emitted normally
+    expect(captureEvidence).not.toHaveBeenCalled(); // no evidence-as-alert, no page
+  });
+
+  // ── #8 (MINOR): tolerate a present-but-incomplete header — only a WRONG label at a rendered
+  // column is drift; a missing <th> is a transient partial render, not a layout shift. ──
+  it('#8: does NOT throw on a present-but-INCOMPLETE Closed header (fewer th than expected — transient partial render)', async () => {
+    // Only the first identity columns rendered (Project, File WWC); cols 5/9/11 have no <th> yet.
+    // A missing th must be treated as not-yet-rendered (skip), not read as undefined → false drift.
+    await page.setContent(xtmActivePage([malayRow()], { headerLabels: xtmHeaderPartial() }));
+    const keys = await readClosedKeys(page);
+    expect(keys.size).toBe(1); // scrape proceeds, no false LayoutChangedError
   });
 });

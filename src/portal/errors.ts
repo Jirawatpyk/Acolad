@@ -85,6 +85,7 @@ export interface AcceptTarget {
   jobKey: string;
   targetLang: string;
   /** Cell values to locate THIS row deterministically (not a volatile nth index). */
+  projectName: string;
   fileName: string;
   step: string | null;
   role: string | null;

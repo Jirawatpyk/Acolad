@@ -7,6 +7,7 @@ import {
   LAST_COL_LETTER,
   formatSheetDate,
   lifecycleToSheetStatus,
+  resolveSheetStatusAndNote,
   type SheetsApi,
   type SheetRow,
 } from '../../src/reporting/sheets.js';
@@ -315,6 +316,133 @@ describe('GoogleSheetSender.ensureReady (proactive header so an empty sheet is s
 describe('lifecycleToSheetStatus', () => {
   it('maps rejected → Rejected', () => {
     expect(lifecycleToSheetStatus('rejected')).toBe('Rejected');
+  });
+});
+
+describe('resolveSheetStatusAndNote', () => {
+  // TZ-explicit lastSeenAtMs: 2026-06-30T18:23:00+07:00 → Bangkok "30/06/2026 18:23"
+  // Must pass under TZ=UTC because we use an offset-bearing ISO string, not local midnight.
+  const lastSeenAtMs = new Date('2026-06-30T18:23:00+07:00').getTime();
+  const rejectNote = 'group blocked: x';
+
+  it('rejected + missing → Rejected with (left Active DD/MM/YYYY HH:mm) suffix', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'missing', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x (left Active 30/06/2026 18:23)' });
+  });
+
+  it('rejected + closed → Rejected with (left Active …) suffix', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'closed', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x (left Active 30/06/2026 18:23)' });
+  });
+
+  it('rejected + removed → Rejected with (left Active …) suffix', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'removed', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x (left Active 30/06/2026 18:23)' });
+  });
+
+  it('rejected + present (new — still in Active) → Rejected with NO suffix', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'new', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
+  });
+
+  it('accepted overrides rejectReason → Accepted with opts.note', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'accepted', acceptStatus: 'accepted', rejectReason: rejectNote },
+        { note: 'snatched', lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Accepted', note: 'snatched' });
+  });
+
+  it('B#2/B#6: accept_failed with a non-null rejectReason renders Accept failed, NOT Rejected', () => {
+    // The accept-machine terminal must win: a real accept failure carrying a stale gate reason must
+    // surface as 'Accept failed' (its true status), never be masked as a gate 'Rejected'.
+    expect(
+      resolveSheetStatusAndNote(
+        {
+          lifecycleStatus: 'accept_failed',
+          acceptStatus: 'failed',
+          rejectReason: 'group blocked: x',
+        },
+        { note: 'unconfirmed', lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Accept failed', note: 'unconfirmed' });
+  });
+
+  it('no rejectReason + closed → Closed with opts.note (regression: unchanged behaviour)', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'closed', acceptStatus: 'none', rejectReason: null },
+        { note: 'done fine', lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Closed', note: 'done fine' });
+  });
+
+  it('rejected + missing + non-finite lastSeenAtMs (NaN) → Rejected, bare reason, no suffix, no throw', () => {
+    // A guard against `new Date(NaN).toISOString()` throwing a RangeError when the last-seen
+    // timestamp is missing/invalid. The "(left Active …)" suffix needs a finite ms; without
+    // one we still emit Rejected + the bare reason rather than crashing the row build.
+    expect(() =>
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'missing', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, lastSeenAtMs: NaN },
+      ),
+    ).not.toThrow();
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'missing', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, lastSeenAtMs: NaN },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
+  });
+
+  it('Finding #10: rejectReason "" (empty string) falls through to the lifecycle status, NOT a bare Rejected', () => {
+    // An empty-string reason carries no diagnostic value — it must NOT enter the Rejected branch
+    // (which would render Status 'Rejected' with an empty/meaningless note). The guard is truthy, so
+    // '' falls through to the real lifecycle status.
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'missing', acceptStatus: 'none', rejectReason: '' },
+        { note: 'gone', lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Missing', note: 'gone' });
+  });
+
+  it('rejected + accepting (mid-accept) → still Rejected (sticky until accepted, not just none)', () => {
+    // Lock the condition `acceptStatus !== 'accepted'` (not `=== 'none'`): a job whose accept
+    // is mid-flight must stay Rejected so a future refactor of the condition cannot silently
+    // flip an accepting-but-gate-blocked job back to its lifecycle status.
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'new', acceptStatus: 'accepting', rejectReason: rejectNote },
+        { note: null, lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
+  });
+
+  it('rejected + failed accept → still Rejected (condition is !== accepted, not === none)', () => {
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'new', acceptStatus: 'failed', rejectReason: rejectNote },
+        { note: null, lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
   });
 });
 

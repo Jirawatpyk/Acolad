@@ -106,6 +106,59 @@ export function parseItemsTotal(footer: string | null): number | null {
 }
 
 /**
+ * Header-layout assertion (finding #8). The grid cell selectors are POSITIONAL
+ * (`td:nth-child(N)`); since projectName (col 2) is part of the job KEY, a column
+ * inserted/moved would silently shift every positional read and corrupt IDENTITY
+ * (re-accept everything / misclassify everything), not just display. Before scraping a
+ * grid's rows, verify the identity-bearing headers (centralized in `selectors.ts`
+ * `expectedHeaders`) sit at their expected columns by header TEXT (trim, case-insensitive
+ * `contains`). Any mismatch → fail loud (LayoutChangedError + evidence) so the existing
+ * error→system-alert path pages on-call, rather than a silent wrong-key scrape (CLAUDE.md:
+ * "selector/marker หาย, locale เปลี่ยน → เก็บ evidence + system alert — ห้ามเดา parse").
+ *
+ * Asserts ONLY when header cells are actually rendered: an absent OR partial <thead> is left to
+ * the caller's existing empty-vs-loading classifier (a still-loading grid can render its shell —
+ * or only the first few headers — before the rest), so we never page on a transient. A column
+ * that DID render but carries the WRONG label is the unambiguous drift signal this guards: a
+ * MISSING <th> (index past the rendered cells) is treated as not-yet-rendered and skipped, so a
+ * short header never trips a false LayoutChangedError.
+ */
+async function assertHeaderLayout(
+  scope: GridScope,
+  gridContainer: string,
+  expected: ReadonlyArray<readonly [number, string]>,
+  gridLabel: string,
+  captureEvidence?: (reason: string) => Promise<string | undefined>,
+): Promise<void> {
+  const headerTexts = await scope
+    .locator(`${gridContainer} thead tr`)
+    .first()
+    .locator('th')
+    .allTextContents();
+  if (headerTexts.length === 0) return; // no header rendered yet — not this guard's failure mode
+  const norm = (s: string): string => s.trim().toLowerCase();
+  const mismatches: string[] = [];
+  for (const [col, label] of expected) {
+    const cell = headerTexts[col - 1];
+    // A column the header has not rendered yet (index past the present <th>s) reads `undefined` —
+    // treat it as a transient partial render and skip, NOT as a wrong label (which would page on a
+    // mid-load snapshot). Only a PRESENT <th> with the wrong text is the structural-drift signal.
+    if (cell === undefined) continue;
+    if (!norm(cell).includes(label.toLowerCase())) {
+      mismatches.push(`col ${col}: expected "${label}", got "${cell.trim()}"`);
+    }
+  }
+  if (mismatches.length > 0) {
+    const evidencePath = await captureEvidence?.('layout_changed');
+    throw new LayoutChangedError(
+      `${gridLabel} grid header layout drifted — positional selectors would read the wrong ` +
+        `cells and corrupt job identity: ${mismatches.join('; ')}`,
+      evidencePath,
+    );
+  }
+}
+
+/**
  * Read the Active (IN_PROGRESS) task grid from the inbox frame (contracts/
  * xtm-portal-adapter.md). Fails loud (LayoutChangedError) when the structural
  * container / state marker is missing — the line between "genuinely empty" and
@@ -137,6 +190,16 @@ export async function readActiveSnapshot(
       evidencePath,
     );
   }
+
+  // #8: verify the positional columns are where we expect BEFORE trusting any td:nth-child
+  // read (project at col 2 is part of the job key — a shift corrupts identity). Fails loud.
+  await assertHeaderLayout(
+    scope,
+    XTM.active.gridContainer,
+    XTM.active.expectedHeaders,
+    'Active',
+    captureEvidence,
+  );
 
   await scope
     .locator(`${XTM.active.gridContainer} tbody tr`)
@@ -322,6 +385,15 @@ export async function readClosedKeys(
     .first()
     .waitFor({ state: 'attached', timeout: 10_000 })
     .catch(() => undefined);
+  // #8: same positional-shift guard as the Active scrape — the Closed grid borrows Active's
+  // td:nth-child positions, so a header drift would silently read the wrong key columns.
+  await assertHeaderLayout(
+    scope,
+    XTM.closed.gridContainer,
+    XTM.closed.expectedHeaders,
+    'Closed',
+    observers.captureEvidence,
+  );
   const scraped = await scope.locator(`${XTM.closed.gridContainer} tbody tr`).evaluateAll(
     (rows, sel) => {
       const cell = (el: Queryable, q: string): string | null => {
@@ -331,6 +403,7 @@ export async function readClosedKeys(
       return (rows as unknown as Queryable[])
         .filter((r) => r.querySelector(sel.kebab) !== null)
         .map((el) => ({
+          project: cell(el, sel.project),
           file: cell(el, sel.file),
           step: cell(el, sel.step),
           role: cell(el, sel.role),
@@ -338,6 +411,7 @@ export async function readClosedKeys(
     },
     {
       kebab: XTM.closed.rowKebab,
+      project: XTM.closed.cell.project,
       file: XTM.closed.cell.file,
       // Closed-specific step/role (centralized in selectors.ts). Same strings as Active TODAY,
       // but keyed off XTM.closed.* so a future Closed-only layout fix lives in one place.
@@ -348,20 +422,36 @@ export async function readClosedKeys(
   const keys = new Set<string>();
   let candidateCount = 0;
   let allStepRoleNull = true;
+  let allProjectNull = true;
   for (const r of scraped) {
     // A Closed row with no file cell is malformed — never key on an empty file
     // (a degenerate '' key could falsely match another empty-file row).
     if (!r.file || r.file.trim() === '') continue;
     candidateCount++;
-    if (r.step !== null || r.role !== null) allStepRoleNull = false;
-    keys.add(computeXtmJobKey({ fileName: r.file, step: r.step, role: r.role }));
+    // #2a (truthy fix): cell() returns '' (not null) for a whitespace-only cell, so the old
+    // `!== null` check let an all-WHITESPACE column slip past the drift guard. A TRUTHY check
+    // counts ''/whitespace as "drifted" — empty step/role OR empty project both trip the WARN.
+    if (r.step || r.role) allStepRoleNull = false;
+    if (r.project) allProjectNull = false;
+    keys.add(
+      computeXtmJobKey({
+        projectName: r.project ?? '',
+        fileName: r.file,
+        step: r.step,
+        role: r.role,
+      }),
+    );
   }
-  // Systematic selector drift (e.g. live Closed grid omits File WWC col 3 → step/role shift left):
-  // candidate rows exist but EVERY one reads null step AND null role. Fail loud-but-soft —
-  // evidence + WARN, never throw — so a misclassified Closed→Removed is DIAGNOSABLE without
-  // paging on a cosmetic mismatch. The real fix needs a live Closed-grid recon (the column set is
-  // unconfirmed — see selectors.ts `closed.cell` VERIFY note).
-  if (candidateCount > 0 && allStepRoleNull) {
+  // Systematic selector drift — two signatures to watch for:
+  //   (a) step AND role both null on every candidate row: the Closed grid may have dropped
+  //       File WWC (col 3), shifting step/role left by one so the borrowed Active selectors
+  //       land off the row (e.g. td:9/td:11 fall past the last cell).
+  //   (b) project null on every candidate row: the project column (td:2) may have moved or
+  //       been omitted, so every key is computed with an empty project string and will never
+  //       match the Active _job_key (which carries the real project name).
+  // Both cases cause recomputed Closed keys to diverge from Active keys → finished jobs
+  // would misclassify as "removed". Fail loud-but-soft: evidence + WARN, never throw.
+  if (candidateCount > 0 && (allStepRoleNull || allProjectNull)) {
     const evidencePath = await observers.captureEvidence?.('closed_layout_drift');
     observers.logger?.warn(
       {
@@ -369,12 +459,26 @@ export async function readClosedKeys(
         action: 'readClosedKeys',
         outcome: 'layout_drift',
         rows: candidateCount,
+        allStepRoleNull,
+        allProjectNull,
         evidencePath,
       },
-      'Closed rows present but step AND role read null across ALL rows — the Closed grid layout ' +
-        'may have drifted (e.g. File WWC column omitted), so recomputed keys will not match ' +
-        'Active. VERIFY closed.cell selectors against live Closed-grid HTML.',
+      'Closed rows present but key columns read null across ALL rows — the Closed grid layout ' +
+        'may have drifted (step/role all null: File WWC column likely omitted; project all null: ' +
+        'project column moved or missing). Recomputed keys will not match Active. ' +
+        'VERIFY closed.cell selectors against live Closed-grid HTML.',
     );
   }
+
+  // NOTE (reverted #2b cross-keying): a prior fix wave added a "Closed has rows but ZERO recomputed
+  // keys match any disappeared-accepted key → throw LayoutChangedError" escalation here. It was
+  // removed: zero cross-key match CANNOT distinguish a wrong-but-non-null column drift from a
+  // legitimately Removed job (an accepted job that was cancelled is ABSENT from the Closed tab,
+  // which still holds OTHER finished rows — candidateCount > 0, matched = 0). That made a routine
+  // cancellation page on-call AND abort the cycle before upsertMany/accept, so the job stayed
+  // 'accepted' and re-entered the disappeared set every cycle → a persistent auto-accept outage
+  // and sustained paging. As the doc above states, a throw here strands the Closed-vs-Removed
+  // decision and pages on a cosmetic mismatch — a worse failure mode than the bug. The #8 header
+  // guard (a real structural column shift) and the #2a all-null WARN remain the drift signals.
   return keys;
 }

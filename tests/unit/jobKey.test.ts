@@ -74,7 +74,7 @@ const xjob = (over: Partial<XtmRawJob> = {}): XtmRawJob => ({
   ...over,
 });
 
-describe('computeXtmJobKey (R3 — fileId|step|role composite)', () => {
+describe('computeXtmJobKey (R3 — projectName|fileName|step|role composite)', () => {
   it('is deterministic for the same file/step/role', () => {
     expect(computeXtmJobKey(xjob())).toBe(computeXtmJobKey(xjob()));
   });
@@ -106,6 +106,27 @@ describe('computeXtmJobKey (R3 — fileId|step|role composite)', () => {
   it('treats a null step/role as a stable empty component', () => {
     expect(computeXtmJobKey(xjob({ step: null, role: null }))).toBe(
       computeXtmJobKey(xjob({ step: null, role: null })),
+    );
+  });
+});
+
+describe('computeXtmJobKey — project disambiguation', () => {
+  const base = { fileName: 'X_Proof.html', step: 'Post-Editing (PE) 1', role: 'Corrector' };
+  it('includes the normalized project name', () => {
+    expect(computeXtmJobKey({ projectName: '  PR 4721900 EMAIL ', ...base })).toBe(
+      'pr 4721900 email|x_proof.html|post-editing (pe) 1|corrector',
+    );
+  });
+  it('two projects sharing file|step|role get DIFFERENT keys (collision fixed)', () => {
+    const a = computeXtmJobKey({ projectName: 'PR 4721900-1-3 EMAIL', ...base });
+    const b = computeXtmJobKey({ projectName: 'PR 4721900-1-3 EMAIL_1', ...base });
+    expect(a).not.toBe(b);
+    // negative: file|step|role are byte-identical between a and b, so the OLD 3-field key
+    // WOULD have collided — only the project segment makes the new keys differ.
+  });
+  it('same project + same file|step|role is the SAME key (relisting dedup intact)', () => {
+    expect(computeXtmJobKey({ projectName: 'PR EMAIL', ...base })).toBe(
+      computeXtmJobKey({ projectName: 'PR EMAIL', ...base }),
     );
   });
 });

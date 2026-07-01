@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import assert from 'node:assert';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +10,7 @@ import { Outbox } from '../../src/state/outbox.js';
 import { MetaStore } from '../../src/state/meta.js';
 import { computeXtmJobKey } from '../../src/detection/jobKey.js';
 import { bangkokDateString } from '../../src/schedule/bangkokCalendar.js';
+import { LayoutChangedError } from '../../src/portal/errors.js';
 import type { AppConfig } from '../../src/config/index.js';
 import type { XtmRawJob, XtmJobSnapshot, XtmJobState } from '../../src/detection/types.js';
 import type { AcceptTarget, AcceptResult } from '../../src/portal/errors.js';
@@ -106,6 +108,7 @@ const accepted = (over: {
   lifecycleStatus: 'accepted',
   acceptStatus: 'accepted',
   acceptedAt: NOW,
+  rejectReason: null,
   status: 'visible',
   firstSeenAt: NOW,
   lastSeenAt: NOW,
@@ -418,6 +421,51 @@ describe('XtmPollCycle Closed/Removed (FR-014, T042)', () => {
     fresh();
     await acceptThenDisappear(new Set<string>());
     expect(only().lifecycleStatus).toBe('removed');
+  });
+
+  it('reverted #2b: a disappeared accepted job ABSENT from a NON-empty Closed grid is Removed — no throw, no activeKeys forwarded, cycle still accepts a co-present job', async () => {
+    fresh();
+    // The routine "cancelled → Removed" case (V10b): the Closed tab still holds OTHER
+    // previously-finished rows (≥1 candidate) but NOT this job's key. Zero cross-key match is
+    // NORMAL here, NOT drift — so the reader must be called with NO activeKeys (the #2b cross-key
+    // escalation was reverted) and the cycle must classify 'removed' without throwing/aborting.
+    let argCount = -1;
+    const reader = {
+      async readClosedKeys(...args: unknown[]): Promise<Set<string>> {
+        argCount = args.length;
+        return new Set(['OtherProject|other.docx|PE 1|Corrector']); // ≥1 unrelated finished row
+      },
+    };
+    const acc = new StubAcceptor();
+    const cycle = new XtmPollCycle(db, cfg(), acc, reader);
+    await cycle.run(snap([xraw()], 'c1')); // accept job A
+    await cycle.run(snap([], 'c2')); // A absent once (flicker)
+    // A absent twice → Closed check (≥1 unrelated row) → Removed; a fresh job B in the SAME cycle
+    // must STILL be accepted, proving the cycle reached upsertMany + the accept block (no abort).
+    const jobB = xraw({ xtmTaskId: 'ID-2', fileName: 'b.docx' });
+    const summary = await cycle.run(snap([jobB], 'c3'));
+    expect(summary.removed).toBe(1);
+    expect(argCount).toBe(0); // reverted: the cross-key activeKeys arg is no longer forwarded
+    expect(only('a.docx').lifecycleStatus).toBe('removed'); // upsertMany ran
+    expect(only('b.docx').lifecycleStatus).toBe('accepted'); // accept block ran — no abort
+  });
+
+  it('a LayoutChangedError from the Closed read (e.g. a #8 header drift) still propagates LOUD — never swallowed into a silent Removed', async () => {
+    fresh();
+    // The cross-key escalation is gone, but the Closed read can STILL throw on a real structural
+    // drift (the #8 header guard). Such a throw must propagate out of run() to the loop's
+    // handleError (layout_changed alert + heartbeat.fail), NOT be swallowed into 'removed'.
+    const reader = {
+      async readClosedKeys(): Promise<Set<string>> {
+        throw new LayoutChangedError('Closed grid header layout drifted');
+      },
+    };
+    const cycle = new XtmPollCycle(db, cfg(), new StubAcceptor(), reader);
+    await cycle.run(snap([xraw()], 'c1')); // accept
+    await cycle.run(snap([], 'c2')); // absent once (flicker)
+    await expect(cycle.run(snap([], 'c3'))).rejects.toBeInstanceOf(LayoutChangedError);
+    // The throw aborted before persisting any reclassification → the job is NOT silently Removed.
+    expect(only().lifecycleStatus).toBe('accepted');
   });
 });
 
@@ -1145,6 +1193,207 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(chatText()).toContain('Rejected —'); // the reject reason is still surfaced
   });
 
+  it('sticky Rejected: a gate-rejected job stays Rejected with a "(left Active …)" suffix after it disappears — never Missing (Task 7)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    const tight = { dueDate: dueMon12, words: 5000 }; // infeasible → schedule-rejected
+    // c1: present + rejected → Sheet 'Rejected', reason in note, NOT yet "left Active".
+    await cycle.run(snapAt([xraw(tight)], MON_10, 'c1'));
+    const c1Row = sheetRows().at(-1)!;
+    expect(c1Row.status).toBe('Rejected');
+    expect(c1Row.note).toContain('cannot finish in time');
+    expect(c1Row.note).not.toContain('left Active');
+    // c2 flicker (1 absent poll), c3 missing (2 absent polls → 'missing' transition).
+    await cycle.run(snapAt([], MON_10, 'c2'));
+    await cycle.run(snapAt([], MON_10, 'c3'));
+    expect(only().lifecycleStatus).toBe('missing'); // internal lifecycle flips to missing…
+    const lastRow = sheetRows().at(-1)!;
+    expect(lastRow.status).toBe('Rejected'); // …but the Sheet status stays sticky Rejected
+    expect(lastRow.note).toContain('cannot finish in time'); // the binding reason is preserved
+    expect(lastRow.note).toContain('left Active'); // a "left Active …" suffix is appended
+  });
+
+  it('clear/upgrade: a previously-rejected job that becomes accepted → Sheet Accepted + DB reject_reason cleared (Task 7)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const acc = new StubAcceptor();
+    const cycle = new XtmPollCycle(db, schedCfg(), acc);
+    // c1: too-tight → schedule-rejected, reject reason persisted.
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c1'));
+    expect(only().lifecycleStatus).toBe('rejected');
+    expect(only().rejectReason).not.toBeNull();
+    // c2: SAME job, now feasible (deadline extended + small) → accepted via the robustness pass.
+    await cycle.run(snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10, 'c2'));
+    expect(acc.calls.flat()).toHaveLength(1); // clicked
+    expect(only().lifecycleStatus).toBe('accepted');
+    expect(only().rejectReason).toBeNull(); // DB reject_reason cleared on the upgrade
+    expect(sheetRows().at(-1)?.status).toBe('Accepted'); // not stale 'Rejected'
+  });
+
+  it('clear on skip: a previously-rejected job that returns over ACCEPT_MAX_WORDS → Sheet Skipped, not stale Rejected (Task 7)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const acc = new StubAcceptor();
+    const cycle = new XtmPollCycle(db, schedCfg({ ACCEPT_MAX_WORDS: 4000 }), acc);
+    // c1: 3000w ≤ the 4000 per-job cap (so decideAccept→accept) but too tight for noon → rejected.
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 3000 })], MON_10, 'c1'));
+    expect(only().lifecycleStatus).toBe('rejected');
+    expect(only().rejectReason).not.toBeNull();
+    // disappear (flicker → missing), then return relisted with words OVER the per-job cap → skip.
+    await cycle.run(snapAt([], MON_10, 'c2')); // flicker
+    await cycle.run(snapAt([], MON_10, 'c3')); // missing
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c4')); // 5000 > 4000 → skip
+    expect(acc.calls.flat()).toHaveLength(0); // never accepted
+    expect(only().lifecycleStatus).toBe('skipped');
+    expect(only().rejectReason).toBeNull(); // reason cleared on the event pass before the skip
+    expect(sheetRows().at(-1)?.status).toBe('Skipped'); // NOT a stale sticky 'Rejected'
+  });
+
+  it('idempotent: a still-absent rejected job does NOT re-enqueue a Sheet row after the missing transition (Task 7)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    const tight = { dueDate: dueMon12, words: 5000 };
+    await cycle.run(snapAt([xraw(tight)], MON_10, 'c1')); // rejected
+    await cycle.run(snapAt([], MON_10, 'c2')); // flicker (no row)
+    await cycle.run(snapAt([], MON_10, 'c3')); // missing transition → one sticky-Rejected row
+    const countAfterMissing = sheetRows().length;
+    await cycle.run(snapAt([], MON_10, 'c4')); // still absent → must NOT re-enqueue
+    expect(sheetRows().length).toBe(countAfterMissing);
+  });
+
+  // --- Finding #1/#7: robustness-pass symmetry (the sticky-Rejected break) ----
+  it('Finding #1: a still-present rejected job with ACCEPT_ENABLED=0 flips to new (not stale rejected) → Sheet Missing on disappear', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const tight = { dueDate: dueMon12, words: 5000 }; // infeasible → schedule-rejected
+    // c1: ACCEPT on, too tight → rejected (reason persisted).
+    await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
+      snapAt([xraw(tight)], MON_10, 'c1'),
+    );
+    expect(only().lifecycleStatus).toBe('rejected');
+    expect(only().rejectReason).not.toBeNull();
+    // c2: SAME job still present, ACCEPT now OFF → the robustness pass decides 'disabled' →
+    // lifecycle 'new'. Before the symmetric helper the robustness pass ignored 'disabled', leaving
+    // a STALE 'rejected' lifecycle with its reason cleared — a bare 'Rejected' (note=null).
+    const offCycle = new XtmPollCycle(db, schedCfg({ ACCEPT_ENABLED: false }), new StubAcceptor());
+    await offCycle.run(snapAt([xraw(tight)], MON_10, 'c2'));
+    expect(only().lifecycleStatus).toBe('new'); // NOT stale 'rejected'
+    expect(only().rejectReason).toBeNull(); // reason cleared AND the lifecycle followed
+    // c3 flicker, c4 missing → the Sheet shows Missing, never a bare 'Rejected'.
+    await offCycle.run(snapAt([], MON_10, 'c3'));
+    await offCycle.run(snapAt([], MON_10, 'c4'));
+    expect(only().lifecycleStatus).toBe('missing');
+    expect(sheetRows().at(-1)?.status).toBe('Missing');
+  });
+
+  it('Finding #1: a still-present rejected job whose words jump over ACCEPT_MAX_WORDS flips to skipped with the skip reason (not stale rejected)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    // cap 4000 per-job. c1: 3000w ≤ cap (decideAccept→accept) but too tight for noon → rejected.
+    const cycle = new XtmPollCycle(db, schedCfg({ ACCEPT_MAX_WORDS: 4000 }), new StubAcceptor());
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 3000 })], MON_10, 'c1'));
+    expect(only().lifecycleStatus).toBe('rejected');
+    expect(only().rejectReason).not.toBeNull();
+    // c2: SAME job still present, words now 5000 > the 4000 cap → the robustness pass decides 'skip'.
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c2'));
+    expect(only().lifecycleStatus).toBe('skipped'); // NOT stale 'rejected'
+    expect(only().rejectReason).toBeNull();
+    const last = sheetRows().at(-1)!;
+    expect(last.status).toBe('Skipped');
+    expect(last.note).toContain('exceeds max words'); // the skip reason surfaced, not a stale reject note
+  });
+
+  it('Finding #1 regression: a still-present rejected job the gate re-blocks STAYS sticky Rejected (common case unbroken)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const tight = { dueDate: dueMon12, words: 5000 };
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    await cycle.run(snapAt([xraw(tight)], MON_10, 'c1'));
+    expect(only().lifecycleStatus).toBe('rejected');
+    // c2: SAME job still present, still infeasible → robustness pass → gate re-blocks → rejected.
+    await cycle.run(snapAt([xraw(tight)], MON_10, 'c2'));
+    expect(only().lifecycleStatus).toBe('rejected'); // re-blocked, stays rejected
+    expect(only().rejectReason).not.toBeNull(); // reason re-set by the gate (not left cleared)
+    // disappears → sticky 'Rejected' with a "(left Active …)" suffix (not flipped to Missing).
+    await cycle.run(snapAt([], MON_10, 'c3'));
+    await cycle.run(snapAt([], MON_10, 'c4'));
+    expect(only().lifecycleStatus).toBe('missing'); // internal lifecycle flips…
+    const last = sheetRows().at(-1)!;
+    expect(last.status).toBe('Rejected'); // …but the Sheet stays sticky Rejected
+    expect(last.note).toContain('cannot finish in time');
+  });
+
+  it('Finding #9: the "(left Active …)" suffix renders lastSeenAt (last present cycle), not the missing-detection capturedAt', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    const tight = { dueDate: dueMon12, words: 5000 }; // infeasible → schedule-rejected
+    const PRESENT_AT = '2026-06-22T10:00:00+07:00'; // last cycle the job is actually present
+    const MISSING_AT = '2026-06-22T11:00:00+07:00'; // ~1h later — when the missing transition fires
+    // c1: present + rejected → lastSeenAt pinned to 10:00.
+    await cycle.run(snapAt([xraw(tight)], PRESENT_AT, 'c1'));
+    // c2 flicker, c3 missing — both detected at 11:00 (AFTER the last present cycle). The job left
+    // Active ~MISSING_THRESHOLD × interval before 11:00, so the real "left Active" time is 10:00.
+    await cycle.run(snapAt([], MISSING_AT, 'c2'));
+    await cycle.run(snapAt([], MISSING_AT, 'c3'));
+    expect(only().lifecycleStatus).toBe('missing');
+    const note = sheetRows().at(-1)?.note ?? '';
+    expect(note).toContain('left Active 22/06/2026 10:00'); // lastSeenAt — the real last-present time
+    expect(note).not.toContain('11:00'); // NOT the later missing-detection capturedAt
+  });
+
+  it('#15: a still-rejected job whose reject REASON changes (no field change) re-enqueues the Sheet row; an unchanged reason does not', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    // 1500w (> the 1000 cap) but FEASIBLE by Wed from Monday (multi-day) → capacity reason A.
+    // Fields are FIXED across all cycles (dueWed18, 1500) so there is NO detailsChange/field-sync —
+    // the ONLY path that can refresh the Sheet is the blockNotes re-announce.
+    const job = { dueDate: dueWed18, words: 1500 };
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    const aRows = (): Array<{ status: string; note: string | null }> =>
+      sheetRows().filter((r) => r.file === 'a.docx');
+    // cN (Mon 10:00): feasible but its own size > cap → reason A ("exceed the daily cap").
+    await cycle.run(snapAt([xraw(job)], MON_10, 'cN'));
+    expect(only('a.docx').lifecycleStatus).toBe('rejected');
+    expect(aRows().at(-1)?.note).toContain('exceed the daily cap'); // reason A
+    const afterN = aRows().length;
+    // cN1 (Wed 10:00): SAME fields, later now → too little time left → reason B ("cannot finish").
+    await cycle.run(snapAt([xraw(job)], '2026-06-24T10:00:00+07:00', 'cN1'));
+    expect(only('a.docx').lifecycleStatus).toBe('rejected'); // still rejected…
+    expect(aRows().length).toBeGreaterThan(afterN); // …a NEW row was enqueued on the reason change
+    expect(aRows().at(-1)?.note).toContain('cannot finish in time'); // reason B now on the Sheet
+    const afterN1 = aRows().length;
+    // cN2 (same now + fields): reason UNCHANGED (still B) → NO new row (dedup intact, no spam).
+    await cycle.run(snapAt([xraw(job)], '2026-06-24T10:00:00+07:00', 'cN2'));
+    expect(aRows().length).toBe(afterN1);
+  });
+
+  it('B#7 regression: accepting a previously-rejected Malay job clears the PERSISTED reject_reason to null (Sheet Accepted)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const acc = new StubAcceptor();
+    const cycle = new XtmPollCycle(db, schedCfg(), acc);
+    const jobKey = computeXtmJobKey(xraw());
+    const persistedReason = (): string | null =>
+      (
+        db.prepare('SELECT reject_reason AS r FROM jobs WHERE job_key = ?').get(jobKey) as {
+          r: string | null;
+        }
+      ).r;
+    // c1: too-tight → schedule-rejected, reject_reason persisted non-null.
+    await cycle.run(snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c1'));
+    expect(persistedReason()).not.toBeNull(); // precondition: a real reason was stored
+    // c2: SAME job, now feasible (deadline extended + small) → accepted via the robustness pass.
+    await cycle.run(snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10, 'c2'));
+    expect(acc.calls.flat()).toHaveLength(1);
+    expect(only().lifecycleStatus).toBe('accepted');
+    // Locks the clear-before-accept: a refactor dropping `s.rejectReason = null` would fail here.
+    expect(persistedReason()).toBeNull();
+    expect(sheetRows().at(-1)?.status).toBe('Accepted'); // not stale 'Rejected'
+  });
+
   it('F1: a still-rejected job whose dueDate changes keeps its reject reason on the field-sync note (I3 — never wiped to null)', async () => {
     fresh();
     new MetaStore(db).markBaselineDone();
@@ -1167,8 +1416,11 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
       .get(`sheet:fieldsync:${jobKey}|c2`) as { payload_json: string } | undefined;
     expect(syncRow, 'sheet:fieldsync row for c2 must exist').toBeDefined();
     const row = (
-      JSON.parse(syncRow!.payload_json) as { row: { dueDate: string | null; note: string | null } }
+      JSON.parse(syncRow!.payload_json) as {
+        row: { status: string; dueDate: string | null; note: string | null };
+      }
     ).row;
+    expect(row.status).toBe('Rejected'); // the persisted-reason path keeps the Sheet status sticky
     expect(row.dueDate).toBe(due2); // carries the updated dueDate
     expect(row.note).not.toBeNull(); // reject reason preserved (not wiped)...
     expect(row.note).toContain('group blocked'); // ...specifically the binding reject reason
@@ -1473,4 +1725,114 @@ describe('XtmPollCycle field-change re-sync / Bug B (sheet:fieldsync)', () => {
     );
     expect(c2ChatForJob).toHaveLength(0);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Task 8: live-regression lock — incident 4721900 (EMAIL vs EMAIL_1)
+// Two XTM projects share the identical file name '4721900-1-6 (ID-91e1bdd17f80)_Proof.html'.
+// On the OLD 3-field key (fileName|step|role, no projectName) both collapsed to the same
+// DB entry: EMAIL_1 was treated as EMAIL "still visible", producing zero new Sheet rows and
+// a relisted (🔁) card instead of a new-job (🆕) card.
+// After Task 1 added projectName to the key this test must pass GREEN; it would FAIL on the
+// old 3-field key at the first `toHaveLength(2)` assertion.
+// ---------------------------------------------------------------------------
+describe('XtmPollCycle regression: EMAIL vs EMAIL_1 project collision (incident 4721900, Task 8)', () => {
+  const EMAIL_PROJECT = 'PR Newswire Release 4721900-1-3 (Basecamp Research) Affiliate EMAIL';
+  const EMAIL1_PROJECT = 'PR Newswire Release 4721900-1-3 (Basecamp Research) Affiliate EMAIL_1';
+  const FILE_NAME = '4721900-1-6 (ID-91e1bdd17f80)_Proof.html';
+
+  // TZ-explicit deadlines (+07:00) — CI runs in TZ=UTC, these remain unambiguous.
+  const EMAIL_DUE = '2026-06-30T22:51:00+07:00'; // Tue — EMAIL's deadline
+  const EMAIL1_DUE = '2026-07-01T14:21:00+07:00'; // Wed — EMAIL_1's deadline (distinct day)
+
+  // Cycle timestamps from the live incident (TZ-explicit for TZ=UTC safety in CI).
+  const CYCLE_A_AT = '2026-06-29T19:51:00+07:00'; // Mon evening — cycle that saw EMAIL
+  const CYCLE_B_AT = '2026-06-30T18:21:00+07:00'; // Tue evening — cycle that saw EMAIL_1
+
+  // Accept timestamps deliberately differ so acceptedAt assertions are non-vacuous.
+  const ACCEPT_A = '2026-06-29T12:51:00.000Z'; // UTC — EMAIL accepted in cycle A
+  const ACCEPT_B = '2026-06-30T11:21:00.000Z'; // UTC — EMAIL_1 accepted in cycle B
+
+  const emailJob = (): XtmRawJob =>
+    xraw({ projectName: EMAIL_PROJECT, fileName: FILE_NAME, dueDate: EMAIL_DUE, words: 100 });
+  const email1Job = (): XtmRawJob =>
+    xraw({ projectName: EMAIL1_PROJECT, fileName: FILE_NAME, dueDate: EMAIL1_DUE, words: 100 });
+
+  it(
+    'same file name, different project → distinct keys, two Sheet rows, ' +
+      'EMAIL_1 is 🆕 not 🔁, acceptedAt distinct, each has its own deadline',
+    async () => {
+      fresh();
+      new MetaStore(db).markBaselineDone();
+
+      // Acceptor records distinct at-timestamps per cycle so acceptedAt assertions are testable.
+      let nextAcceptAt = ACCEPT_A;
+      const acc = {
+        async acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]> {
+          const at = nextAcceptAt;
+          return targets.map((t): AcceptResult => ({ jobKey: t.jobKey, outcome: 'accepted', at }));
+        },
+      };
+
+      const cycle = new XtmPollCycle(db, cfg(), acc);
+
+      // Cycle A: EMAIL project appears → accepted.
+      await cycle.run(snapAt([emailJob()], CYCLE_A_AT, 'cA'));
+      nextAcceptAt = ACCEPT_B; // advance before cycle B
+
+      // Cycle B: SAME file name, DIFFERENT project → must be a wholly distinct new job.
+      await cycle.run(snapAt([email1Job()], CYCLE_B_AT, 'cB'));
+
+      const emailKey = computeXtmJobKey(emailJob());
+      const email1Key = computeXtmJobKey(email1Job());
+
+      // ── T8 core: keys MUST differ (on the old key they were identical) ──
+      expect(emailKey, 'job keys must differ when only projectName changes').not.toBe(email1Key);
+
+      // ── Two wholly separate DB records ──
+      const allStates = [...new XtmJobStore(db).loadAll().values()];
+      expect(allStates).toHaveLength(2); // old key → 1 (EMAIL_1 merged into EMAIL)
+
+      const emailState = allStates.find((s) => s.jobKey === emailKey);
+      const email1State = allStates.find((s) => s.jobKey === email1Key);
+      expect(emailState, 'EMAIL job must be in DB').toBeDefined();
+      expect(email1State, 'EMAIL_1 job must be in DB').toBeDefined();
+      // Narrow for the property accesses below — a regression now yields a readable
+      // toBeDefined() failure above instead of a TypeError on a non-null-asserted undefined.
+      assert(emailState);
+      assert(email1State);
+
+      // ── Both accepted independently ──
+      expect(emailState.lifecycleStatus).toBe('accepted');
+      expect(email1State.lifecycleStatus).toBe('accepted');
+
+      // ── acceptedAt is per-job: cycle A vs cycle B ──
+      expect(emailState.acceptedAt).toBe(ACCEPT_A);
+      expect(email1State.acceptedAt).toBe(ACCEPT_B);
+      expect(email1State.acceptedAt).not.toBe(emailState.acceptedAt);
+
+      // ── EMAIL_1 is a new job, not a relisted EMAIL ──
+      // Accepted Malay jobs produce a ✅ card. On the OLD key EMAIL_1 was seen as EMAIL "still
+      // visible, already accepted" → zero new chat events in cycle B. With the new key both
+      // cycle A (EMAIL) and cycle B (EMAIL_1) each emit their own ✅ card.
+      const allChat = outboxPayloads('chat');
+      const acceptedCards = allChat.filter((c) => c.cardsV2?.[0]?.card.header.title.includes('✅'));
+      // old key → 1 card (EMAIL_1 merged into EMAIL → cycle B emits nothing new)
+      expect(acceptedCards, 'each accepted job must produce its own ✅ card').toHaveLength(2);
+      // No 🔁 card: EMAIL_1 is never a "relisted" appearance of EMAIL (separate job entirely).
+      const hasRelisted = allChat.some((c) => c.cardsV2?.[0]?.card.header.title.includes('🔁'));
+      expect(hasRelisted, '🔁 card must NOT be emitted (EMAIL_1 is not a relisted EMAIL)').toBe(
+        false,
+      );
+
+      // ── Two Sheet rows (one per distinct job) ──
+      // old key → only 1 row because EMAIL_1 was seen as EMAIL "still visible" → no new outbox entry
+      const sheets = outboxPayloads('sheets');
+      expect(sheets).toHaveLength(2);
+
+      // ── Each job carries its own deadline (deadline isolation, not sharing EMAIL's) ──
+      expect(emailState.dueDate).toBe(EMAIL_DUE); // Tue 2026-06-30T22:51:00+07:00
+      expect(email1State.dueDate).toBe(EMAIL1_DUE); // Wed 2026-07-01T14:21:00+07:00
+    },
+  );
 });

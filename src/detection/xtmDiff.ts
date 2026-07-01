@@ -70,6 +70,7 @@ function buildXtmState(key: string, raw: XtmRawJob, at: string, hash: string): X
     lifecycleStatus: 'new',
     acceptStatus: 'none',
     acceptedAt: null,
+    rejectReason: null,
     // Appearance bookkeeping (owned by diff).
     status: 'visible',
     firstSeenAt: at,

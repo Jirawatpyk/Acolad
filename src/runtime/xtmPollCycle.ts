@@ -17,7 +17,7 @@ import {
 } from '../schedule/thaiHolidays.js';
 import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { deadlineMsOf, makeEffectiveDayOf } from '../schedule/deadlineDay.js';
-import { lifecycleToSheetStatus, type SheetRow } from '../reporting/sheets.js';
+import { resolveSheetStatusAndNote, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
   renderXtmRelisted,
@@ -37,7 +37,12 @@ export interface XtmAcceptor {
 
 /**
  * Reads the job keys currently in the Closed tab (FR-014). Queried ONLY when an
- * accepted job disappears from Active (cost-bounded) to tell Closed from Removed.
+ * accepted job disappears from Active (cost-bounded) to tell Closed from Removed. A job
+ * whose key is present → Closed; absent → Removed (cancelled/reassigned). The reader can
+ * still throw `LayoutChangedError` on a real structural drift (the #8 header guard), which
+ * propagates to the loop's handleError — but a zero cross-key match is NOT drift (a routine
+ * cancellation is absent from a Closed tab that still holds other finished rows), so it is
+ * never escalated here.
  */
 export interface ClosedReader {
   readClosedKeys(): Promise<Set<string>>;
@@ -164,7 +169,10 @@ export class XtmPollCycle {
         );
         this.outbox.enqueue(
           `sheet:stranded:${s.jobKey}:${snapshot.pollCycleId}`,
-          JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, 'crash mid-accept') }),
+          JSON.stringify({
+            op: 'upsert',
+            row: this.toSheetRow(s, 'crash mid-accept'),
+          }),
           snapshot.capturedAt,
           'sheets',
         );
@@ -277,45 +285,19 @@ export class XtmPollCycle {
         continue;
       }
 
-      // first_seen / relisted / cold_start (FR-005 accepts still-acceptable pre-existing).
-      const decision = decideAccept({
-        targetLang: s.targetLang,
-        words: s.words,
-        acceptEnabled: this.cfg.ACCEPT_ENABLED,
-        acceptLanguages: this.cfg.ACCEPT_LANGUAGES,
-        maxWords: this.cfg.ACCEPT_MAX_WORDS,
+      // Clear-then-decide-then-apply (Finding #1/#7): applyPresentDecision wipes the stale persisted
+      // reject reason FIRST (the gate re-sets it below if still blocked) and applies the decideAccept
+      // verdict — the SINGLE place both passes decide, so they can never drift. Placement is
+      // load-bearing: it MUST sit AFTER the missing-branch `continue` so a rejected job that just LEFT
+      // Active keeps its reason and the Sheet stays sticky 'Rejected' (resolveSheetStatusAndNote
+      // appends "(left Active …)") instead of flipping to a bare 'Missing'.
+      acceptedThisCycle = this.applyPresentDecision(
+        s,
+        wouldAccept,
+        blockNotes,
+        summary,
         acceptedThisCycle,
-        maxPerCycle: this.cfg.ACCEPT_MAX_PER_CYCLE,
-      });
-      if (decision.action === 'skip') {
-        s.lifecycleStatus = 'skipped';
-        blockNotes.set(ev.jobKey, decision.reason); // surface WHY (non-Malay / cap) on the Sheet
-        summary.skipped++;
-      } else if (decision.action === 'disabled') {
-        s.lifecycleStatus = 'new'; // eligible, but auto-accept is off (FR-012)
-        summary.eligibleDisabled++;
-        // Capture the live accept-menu DOM for this eligible job (hover only, in the
-        // loop) so acceptAvailable can be computed before auto-accept is ever enabled.
-        if (this.cfg.ACCEPT_RECON) {
-          summary.reconEligible.push({
-            jobKey: s.jobKey,
-            targetLang: s.targetLang ?? '',
-            fileName: s.fileName,
-            step: s.step,
-            role: s.role,
-          });
-        }
-      } else {
-        wouldAccept.push(s); // schedule gate (below) decides accept vs reject per group
-        // F6: counts would-accept candidates PRE-gate. The per-cycle cap mechanism relies
-        // on incrementing here so the next decideAccept in THIS pass sees the running count
-        // (moving it past the gate would defeat the cap, since the robustness pass below
-        // reads the count before the gate runs). ACCEPT_MAX_PER_CYCLE MUST stay 0 (the
-        // per-deadline-day capacity cap — decideGroupCapacity in this cycle — owns the
-        // words/day limit); a cap > 0 is forbidden by the runbook for the bulk-claim hazard,
-        // so this pre-gate count never gates a real accept in prod.
-        acceptedThisCycle++;
-      }
+      );
     }
 
     // Robustness: also attempt eligible jobs PRESENT in Active that produced NO fresh
@@ -330,19 +312,18 @@ export class XtmPollCycle {
     for (const s of result.nextStates.values()) {
       if (eventKeys.has(s.jobKey) || !presentKeys.has(s.jobKey)) continue;
       if (!s.eligible || s.acceptStatus !== 'none') continue;
-      const decision = decideAccept({
-        targetLang: s.targetLang,
-        words: s.words,
-        acceptEnabled: this.cfg.ACCEPT_ENABLED,
-        acceptLanguages: this.cfg.ACCEPT_LANGUAGES,
-        maxWords: this.cfg.ACCEPT_MAX_WORDS,
+      // Same single decision path as the event pass (Finding #1/#7) — clears the stale reject reason
+      // then applies the verdict (skip/disabled/accept) SYMMETRICALLY. Before this the robustness pass
+      // handled ONLY 'accept', so a still-present gate-rejected job that flipped to skip (words over
+      // the cap) or disabled (ACCEPT off) was left a STALE 'rejected' lifecycle with its reason
+      // cleared — a bare, undiagnosable 'Rejected' on the Sheet.
+      acceptedThisCycle = this.applyPresentDecision(
+        s,
+        wouldAccept,
+        blockNotes,
+        summary,
         acceptedThisCycle,
-        maxPerCycle: this.cfg.ACCEPT_MAX_PER_CYCLE,
-      });
-      if (decision.action === 'accept') {
-        wouldAccept.push(s); // same gate as the event pass (C4 — no silent robustness reject)
-        acceptedThisCycle++; // pre-gate count (see F6 note above); ACCEPT_MAX_PER_CYCLE must stay 0
-      }
+      );
     }
 
     // Schedule gate (C1 bulk-group all-or-nothing). Applied ONLY where decideAccept()→accept;
@@ -427,6 +408,10 @@ export class XtmPollCycle {
           const note = `group blocked: ${blockReason}`;
           for (const s of members) {
             s.lifecycleStatus = 'rejected';
+            // Sticky-Rejected SET (Task 7): persist the SAME binding reason so the Sheet keeps
+            // 'Rejected' across this job's disappearance (resolveSheetStatusAndNote reads it),
+            // even on cycles where blockNotes is empty (e.g. the missing transition).
+            s.rejectReason = note;
             blockNotes.set(s.jobKey, note);
             summary.scheduleBlocked++;
             // I1: surface the binding reason per member so the loop can log WHY (the reason
@@ -484,6 +469,14 @@ export class XtmPollCycle {
     // the rate budget (FR-027). bootstrap always wires a closedReader in production;
     // the guarded path keeps the job 'accepted' as-is only when one is absent (tests).
     if (disappearedAccepted.length > 0 && this.closedReader) {
+      // Closed-vs-Removed: a disappeared accepted job whose key is in the Closed tab is Closed;
+      // absent → Removed (cancelled/reassigned). A non-empty Closed grid with ZERO matching keys is
+      // the NORMAL Removed case (the tab still holds OTHER finished rows), NOT drift — so we do NOT
+      // cross-key/escalate (the reverted #2b: that throw paged on routine cancellations AND aborted
+      // the cycle before upsertMany/accept, stranding the job 'accepted' forever — see xtmInbox.ts).
+      // The reader can STILL throw LayoutChangedError on a real structural drift (#8 header guard);
+      // that is INTENTIONALLY not caught here — it propagates out of run() to the loop's handleError
+      // (layout_changed alert + heartbeat.fail), the same path an Active-scrape drift takes.
       const closedKeys = await this.closedReader.readClosedKeys();
       for (const s of disappearedAccepted) {
         if (closedKeys.has(s.jobKey)) {
@@ -506,6 +499,7 @@ export class XtmPollCycle {
         targets.push({
           jobKey: s.jobKey,
           targetLang: s.targetLang ?? '',
+          projectName: s.projectName,
           fileName: s.fileName,
           step: s.step,
           role: s.role,
@@ -633,17 +627,39 @@ export class XtmPollCycle {
     };
     for (const ev of result.events) reportJob(ev.jobKey, ev);
     for (const jobKey of acceptResults.keys()) reportJob(jobKey, undefined);
-    // I3/C4: announce schedule rejections that produced NO appearance event and NO accept
-    // outcome (a robustness-pass block) — otherwise they would be silently dropped. Only a
-    // transition INTO 'rejected' is announced: a job already 'rejected' last cycle and still
-    // blocked must NOT re-enqueue (the event_id carries pollCycleId, so re-reporting would
-    // duplicate every cycle). A reason change within 'rejected' is intentionally not
-    // re-announced (mirrors the accept_failed dedup philosophy). reportJob dedups by jobKey,
-    // so a job already reported via its event/outcome above is skipped here. blockNotes also
-    // holds skip reasons (F15), but every skipped job already fired via its appearance event
+    // Jobs the field-change re-sync (below) will already refresh on the Sheet — a material Due/Words
+    // change reaches resolveSheetStatusAndNote with the PERSISTED reject reason (a silent Sheet-only
+    // correction). The #15 reason-change re-report must defer to that path for these (it would only
+    // dedup it, and turn a silent correction into a Chat announce). A reason change with NO material
+    // field change has no other path, so #15 owns it.
+    const materialFieldSync = new Set(
+      result.detailsChanges
+        .filter((dc) => hasMaterialSheetChange(dc.changes))
+        .map((dc) => dc.jobKey),
+    );
+    // I3/C4: announce schedule rejections / skips that produced NO appearance event and NO accept
+    // outcome (a robustness-pass block) — otherwise they would be silently dropped. reportJob dedups
+    // by jobKey, so a job already reported via its event/outcome above is skipped here. blockNotes
+    // also holds skip reasons (F15), but every skipped job already fired via its appearance event
     // above, so reportJob's jobKey dedup makes those entries no-ops here.
     for (const jobKey of blockNotes.keys()) {
-      if (prev.get(jobKey)?.lifecycleStatus === 'rejected') continue;
+      // Re-announce on a status CHANGE, OR on a reject-REASON change while still 'rejected' (#15: the
+      // Sheet Note shows the binding reason, so a job that stays rejected but for a DIFFERENT reason —
+      // e.g. "cannot finish in time" → "daily cap reached" — must refresh the Note; the persisted
+      // reason is what the Sheet renders). A truly UNCHANGED still-rejected / still-skipped job must
+      // NOT re-enqueue every cycle — the event_id carries pollCycleId, so re-reporting would duplicate
+      // (no every-cycle spam). The old `prev === 'rejected'` guard swallowed BOTH a now-'skipped'
+      // transition (Finding #1) and a reason change (#15), leaving the Sheet on a stale row. A reason
+      // change driven by a MATERIAL field change is left to the field-sync path below (no double-report).
+      const prevState = prev.get(jobKey);
+      const cur = result.nextStates.get(jobKey);
+      const statusUnchanged = prevState?.lifecycleStatus === cur?.lifecycleStatus;
+      const stillRejectedReasonChanged =
+        prevState?.lifecycleStatus === 'rejected' &&
+        cur?.lifecycleStatus === 'rejected' &&
+        prevState.rejectReason !== cur.rejectReason &&
+        !materialFieldSync.has(jobKey);
+      if (statusUnchanged && !stillRejectedReasonChanged) continue;
       reportJob(jobKey, undefined);
     }
     // Field-change re-sync (Bug B): a still-visible job whose Due date/Words XTM set AFTER
@@ -655,15 +671,15 @@ export class XtmPollCycle {
       const s = result.nextStates.get(dc.jobKey);
       if (!s) continue;
       reported.add(dc.jobKey);
-      // I3: a still-'rejected' job's silent field re-sync must NOT wipe the reject note.
-      // The gate already re-ran this cycle (robustness pass) — if the new Due/Words made it
-      // feasible it is now 'accepted' and was reported above (skipped here); otherwise it is
-      // still 'rejected' and we preserve the binding reason instead of overwriting with null.
-      const syncNote =
-        s.lifecycleStatus === 'rejected' ? (blockNotes.get(dc.jobKey) ?? null) : null;
+      // I3 (Task 7): a still-'rejected' job's silent field re-sync must NOT wipe the reject note.
+      // resolveSheetStatusAndNote now owns this precedence via the PERSISTED `rejectReason`: a
+      // still-'rejected' job renders Status 'Rejected' + its binding reason; any other status
+      // carries no note. So pass `note: null` and let the helper fill the reason from rejectReason
+      // (the gate already re-ran this cycle via the robustness pass — a now-feasible job is
+      // 'accepted' and was reported above, skipped here).
       this.outbox.enqueue(
         `sheet:fieldsync:${dc.jobKey}|${snapshot.pollCycleId}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, syncNote) }),
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, null) }),
         snapshot.capturedAt,
         'sheets',
       );
@@ -687,11 +703,88 @@ export class XtmPollCycle {
     return summary;
   }
 
+  /**
+   * Clear-then-decide-then-apply for ONE present, re-decidable job — the single place BOTH the event
+   * pass and the robustness pass run `decideAccept`, so the two can never drift (Finding #1/#7). It
+   *   1. wipes any stale persisted reject reason FIRST (the schedule gate re-sets it below if the job
+   *      is still blocked — keeping the Sheet's sticky 'Rejected' correct), then
+   *   2. applies the verdict SYMMETRICALLY:
+   *        - 'skip'     → lifecycle 'skipped' + the skip reason in `blockNotes` (surfaced on the Sheet)
+   *        - 'disabled' → lifecycle 'new' (eligible, auto-accept off, FR-012) + the ACCEPT_RECON capture
+   *        - 'accept'   → push to `wouldAccept` for the schedule gate; bump the PRE-gate cap count (F6)
+   *
+   * Returns the running pre-gate accept count (the per-cycle-cap input the next call reads). Before
+   * this extraction the robustness pass handled ONLY 'accept', so a still-present gate-rejected job
+   * that flipped to skip/disabled kept a STALE lifecycle 'rejected' with its reason cleared, rendering
+   * a bare 'Rejected' (note=null) on the Sheet. The caller MUST invoke this only for a PRESENT job,
+   * AFTER the missing-branch `continue`, so a rejected job that just LEFT Active keeps its reason.
+   */
+  private applyPresentDecision(
+    s: XtmJobState,
+    wouldAccept: XtmJobState[],
+    blockNotes: Map<string, string>,
+    summary: XtmCycleSummary,
+    acceptedThisCycle: number,
+  ): number {
+    s.rejectReason = null;
+    const decision = decideAccept({
+      targetLang: s.targetLang,
+      words: s.words,
+      acceptEnabled: this.cfg.ACCEPT_ENABLED,
+      acceptLanguages: this.cfg.ACCEPT_LANGUAGES,
+      maxWords: this.cfg.ACCEPT_MAX_WORDS,
+      acceptedThisCycle,
+      maxPerCycle: this.cfg.ACCEPT_MAX_PER_CYCLE,
+    });
+    if (decision.action === 'skip') {
+      s.lifecycleStatus = 'skipped';
+      blockNotes.set(s.jobKey, decision.reason); // surface WHY (non-Malay / cap) on the Sheet
+      summary.skipped++;
+      return acceptedThisCycle;
+    }
+    if (decision.action === 'disabled') {
+      s.lifecycleStatus = 'new'; // eligible, but auto-accept is off (FR-012)
+      summary.eligibleDisabled++;
+      // Capture the live accept-menu DOM for this eligible job (hover only, in the loop) so
+      // acceptAvailable can be computed before auto-accept is ever enabled.
+      if (this.cfg.ACCEPT_RECON) {
+        summary.reconEligible.push({
+          jobKey: s.jobKey,
+          targetLang: s.targetLang ?? '',
+          projectName: s.projectName,
+          fileName: s.fileName,
+          step: s.step,
+          role: s.role,
+        });
+      }
+      return acceptedThisCycle;
+    }
+    // accept → the schedule gate (below) decides accept vs reject per bulk group. F6: this PRE-gate
+    // count MUST bump here so the next decideAccept in the event pass sees the running total (the
+    // per-cycle cap); ACCEPT_MAX_PER_CYCLE must stay 0 in prod (the per-deadline-day capacity owns the
+    // words/day limit — a cap > 0 is the bulk-claim hazard, see acceptDecision.ts).
+    wouldAccept.push(s);
+    return acceptedThisCycle + 1;
+  }
+
+  /**
+   * Build the Sheet row for a job, routing Status + Note through `resolveSheetStatusAndNote`
+   * (Task 7) so the sticky-Rejected precedence is applied in ONE place: a gate-Rejected job
+   * (persisted `rejectReason`, not yet accepted) keeps Status 'Rejected' — gaining a
+   * "(left Active …)" suffix once it leaves Active — instead of flipping to Missing/Closed. The
+   * passed `note` is used only when the job is NOT sticky-Rejected. The "left Active" timestamp is
+   * the job's own `lastSeenAt` (Finding #9) — the last cycle it was present, NOT the cycle's
+   * missing-detection time — so no per-job parse of the snapshot capturedAt is needed (#14).
+   */
   private toSheetRow(s: XtmJobState, note: string | null): SheetRow {
+    const { status, note: resolvedNote } = resolveSheetStatusAndNote(s, {
+      note,
+      lastSeenAtMs: Date.parse(s.lastSeenAt),
+    });
     return {
       jobKey: s.jobKey,
       receivedDate: s.firstSeenAt,
-      status: lifecycleToSheetStatus(s.lifecycleStatus),
+      status,
       projectName: s.projectName,
       fileName: s.fileName,
       sourceLang: s.sourceLang,
@@ -702,7 +795,7 @@ export class XtmPollCycle {
       step: s.step,
       role: s.role,
       acceptedAt: s.acceptedAt,
-      note,
+      note: resolvedNote,
     };
   }
 

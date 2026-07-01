@@ -13,7 +13,10 @@ import { computeXtmJobKey } from '../dist/detection/jobKey.js';
 
 loadDotenv();
 
+// projectName is now part of the key (collision fix 2026-06-30). Pass the project
+// name exactly as it appears in the XTM Project column for this job.
 const KEY = computeXtmJobKey({
+  projectName: process.env.VERIFY_PROJECT ?? '',
   fileName: '4716302-1-19 (ID-b2cf8d0d04bd)_captions.json',
   step: 'Post-Editing (PE) 1',
   role: 'Corrector',
