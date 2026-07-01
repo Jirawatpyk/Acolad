@@ -89,11 +89,14 @@ export class JobStore {
       failed: { accept: 'failed', lifecycle: 'accept_failed' },
     };
     const m = map[outcome];
-    const sql =
-      outcome === 'accepted'
-        ? 'UPDATE jobs SET accept_status=?, accepted_at=?, lifecycle_status=?, reject_reason=NULL WHERE job_key=?'
-        : 'UPDATE jobs SET accept_status=?, accepted_at=?, lifecycle_status=? WHERE job_key=?';
-    this.db.prepare(sql).run(m.accept, outcome === 'accepted' ? at : null, m.lifecycle, jobKey);
+    // Only a successful accept clears a stale gate reject_reason (defense-in-depth behind the
+    // orchestration clear, finding #11) and carries a real accepted_at; missing/failed keep the
+    // reason and write a null timestamp. One `isAccepted` drives both the SQL and the timestamp.
+    const isAccepted = outcome === 'accepted';
+    const sql = isAccepted
+      ? 'UPDATE jobs SET accept_status=?, accepted_at=?, lifecycle_status=?, reject_reason=NULL WHERE job_key=?'
+      : 'UPDATE jobs SET accept_status=?, accepted_at=?, lifecycle_status=? WHERE job_key=?';
+    this.db.prepare(sql).run(m.accept, isAccepted ? at : null, m.lifecycle, jobKey);
   }
 
   getAcceptStatus(jobKey: string): AcceptStatus | undefined {

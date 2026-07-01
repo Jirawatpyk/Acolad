@@ -160,7 +160,7 @@ describe('readActiveSnapshot (XTM Active grid)', () => {
     // a silent shift would corrupt identity (re-accept everything / misclassify everything).
     // The header assertion must catch the drift BEFORE scraping and fail loud.
     await page.setContent(
-      xtmActivePage([malayRow()], { total: 1, headerLabels: xtmHeaderInsertedBeforeProject() }),
+      xtmActivePage([malayRow()], { total: 1, headerLabels: xtmHeaderInsertedBeforeProject }),
     );
     await expect(
       readActiveSnapshot(page, 'cycle-1', '2026-06-19T10:00:00+07:00', noEvidence, FAST),
@@ -170,7 +170,7 @@ describe('readActiveSnapshot (XTM Active grid)', () => {
   it('#8: captures evidence on a header-layout drift so the error path pages on-call', async () => {
     const captureEvidence = vi.fn(async () => 'state/evidence/layout_changed-2026');
     await page.setContent(
-      xtmActivePage([malayRow()], { total: 1, headerLabels: xtmHeaderInsertedBeforeProject() }),
+      xtmActivePage([malayRow()], { total: 1, headerLabels: xtmHeaderInsertedBeforeProject }),
     );
     await expect(
       readActiveSnapshot(page, 'cycle-1', '2026-06-19T10:00:00+07:00', captureEvidence, FAST),
@@ -183,7 +183,7 @@ describe('readActiveSnapshot (XTM Active grid)', () => {
     // checked columns (File/Step/Role) have no <th> yet. A missing th must be skipped, NOT read as
     // undefined → false LayoutChangedError. The body row is complete, so the scrape proceeds.
     const snap = await snapshotOf(
-      xtmActivePage([malayRow()], { headerLabels: xtmHeaderPartial() }),
+      xtmActivePage([malayRow()], { headerLabels: xtmHeaderPartial }),
     );
     expect(snap.jobs).toHaveLength(1);
   });
@@ -349,7 +349,7 @@ describe('readClosedKeys (Closed-vs-Removed disambiguation)', () => {
   it('#8: fails loud (LayoutChangedError) when the Closed grid header drifts (Project not at col 2)', async () => {
     const captureEvidence = vi.fn(async () => 'state/evidence/layout_changed-closed');
     await page.setContent(
-      xtmActivePage([malayRow()], { headerLabels: xtmHeaderInsertedBeforeProject() }),
+      xtmActivePage([malayRow()], { headerLabels: xtmHeaderInsertedBeforeProject }),
     );
     await expect(readClosedKeys(page, { captureEvidence })).rejects.toBeInstanceOf(
       LayoutChangedError,
@@ -375,7 +375,7 @@ describe('readClosedKeys (Closed-vs-Removed disambiguation)', () => {
   it('#8: does NOT throw on a present-but-INCOMPLETE Closed header (fewer th than expected — transient partial render)', async () => {
     // Only the first identity columns rendered (Project, File WWC); cols 5/9/11 have no <th> yet.
     // A missing th must be treated as not-yet-rendered (skip), not read as undefined → false drift.
-    await page.setContent(xtmActivePage([malayRow()], { headerLabels: xtmHeaderPartial() }));
+    await page.setContent(xtmActivePage([malayRow()], { headerLabels: xtmHeaderPartial }));
     const keys = await readClosedKeys(page);
     expect(keys.size).toBe(1); // scrape proceeds, no false LayoutChangedError
   });

@@ -22,6 +22,20 @@
  * job existed during recon). Those paths MUST fail loud + capture evidence on
  * the first real job rather than guess (Constitution VI, FR-011/FR-022).
  */
+
+// Identity-bearing header columns [col, expected label], SHARED by the Active and Closed grids —
+// recon-confirmed 2026-06-30 to sit at the same positions through Role. assertHeaderLayout checks
+// these before scraping so a column shift fails loud instead of silently corrupting the positional
+// key reads. One source so the two grids can never drift apart unnoticed; if they ever diverge,
+// split them here with a comment explaining why.
+const IDENTITY_COLUMN_HEADERS: ReadonlyArray<readonly [number, string]> = [
+  [2, 'Project'],
+  [3, 'File WWC'],
+  [5, 'File'],
+  [9, 'Step'],
+  [11, 'Role'],
+];
+
 export const XTM = {
   base: 'https://xtm.acolad.com/project-manager-gui',
 
@@ -112,14 +126,8 @@ export const XTM = {
     // (xtmInbox.ts) reads the grid's <thead> and verifies these identity-bearing headers sit
     // at their expected columns by TEXT (trim, case-insensitive contains). Any mismatch →
     // LayoutChangedError + evidence (fail loud, the existing error→system-alert path pages).
-    // Recon-confirmed order (2026-06-30). [col, expected label]:
-    expectedHeaders: [
-      [2, 'Project'],
-      [3, 'File WWC'],
-      [5, 'File'],
-      [9, 'Step'],
-      [11, 'Role'],
-    ],
+    // Recon-confirmed order (2026-06-30) — the identity-bearing columns, shared with Closed:
+    expectedHeaders: IDENTITY_COLUMN_HEADERS,
   },
 
   // ── Empty-state vs failed-render (shared) ─────────────────────────────────
@@ -154,17 +162,11 @@ export const XTM = {
       role: 'td:nth-child(11)', // VERIFIED col 11 on Closed (live recon 2026-06-30) — matches Active
       dueDate: '[data-testid="dueDate-fullDate"]',
     },
-    // Header-layout guard (finding #8), same mechanism as active.expectedHeaders. The Closed
-    // grid shares the Active column positions through Role (recon-confirmed 2026-06-30), so the
-    // identity-bearing headers must sit at the same columns; a drift fails loud before the
-    // borrowed positional selectors silently read the wrong cells. [col, expected label]:
-    expectedHeaders: [
-      [2, 'Project'],
-      [3, 'File WWC'],
-      [5, 'File'],
-      [9, 'Step'],
-      [11, 'Role'],
-    ],
+    // Header-layout guard (finding #8), same mechanism as active. The Closed grid shares the Active
+    // column positions through Role (recon-confirmed 2026-06-30), so it uses the SAME
+    // IDENTITY_COLUMN_HEADERS — a drift fails loud before the borrowed positional selectors silently
+    // read the wrong cells.
+    expectedHeaders: IDENTITY_COLUMN_HEADERS,
   },
 
   // ── Accept control + success signal — D4/D6 ───────────────────────────────

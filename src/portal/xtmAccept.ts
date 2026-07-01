@@ -1,19 +1,13 @@
 import type { Frame, Locator, Page } from 'playwright';
 import { XTM } from './selectors.js';
-import { AcceptUnconfirmedError, type AcceptTarget, type AcceptResult } from './errors.js';
+import {
+  AcceptUnconfirmedError,
+  type AcceptTarget,
+  type AcceptResult,
+  type GridDriftObservers,
+} from './errors.js';
 import type { XtmRawJob } from '../detection/types.js';
 import { computeXtmJobKey } from '../detection/jobKey.js';
-import type { Logger } from '../monitoring/logger.js';
-
-/**
- * Optional observers for {@link readAcceptAvailability} (finding #13). Both optional so the
- * production caller (xtmClient.reReadActive) compiles unchanged; the empty-project drift signal
- * is no-op until a logger/evidence sink is wired in (mirrors {@link ReadClosedKeysObservers}).
- */
-export interface ReadAcceptAvailabilityObservers {
-  logger?: Pick<Logger, 'warn'>;
-  captureEvidence?: (reason: string) => Promise<string | undefined>;
-}
 
 type Scope = Frame | Page;
 
@@ -211,7 +205,7 @@ export async function readAcceptAvailability(
   scope: Scope,
   page: Page,
   jobKeys: Set<string>,
-  observers: ReadAcceptAvailabilityObservers = {},
+  observers: GridDriftObservers = {},
 ): Promise<Map<string, boolean>> {
   const result = new Map<string, boolean>();
   if (jobKeys.size === 0) return result;
@@ -354,10 +348,15 @@ function exact(s: string): RegExp {
 }
 
 /**
- * Stable locator for a target's data row by its File+Step+Role cell text (the jobKey
+ * Stable locator for a target's data row by its Project+File+Step+Role cell text (the jobKey
  * basis), so a mid-pass auto-refresh that reindexes rows cannot point us at the wrong row.
  * Uses EXACT (anchored) text matching — not substring — so a cell value that is a
  * prefix/substring of another row's cell cannot accidentally match (C1 fix).
+ *
+ * projectName/fileName are the key-bearing identity cells and are always non-empty (rawXtmJobSchema
+ * enforces `z.string().trim().min(1)`), so `exact()` is always anchored to real text. A degenerate
+ * empty projectName would anchor to `/^$/` (empty cells only) — but that is a data-drift signal, not
+ * something to silently skip here; the readAcceptAvailability empty-project detector (#13) surfaces it.
  */
 function rowForTarget(scope: Scope, t: AcceptTarget): Locator {
   let row = scope

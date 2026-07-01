@@ -690,6 +690,46 @@ describe('acceptEligibleTasks — rowForTarget includes project cell in row filt
     expect(out[0]?.jobKey).toBe(target(email1Target).jobKey);
     expect(out[0]?.outcome).toBe('accepted');
   });
+
+  it('C1c (symmetric): selects the EMAIL row (not EMAIL_1) when EMAIL is the target', async () => {
+    // Mirror of the above with the projects swapped: EMAIL_1 owned FIRST, EMAIL claimable SECOND,
+    // target = EMAIL. This is the substring-prone direction ("EMAIL" ⊂ "EMAIL_1"): a suffix/substring
+    // project filter would still match the EMAIL_1 row, so only the EXACT project predicate resolves
+    // EMAIL to its own row. Locks the disambiguation in both directions.
+    await page.setContent(
+      xtmActivePage(
+        [
+          xtmMenuRow('emailA', 'finish', { project: 'EMAIL_1', file: FILE, step: STEP, role: ROLE }),
+          xtmMenuRow('emailB', 'accept', { project: 'EMAIL', file: FILE, step: STEP, role: ROLE }),
+        ],
+        { total: 2 },
+      ),
+    );
+
+    const emailTarget = xraw({ projectName: 'EMAIL', fileName: FILE, step: STEP, role: ROLE });
+    const reReadActive = vi.fn(
+      async (): Promise<XtmRawJob[]> => [xraw({ ...emailTarget, acceptAvailable: false })],
+    );
+    const captured: string[] = [];
+    const deps: AcceptDeps = {
+      reReadActive,
+      captureEvidence: async (reason) => {
+        captured.push(reason);
+        return undefined;
+      },
+      nowIso: () => AT,
+      rowAttachTimeoutMs: 2_000,
+    };
+
+    const out = await acceptEligibleTasks(page, [target(emailTarget)], deps);
+
+    // The bulk WAS clicked on the EMAIL row (not EMAIL_1) → post_accept_click fires.
+    expect(captured).toContain('post_accept_click');
+    expect(reReadActive).toHaveBeenCalledTimes(1);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.jobKey).toBe(target(emailTarget).jobKey);
+    expect(out[0]?.outcome).toBe('accepted');
+  });
 });
 
 // ── C1b: readAcceptAvailability scopes the probe to the open menu, not the page ──
@@ -824,6 +864,10 @@ describe('readAcceptAvailability — empty project on the re-read must not silen
 
     // No mismatched key produced — the target is NOT resolved by the empty-project row.
     expect(result.has(targetKey)).toBe(false);
+    // …and nothing spurious was added either: the row is skipped BEFORE any key is computed, so a
+    // future refactor that emitted a `|file|step|role` key (missing target, but growing the map)
+    // is caught here, not only by the has(targetKey) miss above.
+    expect(result.size).toBe(0);
     // It is SURFACED, not silent: structured WARN + evidence fired (a drift/transient signal).
     expect(captureEvidence).toHaveBeenCalledWith('accept_reread_empty_project');
     expect(warn).toHaveBeenCalledTimes(1);

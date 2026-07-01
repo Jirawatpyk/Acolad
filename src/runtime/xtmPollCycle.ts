@@ -112,6 +112,13 @@ export interface XtmCycleSummary {
    * Empty on every non-accepting / disabled / early path.
    */
   acceptedDueDays: AcceptedDueDay[];
+  /**
+   * Job keys whose `lastSeenAt` did not parse to a finite ms when building the Sheet row — so the
+   * sticky-Rejected "(left Active …)" suffix was silently omitted. In production `lastSeenAt` is
+   * always a valid ISO string (clock.nowIso), so this is empty; a non-empty array means a malformed
+   * timestamp reached the DB (a bug/ops write) and the loop logs it. Cycle stays logger-free.
+   */
+  malformedLastSeen: string[];
 }
 
 /**
@@ -202,6 +209,7 @@ export class XtmPollCycle {
       holidayCalendarStale: false,
       scheduleRejects: [],
       acceptedDueDays: [],
+      malformedLastSeen: [],
     };
     const detectedMs = Date.parse(snapshot.capturedAt);
     const currentYear = bangkokYear(detectedMs);
@@ -266,6 +274,10 @@ export class XtmPollCycle {
     // reject reason (I3). One map (F15) read by both the Sheet-note and Chat sites.
     const blockNotes = new Map<string, string>();
     let acceptedThisCycle = 0;
+    // Keys of jobs actually PRESENT in this snapshot — the precondition applyPresentDecision
+    // asserts (it clears the reject reason, so it must run only for present jobs) and the filter
+    // the robustness pass uses below. Computed once here, shared by both passes.
+    const presentKeys = new Set(snapshot.jobs.map((j) => computeXtmJobKey(j)));
 
     for (const ev of result.events) {
       const s = result.nextStates.get(ev.jobKey);
@@ -293,6 +305,7 @@ export class XtmPollCycle {
       // appends "(left Active …)") instead of flipping to a bare 'Missing'.
       acceptedThisCycle = this.applyPresentDecision(
         s,
+        presentKeys,
         wouldAccept,
         blockNotes,
         summary,
@@ -308,7 +321,6 @@ export class XtmPollCycle {
     // failed / accepting job is never re-attempted), gated by the same cap and the atomic
     // claim below, and the job leaves Active once grabbed.
     const eventKeys = new Set(result.events.map((e) => e.jobKey));
-    const presentKeys = new Set(snapshot.jobs.map((j) => computeXtmJobKey(j)));
     for (const s of result.nextStates.values()) {
       if (eventKeys.has(s.jobKey) || !presentKeys.has(s.jobKey)) continue;
       if (!s.eligible || s.acceptStatus !== 'none') continue;
@@ -319,6 +331,7 @@ export class XtmPollCycle {
       // cleared — a bare, undiagnosable 'Rejected' on the Sheet.
       acceptedThisCycle = this.applyPresentDecision(
         s,
+        presentKeys,
         wouldAccept,
         blockNotes,
         summary,
@@ -408,7 +421,7 @@ export class XtmPollCycle {
           const note = `group blocked: ${blockReason}`;
           for (const s of members) {
             s.lifecycleStatus = 'rejected';
-            // Sticky-Rejected SET (Task 7): persist the SAME binding reason so the Sheet keeps
+            // Sticky-Rejected SET: persist the SAME binding reason so the Sheet keeps
             // 'Rejected' across this job's disappearance (resolveSheetStatusAndNote reads it),
             // even on cycles where blockNotes is empty (e.g. the missing transition).
             s.rejectReason = note;
@@ -597,7 +610,7 @@ export class XtmPollCycle {
       }
       this.outbox.enqueue(
         `sheet:${base}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, note) }),
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, note, summary) }),
         snapshot.capturedAt,
         'sheets',
       );
@@ -654,10 +667,14 @@ export class XtmPollCycle {
       const prevState = prev.get(jobKey);
       const cur = result.nextStates.get(jobKey);
       const statusUnchanged = prevState?.lifecycleStatus === cur?.lifecycleStatus;
+      // Only meaningful when statusUnchanged (else the `if` below already re-reports): a still-
+      // 'rejected' job whose reason changed. Guarding on statusUnchanged makes cur==='rejected'
+      // derivable from prev==='rejected', so that repeated check is dropped (cur?.rejectReason is
+      // safe: statusUnchanged + prev rejected implies cur is defined).
       const stillRejectedReasonChanged =
+        statusUnchanged &&
         prevState?.lifecycleStatus === 'rejected' &&
-        cur?.lifecycleStatus === 'rejected' &&
-        prevState.rejectReason !== cur.rejectReason &&
+        prevState.rejectReason !== cur?.rejectReason &&
         !materialFieldSync.has(jobKey);
       if (statusUnchanged && !stillRejectedReasonChanged) continue;
       reportJob(jobKey, undefined);
@@ -671,7 +688,7 @@ export class XtmPollCycle {
       const s = result.nextStates.get(dc.jobKey);
       if (!s) continue;
       reported.add(dc.jobKey);
-      // I3 (Task 7): a still-'rejected' job's silent field re-sync must NOT wipe the reject note.
+      // I3: a still-'rejected' job's silent field re-sync must NOT wipe the reject note.
       // resolveSheetStatusAndNote now owns this precedence via the PERSISTED `rejectReason`: a
       // still-'rejected' job renders Status 'Rejected' + its binding reason; any other status
       // carries no note. So pass `note: null` and let the helper fill the reason from rejectReason
@@ -679,7 +696,7 @@ export class XtmPollCycle {
       // 'accepted' and was reported above, skipped here).
       this.outbox.enqueue(
         `sheet:fieldsync:${dc.jobKey}|${snapshot.pollCycleId}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, null) }),
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, null, summary) }),
         snapshot.capturedAt,
         'sheets',
       );
@@ -721,11 +738,21 @@ export class XtmPollCycle {
    */
   private applyPresentDecision(
     s: XtmJobState,
+    presentKeys: ReadonlySet<string>,
     wouldAccept: XtmJobState[],
     blockNotes: Map<string, string>,
     summary: XtmCycleSummary,
     acceptedThisCycle: number,
   ): number {
+    // Precondition (fail-loud): invoked ONLY for a job present in the snapshot — the event pass
+    // reaches here after its missing-branch `continue`, the robustness pass behind its presentKeys
+    // filter. If it ever ran for an ABSENT job it would wipe a sticky reject reason and corrupt the
+    // Sheet row, so make that bug a loud throw rather than silent data loss.
+    if (!presentKeys.has(s.jobKey)) {
+      throw new Error(
+        `applyPresentDecision invoked for a job absent from the snapshot (jobKey=${s.jobKey}) — clear-then-decide must run only for present jobs`,
+      );
+    }
     s.rejectReason = null;
     const decision = decideAccept({
       targetLang: s.targetLang,
@@ -769,17 +796,22 @@ export class XtmPollCycle {
 
   /**
    * Build the Sheet row for a job, routing Status + Note through `resolveSheetStatusAndNote`
-   * (Task 7) so the sticky-Rejected precedence is applied in ONE place: a gate-Rejected job
+   * so the sticky-Rejected precedence is applied in ONE place: a gate-Rejected job
    * (persisted `rejectReason`, not yet accepted) keeps Status 'Rejected' — gaining a
    * "(left Active …)" suffix once it leaves Active — instead of flipping to Missing/Closed. The
    * passed `note` is used only when the job is NOT sticky-Rejected. The "left Active" timestamp is
    * the job's own `lastSeenAt` (Finding #9) — the last cycle it was present, NOT the cycle's
-   * missing-detection time — so no per-job parse of the snapshot capturedAt is needed (#14).
+   * missing-detection time — so no per-job parse of the snapshot capturedAt is needed.
    */
-  private toSheetRow(s: XtmJobState, note: string | null): SheetRow {
+  private toSheetRow(s: XtmJobState, note: string | null, summary?: XtmCycleSummary): SheetRow {
+    const lastSeenAtMs = Date.parse(s.lastSeenAt);
+    // Observability for the otherwise-silent NaN degradation: an unparseable lastSeenAt drops the
+    // sticky-Rejected "(left Active …)" suffix. Unreachable in production (clock.nowIso), so record
+    // it for the loop to log rather than crash the row build.
+    if (summary && !Number.isFinite(lastSeenAtMs)) summary.malformedLastSeen.push(s.jobKey);
     const { status, note: resolvedNote } = resolveSheetStatusAndNote(s, {
       note,
-      lastSeenAtMs: Date.parse(s.lastSeenAt),
+      lastSeenAtMs,
     });
     return {
       jobKey: s.jobKey,
