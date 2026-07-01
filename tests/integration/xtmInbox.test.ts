@@ -182,9 +182,7 @@ describe('readActiveSnapshot (XTM Active grid)', () => {
     // A transient partial render: only Project (col 2) + File WWC (col 3) headers exist; the later
     // checked columns (File/Step/Role) have no <th> yet. A missing th must be skipped, NOT read as
     // undefined → false LayoutChangedError. The body row is complete, so the scrape proceeds.
-    const snap = await snapshotOf(
-      xtmActivePage([malayRow()], { headerLabels: xtmHeaderPartial }),
-    );
+    const snap = await snapshotOf(xtmActivePage([malayRow()], { headerLabels: xtmHeaderPartial }));
     expect(snap.jobs).toHaveLength(1);
   });
 
