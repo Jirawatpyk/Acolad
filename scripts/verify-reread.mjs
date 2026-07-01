@@ -13,10 +13,18 @@ import { computeXtmJobKey } from '../dist/detection/jobKey.js';
 
 loadDotenv();
 
-// projectName is now part of the key (collision fix 2026-06-30). Pass the project
-// name exactly as it appears in the XTM Project column for this job.
+// projectName is now part of the key (collision fix 2026-06-30). Fail loud if it is missing:
+// `?? ''` would compute a wrong empty-project key that never matches the live DOM, and the script
+// would blame "row matching" for what is really a missing env var.
+if (!process.env.VERIFY_PROJECT) {
+  console.error(
+    'VERIFY_PROJECT is required — set it to the exact project name in the XTM Project column ' +
+      'for this job (projectName is part of the key since the 2026-06-30 collision fix).',
+  );
+  process.exit(1);
+}
 const KEY = computeXtmJobKey({
-  projectName: process.env.VERIFY_PROJECT ?? '',
+  projectName: process.env.VERIFY_PROJECT,
   fileName: '4716302-1-19 (ID-b2cf8d0d04bd)_captions.json',
   step: 'Post-Editing (PE) 1',
   role: 'Corrector',
@@ -71,7 +79,16 @@ try {
     await page.keyboard.press('Escape').catch(() => undefined);
   }
 
-  const avail = await readAcceptAvailability(frame, page, new Set([KEY]));
+  // Forward drift observers: if the target row has an empty project cell (the very drift the
+  // collision fix guards), surface the structured WARN + evidence signal here too — otherwise this
+  // diagnostic would silently omit the one signal that matters most when a row fails to match.
+  const avail = await readAcceptAvailability(frame, page, new Set([KEY]), {
+    logger: { warn: (obj, msg) => console.warn('[drift]', msg ?? '', obj) },
+    captureEvidence: async (reason) => {
+      console.warn('[evidence needed]', reason);
+      return undefined;
+    },
+  });
   const v = avail.get(KEY);
   console.log(`\nreadAcceptAvailability(captions accepted job) = ${v}`);
   console.log(
