@@ -199,3 +199,57 @@ describe('ACCEPT_SCHEDULE config', () => {
     ).not.toThrow();
   });
 });
+
+describe('ACCEPT_EFFORT_METRIC config', () => {
+  it('defaults ACCEPT_EFFORT_METRIC to wwc', () => {
+    expect(loadConfig(base).ACCEPT_EFFORT_METRIC).toBe('wwc');
+  });
+  it('rejects an invalid ACCEPT_EFFORT_METRIC at startup (fail-fast)', () => {
+    expect(() => loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'weighted' })).toThrow();
+  });
+  it('metric=wwc → active cap = ACCEPT_MAX_WWC_PER_DAY, throughput derived from it', () => {
+    const c = loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'wwc', ACCEPT_MAX_WWC_PER_DAY: '900' });
+    expect(c.activeMaxPerDay).toBe(900);
+    expect(c.throughputPerHour).toBeCloseTo(900 / 9, 5);
+    expect(c.unit).toEqual({ adj: 'WWC', noun: 'WWC' });
+  });
+  it('metric=words → active cap = ACCEPT_MAX_WORDS_PER_DAY (byte-for-byte), unit words', () => {
+    const c = loadConfig({
+      ...base,
+      ACCEPT_EFFORT_METRIC: 'words',
+      ACCEPT_MAX_WORDS_PER_DAY: '1000',
+    });
+    expect(c.activeMaxPerDay).toBe(1000);
+    expect(c.throughputPerHour).toBeCloseTo(1000 / 9, 5);
+    expect(c.unit).toEqual({ adj: 'word', noun: 'words' });
+  });
+  it('D7 override isolation: a WORDS override does not leak into wwc throughput', () => {
+    const c = loadConfig({
+      ...base,
+      ACCEPT_EFFORT_METRIC: 'wwc',
+      ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '50',
+      ACCEPT_MAX_WWC_PER_DAY: '900',
+    });
+    expect(c.throughputPerHour).toBeCloseTo(100, 5); // 900/9, NOT 50
+  });
+  it('explicit-0 WWC cap fails fast even with an override set', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        ACCEPT_EFFORT_METRIC: 'wwc',
+        ACCEPT_MAX_WWC_PER_DAY: '0',
+        ACCEPT_THROUGHPUT_WWC_PER_HOUR: '111',
+      }),
+    ).toThrow();
+  });
+  it('kill-switch escape: schedule disabled + wwc + cap 0 does NOT throw', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        ACCEPT_SCHEDULE_ENABLED: '0',
+        ACCEPT_EFFORT_METRIC: 'wwc',
+        ACCEPT_MAX_WWC_PER_DAY: '0',
+      }),
+    ).not.toThrow();
+  });
+});

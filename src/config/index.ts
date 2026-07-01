@@ -115,6 +115,12 @@ const schema = z
         }
       }, 'ACCEPT_WORKDAYS must be a valid day-of-week spec (e.g. 1-5 or 1,3,5)'),
     ACCEPT_MAX_WORDS_PER_DAY: z.coerce.number().int().min(0).default(1000),
+    ACCEPT_EFFORT_METRIC: z.enum(['wwc', 'words']).default('wwc'),
+    ACCEPT_MAX_WWC_PER_DAY: z.coerce.number().int().min(0).default(1000),
+    ACCEPT_THROUGHPUT_WWC_PER_HOUR: z.preprocess(
+      (v) => (v === '' || v === undefined ? undefined : v),
+      z.coerce.number().positive().optional(),
+    ),
     // Use preprocess to distinguish "unset" from empty string — Number('') === 0 which
     // would look like an explicit zero and not trigger the derived-throughput path.
     ACCEPT_THROUGHPUT_WORDS_PER_HOUR: z.preprocess(
@@ -139,7 +145,33 @@ const schema = z
       hoursStartMin,
       hoursEndMin,
     });
-    return { ...c, hoursStartMin, hoursEndMin, workdays, throughputWordsPerHour };
+    const activeMaxPerDay =
+      (c.ACCEPT_EFFORT_METRIC === 'wwc' ? c.ACCEPT_MAX_WWC_PER_DAY : c.ACCEPT_MAX_WORDS_PER_DAY) ??
+      0;
+    const activeOverride =
+      c.ACCEPT_EFFORT_METRIC === 'wwc'
+        ? c.ACCEPT_THROUGHPUT_WWC_PER_HOUR
+        : c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR;
+    const throughputPerHour = resolveThroughput({
+      ...(activeOverride !== undefined ? { explicit: activeOverride } : {}),
+      maxWordsPerDay: activeMaxPerDay, // param name is legacy; it is the ACTIVE cap
+      hoursStartMin,
+      hoursEndMin,
+    });
+    const unit =
+      c.ACCEPT_EFFORT_METRIC === 'wwc'
+        ? { adj: 'WWC', noun: 'WWC' }
+        : { adj: 'word', noun: 'words' };
+    return {
+      ...c,
+      hoursStartMin,
+      hoursEndMin,
+      workdays,
+      throughputWordsPerHour,
+      activeMaxPerDay,
+      throughputPerHour,
+      unit,
+    };
   })
   // Only enforce the window floor when yield is ENABLED — otherwise a stale/small window
   // value would block the kill-switch (an operator must always be able to disable the
@@ -165,7 +197,19 @@ const schema = z
       message:
         'set ACCEPT_THROUGHPUT_WORDS_PER_HOUR (>0) or ACCEPT_MAX_WORDS_PER_DAY (>0) so throughput is resolvable',
     },
-  );
+  )
+  // Capacity cap must be positive when the gate is on — an override must NOT except it, so this is
+  // a SEPARATE refine from throughput-resolvability. Both gate behind ACCEPT_SCHEDULE_ENABLED so the
+  // kill-switch always lets an operator disable without fixing unrelated values.
+  .refine((c) => !c.ACCEPT_SCHEDULE_ENABLED || c.activeMaxPerDay > 0, {
+    path: ['ACCEPT_MAX_WWC_PER_DAY'],
+    message:
+      'the active daily cap (ACCEPT_MAX_WWC_PER_DAY in wwc mode / ACCEPT_MAX_WORDS_PER_DAY in words mode) must be > 0',
+  })
+  .refine((c) => !c.ACCEPT_SCHEDULE_ENABLED || (c.throughputPerHour ?? 0) > 0, {
+    path: ['ACCEPT_THROUGHPUT_WWC_PER_HOUR'],
+    message: 'throughput must be resolvable to > 0 for the active metric',
+  });
 
 export type AppConfig = z.infer<typeof schema>;
 
