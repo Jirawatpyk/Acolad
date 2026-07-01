@@ -87,6 +87,38 @@ describe('decideGroupCapacity', () => {
     }
   });
 
+  it('capacity reasons use the active unit — over_cap_permanent (words byte-for-byte; wwc uses WWC)', () => {
+    // over_cap_permanent: 'group words due …' / 'group WWC due …'
+    const w = decideGroupCapacity([m(2000, '2026-06-22')], empty, 1000, {
+      adj: 'word',
+      noun: 'words',
+    });
+    expect(w).toMatchObject({ reason: expect.stringContaining('group words due') });
+    const c = decideGroupCapacity([m(2000, '2026-06-22')], empty, 1000, {
+      adj: 'WWC',
+      noun: 'WWC',
+    });
+    expect(c).toMatchObject({ reason: expect.stringContaining('group WWC due') });
+  });
+
+  it('capacity reasons use the active unit — budget_reached (words byte-for-byte; wwc uses WWC)', () => {
+    // budget_reached: 'daily word cap reached …' / 'daily WWC cap reached …'
+    const w = decideGroupCapacity(
+      [m(300, '2026-06-23')],
+      (d) => (d === '2026-06-23' ? 800 : 0),
+      1000,
+      { adj: 'word', noun: 'words' },
+    );
+    expect(w).toMatchObject({ reason: expect.stringContaining('daily word cap reached') });
+    const c = decideGroupCapacity(
+      [m(300, '2026-06-23')],
+      (d) => (d === '2026-06-23' ? 800 : 0),
+      1000,
+      { adj: 'WWC', noun: 'WWC' },
+    );
+    expect(c).toMatchObject({ reason: expect.stringContaining('daily WWC cap reached') });
+  });
+
   it('names the EARLIEST overflowing day when multiple days overflow (deadline order)', () => {
     // Members supplied in DESCENDING date order so insertion order ≠ deadline order.
     // Both days overflow (bucket 700 + subtotal 400 = 1100 > 1000); the blocked reason

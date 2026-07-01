@@ -163,6 +163,18 @@ describe('evaluateAcceptSchedule', () => {
     }
   });
 
+  it('null-effort reason uses the active unit adjective (words byte-for-byte; wwc uses WWC)', () => {
+    // words mode: reason must be byte-for-byte 'word count unknown' (no regression)
+    const words = evaluateAcceptSchedule(base({ effort: null, unit: { adj: 'word' } }));
+    expect(words).toEqual({ allow: false, reason: 'word count unknown' });
+    // wwc mode: reason must say 'WWC count unknown'
+    const wwc = evaluateAcceptSchedule(base({ effort: null, unit: { adj: 'WWC' } }));
+    expect(wwc).toEqual({ allow: false, reason: 'WWC count unknown' });
+    // default (no unit): must also give the old exact string for backward-compat
+    const def = evaluateAcceptSchedule(base({ effort: null }));
+    expect(def).toEqual({ allow: false, reason: 'word count unknown' });
+  });
+
   it('S2 (PIN): a date-only dueDate "2026-07-15" is treated as 07:00 Bangkok — before the 09:00 work start', () => {
     // Date-only ISO strings parse as UTC midnight (ECMAScript), which in Bangkok (+07:00) is
     // 07:00 local — BEFORE the 09:00 working-window start. Pin the current parse semantics.

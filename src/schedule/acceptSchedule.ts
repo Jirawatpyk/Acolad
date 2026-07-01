@@ -10,6 +10,10 @@ export interface AcceptScheduleInput {
   /** Working-day window + holidays. Embeds WorkCalendar directly (no flattened copy). */
   calendar: WorkCalendar;
   holidaysCuratedForSpan: boolean;
+  /** Active metric unit — drives user-facing reason strings.
+   *  Defaults to `{ adj: 'word' }` (words mode) when omitted so all existing callers
+   *  continue to emit the same byte-for-byte strings they do today. */
+  unit?: { adj: string };
 }
 
 export type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: string };
@@ -17,8 +21,9 @@ export type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: st
 export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVerdict {
   if (!i.enabled) return { allow: true };
 
+  const unit = i.unit ?? { adj: 'word' };
   if (i.dueAtMs === null) return { allow: false, reason: 'deadline unknown' };
-  if (i.effort === null) return { allow: false, reason: 'word count unknown' };
+  if (i.effort === null) return { allow: false, reason: `${unit.adj} count unknown` };
   if (i.throughputPerHour <= 0)
     return {
       allow: false,
