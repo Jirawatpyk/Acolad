@@ -17,7 +17,7 @@ import {
 } from '../schedule/thaiHolidays.js';
 import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { deadlineMsOf, makeEffectiveDayOf } from '../schedule/deadlineDay.js';
-import { effortOf } from '../schedule/effort.js';
+import { effortOf, type EffortMetric } from '../schedule/effort.js';
 import { resolveSheetStatusAndNote, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
@@ -102,6 +102,10 @@ export interface XtmCycleSummary {
     reason: string;
     words: number | null;
     dueDate: string | null;
+    /** Effort under the ACTIVE metric (effortOf result) — matches `metric` below. */
+    effort: number | null;
+    /** The effort metric active this cycle (from cfg.ACCEPT_EFFORT_METRIC). */
+    metric: EffortMetric;
   }[];
   /**
    * §9 audit trail for the held-read → over-accept residual risk (deadline-bucketed capacity).
@@ -357,7 +361,9 @@ export class XtmPollCycle {
       // job becomes a candidate, no capacity cap, no seed (dueSeed is empty when disabled).
       for (const s of wouldAccept) candidates.push(s);
     } else {
-      const cap = this.cfg.ACCEPT_MAX_WORDS_PER_DAY;
+      const cap = this.cfg.activeMaxPerDay;
+      const metric = this.cfg.ACCEPT_EFFORT_METRIC;
+      const eff = (s: XtmJobState) => effortOf(s, metric);
       const groups = new Map<string, XtmJobState[]>();
       for (const s of wouldAccept) {
         const key = this.bulkGroupKey(s);
@@ -393,12 +399,12 @@ export class XtmPollCycle {
               nullDeadlineMember = s;
               break;
             }
-            capMembers.push({ effort: s.words ?? 0, deadlineDate: day });
+            capMembers.push({ effort: eff(s) ?? 0, deadlineDate: day });
           }
           if (nullDeadlineMember) {
             blockReason = `'${nullDeadlineMember.fileName}': internal: held member has no deadline at capacity stage`;
           } else {
-            const v = decideGroupCapacity(capMembers, bucketFor, cap);
+            const v = decideGroupCapacity(capMembers, bucketFor, cap, this.cfg.unit);
             if (!v.accept) {
               // F6: a capacity block is DAY-level, not file-level — `v.reason` already names the
               // overflowing day + numbers. Do NOT prefix an arbitrary `members[0]` file (it is not
@@ -441,6 +447,8 @@ export class XtmPollCycle {
               reason: blockReason,
               words: s.words,
               dueDate: s.dueDate,
+              effort: eff(s),
+              metric,
             });
           }
           // I3b: a deadline day's budget is genuinely exhausted (not a single over-cap job) —
@@ -453,7 +461,7 @@ export class XtmPollCycle {
               this.outbox,
               'daily_cap_reached',
               snapshot.capturedAt,
-              `the ${cap}-word daily cap is reached for ${capExhaustedDay}`,
+              `the ${cap}-${this.cfg.unit.adj} daily cap is reached for ${capExhaustedDay}`,
               {},
               `daily_cap_reached:${capExhaustedDay}`,
             );
@@ -865,8 +873,8 @@ export class XtmPollCycle {
       enabled: true,
       nowMs,
       dueAtMs,
-      effort: s.words,
-      throughputPerHour: this.cfg.throughputWordsPerHour,
+      effort: effortOf(s, this.cfg.ACCEPT_EFFORT_METRIC),
+      throughputPerHour: this.cfg.throughputPerHour,
       calendar: {
         workdays: this.cfg.workdays,
         hoursStartMin: this.cfg.hoursStartMin,
@@ -874,6 +882,7 @@ export class XtmPollCycle {
         holidays,
       },
       holidaysCuratedForSpan: curated,
+      unit: this.cfg.unit,
     });
   }
 
