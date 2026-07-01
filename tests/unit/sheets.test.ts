@@ -361,6 +361,30 @@ describe('resolveSheetStatusAndNote', () => {
     ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
   });
 
+  it('rejected + rejected (the actual stored state — still in Active) → Rejected with NO suffix', () => {
+    // In production a still-Active gate-rejected job carries lifecycleStatus 'rejected' (the lifecycle
+    // the gate sets), NOT 'new'. Assert the helper directly against that real input — not only the
+    // 'new' proxy above — so a future special-case on lifecycleStatus === 'rejected' can't regress it.
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'rejected', acceptStatus: 'none', rejectReason: rejectNote },
+        { note: null, lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'group blocked: x' });
+  });
+
+  it('rejected lifecycle with a NULL reason (a pre-migration row) → Rejected via lifecycle, opts.note', () => {
+    // A row that carried lifecycle 'rejected' from before rejectReason was persisted has reject_reason
+    // NULL after migration. The sticky branch is skipped (null reason), so it falls through to the
+    // lifecycle status: still 'Rejected', but carrying opts.note rather than a persisted reason.
+    expect(
+      resolveSheetStatusAndNote(
+        { lifecycleStatus: 'rejected', acceptStatus: 'none', rejectReason: null },
+        { note: 'from cycle', lastSeenAtMs },
+      ),
+    ).toEqual({ status: 'Rejected', note: 'from cycle' });
+  });
+
   it('accepted overrides rejectReason → Accepted with opts.note', () => {
     expect(
       resolveSheetStatusAndNote(

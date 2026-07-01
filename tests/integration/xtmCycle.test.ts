@@ -732,6 +732,33 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(new XtmJobStore(db).wordsDueByDeadline().size).toBe(0); // nothing held → no bucket
   });
 
+  it('B#2/B#6: a gate-Rejected job that later becomes feasible but FAILS to accept shows Accept failed, not stale Rejected', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone(); // past baseline → per-job sheets fire each cycle
+    const acc = new StubAcceptor();
+    // c1: too tight → the schedule gate REJECTS it (lifecycle 'rejected' + persisted reason, accept
+    // untouched at 'none'). The acceptor is never called.
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueMon12, words: 5000 })], MON_10, 'c1'),
+    );
+    expect(only().lifecycleStatus).toBe('rejected');
+    expect(sheetRows().at(-1)?.status).toBe('Rejected');
+
+    // c2: SAME job (identity is project|file|step|role — due/words are not keyed), now finishable, so
+    // the gate ALLOWs and the robustness pass attempts accept — but the portal click FAILS.
+    acc.outcome = 'failed';
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10b, 'c2'),
+    );
+    const s = only();
+    expect(s.lifecycleStatus).toBe('accept_failed');
+    expect(s.acceptStatus).toBe('failed');
+    // The accept-machine terminal must win: the Sheet shows the true 'Accept failed', never the
+    // stale gate 'Rejected' (applyPresentDecision cleared the reason before the ALLOW; the
+    // resolveSheetStatusAndNote accept_failed guard is the belt-and-suspenders behind it).
+    expect(sheetRows().at(-1)?.status).toBe('Accept failed');
+  });
+
   it('I1: a schedule-blocked job surfaces reason/words/dueDate via summary.scheduleRejects', async () => {
     fresh();
     const acc = new StubAcceptor();

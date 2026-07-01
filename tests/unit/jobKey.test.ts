@@ -149,4 +149,13 @@ describe('computeXtmSnapshotHash', () => {
       computeXtmSnapshotHash(xjob({ fileWwc: 250 })),
     );
   });
+
+  it('changes when projectName changes (a project rename is a real display change)', () => {
+    // projectName is BOTH key-bearing (computeXtmJobKey) and display-bearing. The hash must include
+    // it so a rename on the same file is detected as a change — else a refactor that reused the old
+    // fileName|step|role hash basis would silently treat a rename as "no change" and never re-sync.
+    expect(computeXtmSnapshotHash(xjob({ projectName: 'EMAIL' }))).not.toBe(
+      computeXtmSnapshotHash(xjob({ projectName: 'EMAIL_1' })),
+    );
+  });
 });
