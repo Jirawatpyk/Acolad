@@ -127,7 +127,7 @@ const TERMINAL_ABSENT: ReadonlySet<XtmLifecycleStatus> = new Set(['missing', 'cl
  * precedence: a gate-Rejected job keeps "Rejected" (plus a "(left Active DD/MM/YYYY HH:mm)"
  * suffix once it exits Active) until it is accepted. Accepted overrides any rejectReason.
  *
- * This is a PURE function — no I/O, no cycle state. It is wired into `toSheetRow` by Task 7.
+ * This is a PURE function — no I/O, no cycle state. Called by `XtmPollCycle.toSheetRow`.
  */
 export function resolveSheetStatusAndNote(
   state: Pick<XtmJobState, 'lifecycleStatus' | 'acceptStatus' | 'rejectReason'>,

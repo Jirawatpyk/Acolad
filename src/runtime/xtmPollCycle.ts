@@ -421,7 +421,7 @@ export class XtmPollCycle {
           const note = `group blocked: ${blockReason}`;
           for (const s of members) {
             s.lifecycleStatus = 'rejected';
-            // Sticky-Rejected SET (Task 7): persist the SAME binding reason so the Sheet keeps
+            // Sticky-Rejected SET: persist the SAME binding reason so the Sheet keeps
             // 'Rejected' across this job's disappearance (resolveSheetStatusAndNote reads it),
             // even on cycles where blockNotes is empty (e.g. the missing transition).
             s.rejectReason = note;
@@ -688,7 +688,7 @@ export class XtmPollCycle {
       const s = result.nextStates.get(dc.jobKey);
       if (!s) continue;
       reported.add(dc.jobKey);
-      // I3 (Task 7): a still-'rejected' job's silent field re-sync must NOT wipe the reject note.
+      // I3: a still-'rejected' job's silent field re-sync must NOT wipe the reject note.
       // resolveSheetStatusAndNote now owns this precedence via the PERSISTED `rejectReason`: a
       // still-'rejected' job renders Status 'Rejected' + its binding reason; any other status
       // carries no note. So pass `note: null` and let the helper fill the reason from rejectReason
@@ -796,12 +796,12 @@ export class XtmPollCycle {
 
   /**
    * Build the Sheet row for a job, routing Status + Note through `resolveSheetStatusAndNote`
-   * (Task 7) so the sticky-Rejected precedence is applied in ONE place: a gate-Rejected job
+   * so the sticky-Rejected precedence is applied in ONE place: a gate-Rejected job
    * (persisted `rejectReason`, not yet accepted) keeps Status 'Rejected' — gaining a
    * "(left Active …)" suffix once it leaves Active — instead of flipping to Missing/Closed. The
    * passed `note` is used only when the job is NOT sticky-Rejected. The "left Active" timestamp is
    * the job's own `lastSeenAt` (Finding #9) — the last cycle it was present, NOT the cycle's
-   * missing-detection time — so no per-job parse of the snapshot capturedAt is needed (#14).
+   * missing-detection time — so no per-job parse of the snapshot capturedAt is needed.
    */
   private toSheetRow(s: XtmJobState, note: string | null, summary?: XtmCycleSummary): SheetRow {
     const lastSeenAtMs = Date.parse(s.lastSeenAt);
