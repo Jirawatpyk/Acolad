@@ -189,8 +189,12 @@ describe('ACCEPT_SCHEDULE config', () => {
     ).toThrow();
   });
 
-  it('refine: capacity=0 without explicit throughput rejected when enabled', () => {
-    expect(() => loadConfig({ ...base, ACCEPT_MAX_WORDS_PER_DAY: '0' })).toThrow();
+  it('refine: words-mode capacity=0 without explicit throughput rejected when enabled', () => {
+    // Must specify words mode explicitly — the default metric is wwc, and the words-cap
+    // refine is correctly gated to words mode only (I-2).
+    expect(() =>
+      loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'words', ACCEPT_MAX_WORDS_PER_DAY: '0' }),
+    ).toThrow();
   });
 
   it('disabled: bad values do NOT block startup (kill-switch always works)', () => {
@@ -249,6 +253,20 @@ describe('ACCEPT_EFFORT_METRIC config', () => {
         ACCEPT_SCHEDULE_ENABLED: '0',
         ACCEPT_EFFORT_METRIC: 'wwc',
         ACCEPT_MAX_WWC_PER_DAY: '0',
+      }),
+    ).not.toThrow();
+  });
+
+  it('wwc mode + zeroed words cap is valid (I-2: words-cap refine must not fire in wwc mode)', () => {
+    // An operator in wwc mode who sets ACCEPT_MAX_WORDS_PER_DAY=0 ("unused in wwc") must NOT
+    // hit the words-throughput-resolvability refine — that refine only guards words mode.
+    // The wwc active-cap refines already guard throughput resolvability in wwc mode.
+    expect(() =>
+      loadConfig({
+        ...base,
+        ACCEPT_EFFORT_METRIC: 'wwc',
+        ACCEPT_MAX_WORDS_PER_DAY: '0',
+        ACCEPT_MAX_WWC_PER_DAY: '1000',
       }),
     ).not.toThrow();
   });

@@ -130,7 +130,7 @@ describe('evaluateAcceptSchedule', () => {
     const v = evaluateAcceptSchedule(base({ throughputPerHour: 0, effort: 300 }));
     expect(v.allow).toBe(false);
     if (!v.allow)
-      expect(v.reason).toBe('throughput not configured (throughputWordsPerHour must be positive)');
+      expect(v.reason).toBe('throughput not configured (throughputPerHour must be positive)');
   });
   it('far-deadline weekend job is feasible → allow', () => {
     expect(

@@ -190,6 +190,7 @@ const schema = z
   .refine(
     (c) =>
       !c.ACCEPT_SCHEDULE_ENABLED ||
+      c.ACCEPT_EFFORT_METRIC === 'wwc' ||
       c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR !== undefined ||
       c.ACCEPT_MAX_WORDS_PER_DAY > 0,
     {

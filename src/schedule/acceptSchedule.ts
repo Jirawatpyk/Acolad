@@ -27,7 +27,7 @@ export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVe
   if (i.throughputPerHour <= 0)
     return {
       allow: false,
-      reason: 'throughput not configured (throughputWordsPerHour must be positive)',
+      reason: 'throughput not configured (throughputPerHour must be positive)',
     };
   if (!i.holidaysCuratedForSpan) {
     // Name the whole now→deadline span (F8) — naming only the deadline year is wrong
