@@ -174,13 +174,18 @@ describe('ACCEPT_SCHEDULE config', () => {
   it('empty throughput → derived from cap (not 0)', () => {
     // words mode: empty ACCEPT_THROUGHPUT_WORDS_PER_HOUR → derived from cap (1000/9h)
     expect(
-      loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'words', ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '' }).throughputPerHour,
+      loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'words', ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '' })
+        .throughputPerHour,
     ).toBeCloseTo(1000 / 9, 5);
   });
 
   it('explicit throughput override wins over derived (words mode)', () => {
     expect(
-      loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'words', ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '100' }).throughputPerHour,
+      loadConfig({
+        ...base,
+        ACCEPT_EFFORT_METRIC: 'words',
+        ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '100',
+      }).throughputPerHour,
     ).toBe(100);
   });
 

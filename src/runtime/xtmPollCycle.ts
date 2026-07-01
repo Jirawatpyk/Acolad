@@ -287,8 +287,8 @@ export class XtmPollCycle {
       // the seed; see the effortOf call there). This can under-count the cap → over-accept past
       // it on the irreversible bulk-claim path. Alert once per Bangkok day (deduped), same
       // pattern as held_job_no_deadline. Only meaningful while the gate is ON.
-      const heldNoEffort = this.store.heldJobsMissingEffort(
-        (s) => effortOf(s, this.cfg.ACCEPT_EFFORT_METRIC),
+      const heldNoEffort = this.store.heldJobsMissingEffort((s) =>
+        effortOf(s, this.cfg.ACCEPT_EFFORT_METRIC),
       );
       if (heldNoEffort.length > 0) {
         raiseAlert(

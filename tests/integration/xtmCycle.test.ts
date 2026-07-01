@@ -1881,7 +1881,9 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
         unit: { adj: 'WWC', noun: 'WWC' },
       } as Partial<AppConfig>),
       new StubAcceptor(),
-    ).run(snapAt([xraw({ words: 861, fileWwc: 169, dueDate: '2026-06-22T11:30:00+07:00' })], MON_10));
+    ).run(
+      snapAt([xraw({ words: 861, fileWwc: 169, dueDate: '2026-06-22T11:30:00+07:00' })], MON_10),
+    );
     const r = summary.scheduleRejects[0]!;
     expect(r.words).toBe(861);
     expect(r.effort).toBe(169); // wwc mode: effort = fileWwc, NOT raw words
