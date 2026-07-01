@@ -91,9 +91,24 @@ export interface OpenResult {
 }
 
 /**
+ * A migration step failed for a LOGIC reason (a bug in our migration code — e.g. an
+ * unexpected PK collision), NOT because the db file is corrupt. `openDatabase` treats this
+ * distinctly from a genuine open/corruption failure: it propagates (crash loud) instead of
+ * quarantining, so a code bug can never silently rename a valid acolad.db to .corrupt and
+ * discard all job history. Carries the underlying error as `cause`.
+ */
+export class MigrationError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'MigrationError';
+  }
+}
+
+/**
  * Open (and migrate) the SQLite state db with WAL. On a corrupt/unopenable file
  * the original is quarantined as acolad.db.corrupt-<ts> (never overwritten) and
  * a fresh db is created — caller treats this as a cold start + alert (FR-017).
+ * A `MigrationError` (our own migration logic bug) is re-thrown, NOT quarantined.
  */
 export function openDatabase(stateDir: string, nowIso: string): OpenResult {
   mkdirSync(stateDir, { recursive: true });
@@ -112,6 +127,10 @@ export function openDatabase(stateDir: string, nowIso: string): OpenResult {
     } catch {
       // ignore — best-effort close before quarantine
     }
+    // A migration LOGIC error (our code threw) is NOT file corruption. Quarantining here would
+    // rename a perfectly valid acolad.db to .corrupt and silently discard all job history for a
+    // code bug. Crash loud instead: propagate so the bot fails to start + pages, db preserved.
+    if (err instanceof MigrationError) throw err;
     if (!existsSync(dbPath)) throw err;
     const stamp = nowIso.replace(/[:.]/g, '-');
     const corruptCopyPath = join(stateDir, `acolad.db.corrupt-${stamp}`);
@@ -258,7 +277,12 @@ function widenLifecycleCheck(db: DB): void {
  * 4-segment new key can never equal a remaining 3-segment old key — no collision.
  *
  * Runs INSIDE migrate()'s enclosing transaction, AFTER ensureJobColumns /
- * widenLifecycleCheck so the column set (and the widened lifecycle CHECK) is final.
+ * widenLifecycleCheck (which establish the final job column set + widened lifecycle CHECK);
+ * ensureOutboxChannel also runs before this but does not touch the jobs table.
+ *
+ * Any unexpected throw here (e.g. a PK collision from an already-occupied target key) is a
+ * migration LOGIC error, not file corruption — it is wrapped as `MigrationError` so
+ * `openDatabase` propagates it (crash loud) instead of quarantining the valid db.
  */
 function backfillProjectQualifiedKey(db: DB): void {
   const done = db.prepare("SELECT value FROM meta WHERE key = 'job_key_backfill_v2'").get() as
@@ -266,27 +290,42 @@ function backfillProjectQualifiedKey(db: DB): void {
     | undefined;
   if (done) return;
 
-  const rows = db.prepare('SELECT job_key, project_name, file_name, step, role FROM jobs').all() as {
-    job_key: string;
-    project_name: string;
-    file_name: string;
-    step: string | null;
-    role: string | null;
-  }[];
-  const update = db.prepare('UPDATE jobs SET job_key = ? WHERE job_key = ?');
-  for (const row of rows) {
-    // Skip degenerate rows (empty project/file) — a meaningless key + a PK-collision risk.
-    if (row.project_name === '' || row.file_name === '') continue;
-    const newKey = computeXtmJobKey({
-      projectName: row.project_name,
-      fileName: row.file_name,
-      step: row.step,
-      role: row.role,
-    });
-    if (newKey !== row.job_key) update.run(newKey, row.job_key);
+  let reKeyCount = 0;
+  try {
+    const rows = db
+      .prepare('SELECT job_key, project_name, file_name, step, role FROM jobs')
+      .all() as {
+      job_key: string;
+      project_name: string | null;
+      file_name: string | null;
+      step: string | null;
+      role: string | null;
+    }[];
+    const update = db.prepare('UPDATE jobs SET job_key = ? WHERE job_key = ?');
+    for (const row of rows) {
+      // Skip degenerate rows (empty/NULL project or file) — a meaningless key + a PK-collision
+      // risk. The falsy guard (not `=== ''`) catches a NULL project/file too, and narrows both
+      // to `string` for computeXtmJobKey below.
+      if (!row.project_name || !row.file_name) continue;
+      const newKey = computeXtmJobKey({
+        projectName: row.project_name,
+        fileName: row.file_name,
+        step: row.step,
+        role: row.role,
+      });
+      if (newKey !== row.job_key) {
+        update.run(newKey, row.job_key);
+        reKeyCount++;
+      }
+    }
+    db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('job_key_backfill_v2', '1')").run();
+  } catch (err) {
+    // The enclosing migrate() transaction rolls back the partial re-keys before this propagates.
+    throw new MigrationError(
+      `backfillProjectQualifiedKey failed after ${reKeyCount} re-key(s); the db is NOT corrupt — this is a migration logic error`,
+      { cause: err },
+    );
   }
-
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('job_key_backfill_v2', '1')").run();
 }
 
 /**

@@ -1,9 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDatabase } from '../../src/state/db.js';
+import { openDatabase, MigrationError } from '../../src/state/db.js';
 import { Outbox } from '../../src/state/outbox.js';
 import { computeXtmJobKey } from '../../src/detection/jobKey.js';
 
@@ -737,5 +737,54 @@ describe('backfill job_key to the project-qualified key (re-key-all real-identit
 
     expect(k1).toBe(NEW_KEY);
     expect(k2).toBe(NEW_KEY);
+  });
+
+  it('SKIPS an asymmetric degenerate row (empty project OR empty file — the guard is an OR)', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    // The skip guard is falsy-OR (`!project || !file`): a row with a real file but an EMPTY project
+    // — or the reverse — is still degenerate and left untouched. Only the both-empty case was
+    // covered before; these two halves lock the OR so a future tightening to AND is caught.
+    const insert = a.db.prepare(
+      `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash,
+                         project_name, file_name, step, role, lifecycle_status, accept_status)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    );
+    insert.run('empty-proj-key', 'empty-proj', 'visible', NOW, NOW, 'h', '', 'real.docx', 's', 'r', 'accepted', 'none'); // prettier-ignore
+    insert.run('empty-file-key', 'empty-file', 'visible', NOW, NOW, 'h', 'RealProj', '', 's', 'r', 'accepted', 'none'); // prettier-ignore
+    clearBackfillFlag(a.db);
+    a.db.close();
+
+    const b = openDatabase(dir, NOW);
+    expect(keyByTitle(b.db, 'empty-proj')).toBe('empty-proj-key'); // unchanged (empty project)
+    expect(keyByTitle(b.db, 'empty-file')).toBe('empty-file-key'); // unchanged (empty file)
+    b.db.close();
+  });
+
+  it('propagates a backfill PK collision as MigrationError WITHOUT quarantining the db (a code bug must not destroy history)', () => {
+    const dir = tmp();
+    const a = openDatabase(dir, NOW);
+    const P = { projectName: 'EMAIL', fileName: 'f', step: 's', role: 'r' };
+    const target = computeXtmJobKey(P); // the 4-field key row X will re-key TO
+    const insert = a.db.prepare(
+      `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash,
+                         project_name, file_name, step, role, lifecycle_status, accept_status)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    );
+    // Row X still on its legacy 3-field key; its re-key target is `target`.
+    insert.run('f|s|r', 'x', 'visible', NOW, NOW, 'h', P.projectName, P.fileName, P.step, P.role, 'accepted', 'none'); // prettier-ignore
+    // Row Y ALREADY occupies `target` (a prior partial migration / manual op) → X's UPDATE collides
+    // on the job_key PRIMARY KEY.
+    insert.run(target, 'y', 'visible', NOW, NOW, 'h', P.projectName, P.fileName, P.step, P.role, 'accepted', 'none'); // prettier-ignore
+    clearBackfillFlag(a.db);
+    a.db.close();
+
+    // The backfill UPDATE hits a UNIQUE(job_key) violation — a migration LOGIC error, NOT file
+    // corruption. openDatabase must propagate it (crash loud) and leave the valid db in place; the
+    // old quarantine-on-any-throw path would have renamed acolad.db to .corrupt and silently
+    // discarded all job history for what is a code bug.
+    expect(() => openDatabase(dir, NOW)).toThrow(MigrationError);
+    const corruptCopies = readdirSync(dir).filter((f) => f.startsWith('acolad.db.corrupt-'));
+    expect(corruptCopies).toEqual([]);
   });
 });
