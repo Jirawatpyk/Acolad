@@ -120,12 +120,18 @@ export function parseItemsTotal(footer: string | null): number | null {
  * error→system-alert path pages on-call, rather than a silent wrong-key scrape (CLAUDE.md:
  * "selector/marker หาย, locale เปลี่ยน → เก็บ evidence + system alert — ห้ามเดา parse").
  *
- * Asserts ONLY when header cells are actually rendered: an absent OR partial <thead> is left to
- * the caller's existing empty-vs-loading classifier (a still-loading grid can render its shell —
- * or only the first few headers — before the rest), so we never page on a transient. A column
- * that DID render but carries the WRONG label is the unambiguous drift signal this guards: a
- * MISSING <th> (index past the rendered cells) is treated as not-yet-rendered and skipped, so a
- * short header never trips a false LayoutChangedError.
+ * The match is `contains` (not `===`): it flags a positional SHIFT (the expected label absent from
+ * the cell now at that index), NOT a pure RENAME. A rename that keeps the column in place leaves the
+ * positional selectors valid, so it is intentionally not flagged — do NOT tighten this to an exact
+ * match.
+ *
+ * The three rendering states are handled distinctly (so we never page on a transient partial load):
+ *   - ABSENT <thead> (zero <th>) → early return, left to the caller's empty-vs-loading classifier
+ *     (a still-loading grid renders its shell first);
+ *   - PARTIAL <thead> (only the first few <th> rendered) → handled HERE, NOT deferred to the caller:
+ *     only the rendered cells are checked and a missing index (past the rendered <th> count) is
+ *     skipped, so a mid-load short header never trips a false LayoutChangedError;
+ *   - a cell that DID render but carries the WRONG label → the unambiguous drift signal this guards.
  */
 async function assertHeaderLayout(
   scope: GridScope,
@@ -363,12 +369,18 @@ async function finalizeSnapshot(
  * XTM to later drop File WWC from Closed, step/role would shift LEFT by one, the borrowed selectors
  * would read the wrong cells, and the recomputed key would never match the Active `_job_key` → a
  * finished job would silently misclassify as "removed" (and, with held-derived capacity, fail to
- * return its quota). As a future-proof NON-DESTABILIZING
- * drift detector: when Closed data rows are present (kebab + non-empty file) but EVERY such row
- * reads null step AND null role — the systematic-mismatch signature — capture sanitized evidence
- * and emit a WARN. We do NOT throw/page: a throw here strands the Closed-vs-Removed decision and
- * pages on a cosmetic mismatch, a worse failure mode than the bug. A single odd row never trips
- * it (the all-rows check requires every candidate row to be null).
+ * return its quota).
+ *
+ * TWO layers guard this, with different failure modes:
+ *   1. STRUCTURAL header shift → assertHeaderLayout (called FIRST) throws LayoutChangedError. That
+ *      throw is INTENTIONAL and propagates to the loop's handleError (system alert + heartbeat fail)
+ *      — this function is NOT try/catch-safe against it; callers must let it bubble.
+ *   2. SOFT, non-destabilizing drift detector for a mismatch that slips past the header check: when
+ *      Closed data rows are present (kebab + non-empty file) but EVERY such row reads null step AND
+ *      null role, OR EVERY such row reads an empty project cell — the systematic-mismatch signatures
+ *      — capture sanitized evidence and emit a WARN. This SOFT path does NOT throw/page: a throw here
+ *      strands the Closed-vs-Removed decision and pages on a cosmetic mismatch, a worse failure mode
+ *      than the bug. A single odd row never trips it (every candidate row must match the signature).
  */
 export async function readClosedKeys(
   scope: GridScope,
