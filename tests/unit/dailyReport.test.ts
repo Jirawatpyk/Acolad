@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { dueDailyReport, buildDailyReportCard } from '../../src/reporting/dailyReport.js';
 import { bangkokDateString } from '../../src/schedule/bangkokCalendar.js';
-import { makeEffectiveDayOf } from '../../src/schedule/deadlineDay.js';
+import { makeEffectiveDayOf, deadlineDayOf } from '../../src/schedule/deadlineDay.js';
 import type { XtmJobState } from '../../src/detection/types.js';
 
 // ---------------------------------------------------------------------------
@@ -112,12 +112,14 @@ const job = (o: Partial<XtmJobState>): XtmJobState =>
     dueDate: o.dueDate ?? null,
     dueRaw: o.dueRaw ?? null,
     words: o.words ?? null,
+    fileWwc: o.fileWwc ?? null,
     step: null,
     role: null,
     eligible: true,
     lifecycleStatus: 'accepted',
     acceptStatus: 'accepted',
     acceptedAt: null,
+    rejectReason: null,
     status: 'visible',
     firstSeenAt: '',
     lastSeenAt: '',
@@ -457,5 +459,120 @@ describe('buildDailyReportCard — structural', () => {
     const card = buildDailyReportCard([j], NOW_MS, XTM_URL, 0);
     const widget = firstEntry(card).card.sections[0]!.widgets[1] as AnyWidget;
     expect(widget.decoratedText?.text).toContain('1500w');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildDailyReportCard — metric-aware effort (Task 8)
+// ---------------------------------------------------------------------------
+describe('buildDailyReportCard — metric-aware effort (Task 8)', () => {
+  const URL = 'http://x';
+
+  it('metric=wwc: Due-today sums File WWC and headline reads "N WWC (cap …)"', () => {
+    const held = [job({ dueDate: '2026-06-25T18:00:00+07:00', words: 500, fileWwc: 120 })];
+    const card = text(
+      buildDailyReportCard(
+        held,
+        NOW,
+        URL,
+        1000,
+        deadlineDayOf,
+        true,
+        { adj: 'WWC', noun: 'WWC' },
+        'wwc',
+      ),
+    );
+    expect(card).toContain('120 WWC');
+    expect(card).not.toContain('500 words');
+  });
+
+  it('metric=words: byte-for-byte — sums words, labels words, ignores fileWwc', () => {
+    const held = [job({ dueDate: '2026-06-25T18:00:00+07:00', words: 500, fileWwc: 120 })];
+    const card = text(
+      buildDailyReportCard(
+        held,
+        NOW,
+        URL,
+        1000,
+        deadlineDayOf,
+        true,
+        { adj: 'word', noun: 'words' },
+        'words',
+      ),
+    );
+    expect(card).toContain('500 words');
+    expect(card).not.toContain('120 WWC');
+  });
+
+  it('metric=wwc + fileWwc=null: effortOf falls back to words; headline labels with unit noun', () => {
+    const held = [job({ dueDate: '2026-06-25T18:00:00+07:00', words: 300, fileWwc: null })];
+    const card = text(
+      buildDailyReportCard(
+        held,
+        NOW,
+        URL,
+        1000,
+        deadlineDayOf,
+        true,
+        { adj: 'WWC', noun: 'WWC' },
+        'wwc',
+      ),
+    );
+    // effortOf('wwc') falls back to words (300) when fileWwc is null; still labelled "WWC"
+    expect(card).toContain('300 WWC');
+  });
+
+  it('wwc-mode per-job value renders as "N WWC", not "Nw"', () => {
+    const j = makeJob({ words: 1500, fileWwc: 300 });
+    const card = buildDailyReportCard(
+      [j],
+      NOW_MS,
+      XTM_URL,
+      0,
+      undefined,
+      true,
+      { adj: 'WWC', noun: 'WWC' },
+      'wwc',
+    );
+    const widget = firstEntry(card).card.sections[0]!.widgets[1] as AnyWidget;
+    expect(widget.decoratedText?.text).toContain('300 WWC');
+    expect(widget.decoratedText?.text).not.toContain('1500w');
+  });
+
+  it('words-mode per-job value still renders as "Nw" (unchanged)', () => {
+    const j = makeJob({ words: 1500, fileWwc: 300 });
+    const card = buildDailyReportCard(
+      [j],
+      NOW_MS,
+      XTM_URL,
+      0,
+      undefined,
+      true,
+      { adj: 'word', noun: 'words' },
+      'words',
+    );
+    const widget = firstEntry(card).card.sections[0]!.widgets[1] as AnyWidget;
+    expect(widget.decoratedText?.text).toContain('1500w');
+    expect(widget.decoratedText?.text).not.toContain('300 WWC');
+  });
+
+  it('wwc-mode overdue row sums WWC and labels with unit noun', () => {
+    // dueDate before NOW (09:00) → overdue instantly; effective-day is today → also in Due-today
+    const held = [job({ dueDate: '2026-06-25T02:00:00+07:00', words: 100, fileWwc: 50 })];
+    const card = text(
+      buildDailyReportCard(
+        held,
+        NOW,
+        URL,
+        1000,
+        deadlineDayOf,
+        true,
+        { adj: 'WWC', noun: 'WWC' },
+        'wwc',
+      ),
+    );
+    // Overdue row shows effort sum in WWC (50), not raw words (100)
+    expect(card).toContain('50 WWC');
+    expect(card).not.toContain('100 words');
   });
 });

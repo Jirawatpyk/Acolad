@@ -22,7 +22,12 @@ const cfg = (over: Partial<AppConfig> = {}): AppConfig =>
     ACCEPT_LANGUAGES: ['Malay (Malaysia)'],
     ACCEPT_MAX_WORDS: 0,
     ACCEPT_MAX_PER_CYCLE: 0,
-    ACCEPT_MAX_WORDS_PER_DAY: 1000, // so the daily-report capacity row shows "N / 1000", not "(no cap)"
+    ACCEPT_MAX_WORDS_PER_DAY: 1000,
+    // Task 8: activeMaxPerDay replaces ACCEPT_MAX_WORDS_PER_DAY at the call site;
+    // set it explicitly so the daily-report capacity row shows "cap 1000/day", not "(no cap)".
+    activeMaxPerDay: 1000,
+    ACCEPT_EFFORT_METRIC: 'words', // words-mode keeps byte-for-byte "N words" assertions
+    unit: { adj: 'word', noun: 'words' }, // words-mode unit labels
     OUTBOX_RETRY_CAP: 10,
     OUTBOX_DEAD_AFTER_HOURS: 6,
     LOGIN_MAX_RETRY: 3,
