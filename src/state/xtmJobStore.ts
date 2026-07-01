@@ -71,12 +71,13 @@ export class XtmJobStore {
    *  FAIL LOUD (I1: a deduped warn alert) instead of silently dropping them. */
   effortDueByDeadline(
     dayOf: (dueDate: string | null) => string | null = deadlineDayOf,
+    effortOf: (s: XtmJobState) => number = (s) => s.words ?? 0,
   ): ReadonlyMap<string, number> {
     const out = new Map<string, number>();
     for (const s of this.listByLifecycle('accepted')) {
       const d = dayOf(s.dueDate); // null = null/unparseable deadline (skipped, surfaced by heldJobsMissingDeadline)
       if (d === null) continue;
-      out.set(d, (out.get(d) ?? 0) + (s.words ?? 0));
+      out.set(d, (out.get(d) ?? 0) + effortOf(s));
     }
     return out;
   }

@@ -4,9 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, type DB } from '../../src/state/db.js';
 import { XtmJobStore } from '../../src/state/xtmJobStore.js';
+import { effortOf } from '../../src/schedule/effort.js';
 import type { XtmJobState } from '../../src/detection/types.js';
 
 const NOW = '2026-06-19T10:00:00.000Z';
+const DUE = '2026-06-24T18:00:00+07:00';
 const dirs: string[] = [];
 let db: DB;
 
@@ -257,6 +259,25 @@ describe('XtmJobStore', () => {
       expect(m.get('2026-06-24')).toBe(100); // null co-day job adds 0, not NaN
       expect(Number.isNaN(m.get('2026-06-24'))).toBe(false);
       expect(m.get('2026-06-26')).toBe(0); // a day with only a null-words job sums to 0
+    });
+
+    it('effortDueByDeadline buckets via the injected mapper (WWC vs words)', () => {
+      const store = freshStore();
+      store.upsertMany([accepted({ jobKey: 'a', dueDate: DUE, words: 1500, fileWwc: 800 })]);
+      const day = (d: string | null) => d && d.slice(0, 10);
+      const wwc = store.effortDueByDeadline(day, (s) => effortOf(s, 'wwc') ?? 0);
+      const words = store.effortDueByDeadline(day, (s) => effortOf(s, 'words') ?? 0);
+      expect(wwc.get(DUE.slice(0, 10))).toBe(800);
+      expect(words.get(DUE.slice(0, 10))).toBe(1500);
+    });
+
+    it('a both-null (words=null, fileWwc=null) row via the injected mapper sums to 0, not NaN', () => {
+      const store = freshStore();
+      store.upsertMany([accepted({ jobKey: 'a', dueDate: DUE, words: null, fileWwc: null })]);
+      const day = (d: string | null) => d && d.slice(0, 10);
+      const m = store.effortDueByDeadline(day, (s) => effortOf(s, 'wwc') ?? 0);
+      expect(m.get(DUE.slice(0, 10))).toBe(0);
+      expect(Number.isNaN(m.get(DUE.slice(0, 10)))).toBe(false);
     });
   });
 

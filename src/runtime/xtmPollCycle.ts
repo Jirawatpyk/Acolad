@@ -17,6 +17,7 @@ import {
 } from '../schedule/thaiHolidays.js';
 import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { deadlineMsOf, makeEffectiveDayOf } from '../schedule/deadlineDay.js';
+import { effortOf } from '../schedule/effort.js';
 import { resolveSheetStatusAndNote, type SheetRow } from '../reporting/sheets.js';
 import {
   renderXtmNewJob,
@@ -235,7 +236,12 @@ export class XtmPollCycle {
     // optimistic advances below mutate OUR map, never the store's read-only one), or empty when
     // the gate is off (the kill-switch enforces no cap).
     const dueBuckets = scheduleEnabled
-      ? new Map<string, number>(this.store.effortDueByDeadline(effDayOf))
+      ? new Map<string, number>(
+          this.store.effortDueByDeadline(
+            effDayOf,
+            (s) => effortOf(s, this.cfg.ACCEPT_EFFORT_METRIC) ?? 0,
+          ),
+        )
       : new Map<string, number>();
     const bucketFor = (d: string): number => dueBuckets.get(d) ?? 0;
     // I1 (fail loud, never silent on the irreversible accept path): a held (accepted) job with a

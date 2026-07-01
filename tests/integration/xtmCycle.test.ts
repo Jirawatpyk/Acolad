@@ -91,6 +91,7 @@ const accepted = (over: {
   dueDate: string | null;
   words: number | null;
   fileName?: string;
+  fileWwc?: number | null;
 }): XtmJobState => ({
   jobKey: over.jobKey,
   xtmTaskId: null,
@@ -101,7 +102,7 @@ const accepted = (over: {
   dueDate: over.dueDate,
   dueRaw: null,
   words: over.words,
-  fileWwc: null,
+  fileWwc: over.fileWwc ?? null,
   step: 'PE 1',
   role: 'Corrector',
   eligible: true,
@@ -657,6 +658,7 @@ describe('XtmPollCycle crash recovery (review #1/#2)', () => {
 const SCHED_FIELDS = {
   ACCEPT_SCHEDULE_ENABLED: true,
   ACCEPT_MAX_WORDS_PER_DAY: 1000,
+  ACCEPT_EFFORT_METRIC: 'words' as const,
   hoursStartMin: 9 * 60,
   hoursEndMin: 18 * 60,
   workdays: new Set([1, 2, 3, 4, 5]),
