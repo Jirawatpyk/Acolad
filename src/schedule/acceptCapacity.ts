@@ -8,7 +8,7 @@ export type GroupCapacityVerdict =
   | { accept: false; kind: 'budget_reached'; reason: string; capExhaustedDay: string };
 
 /** Decide a whole bulk group all-or-nothing, bucketed by deadline day. `bucketFor(d)` =
- *  words already due on day d (held + this cycle's optimistic advances).
+ *  effort already due on day d (under the active metric; held + this cycle's optimistic advances).
  *  PRECONDITION: `bucketFor` returns a NON-NEGATIVE count (a negative bucket would
  *  understate per-day load and let an over-cap group slip through).
  *

@@ -109,12 +109,12 @@ export interface XtmCycleSummary {
   }[];
   /**
    * §9 audit trail for the held-read → over-accept residual risk (deadline-bucketed capacity).
-   * One entry per deadline day an accepted group advanced this cycle, carrying `wordsDueOn(day)`
-   * — the RESULTING held + optimistically-advanced bucket the accept decision was based on. The
-   * loop logs this array of {day, resultingBucketEffort} entries so a bucket that dropped then
-   * over-filled (e.g. a transient grid 0-read mis-disappearing a held job; cf. the late-XHR bug)
-   * leaves an auditable trail. The cycle stays logger-free (like acceptLatencies/scheduleRejects).
-   * Empty on every non-accepting / disabled / early path.
+   * One entry per deadline day an accepted group advanced this cycle, carrying `dueBuckets.get(day)`
+   * — the RESULTING per-deadline-day effort bucket the accept decision was based on (held + this
+   * cycle's optimistic advances). The loop logs this array of {day, resultingBucketEffort} entries
+   * so a bucket that dropped then over-filled (e.g. a transient grid 0-read mis-disappearing a
+   * held job; cf. the late-XHR bug) leaves an auditable trail. The cycle stays logger-free (like
+   * acceptLatencies/scheduleRejects). Empty on every non-accepting / disabled / early path.
    */
   acceptedDueDays: AcceptedDueDay[];
   /**

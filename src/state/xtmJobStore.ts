@@ -52,7 +52,7 @@ export class XtmJobStore {
     return rows.map(rowToState);
   }
 
-  /** Σ words of held (lifecycle 'accepted') jobs grouped by the day a `dayOf` mapper assigns each
+  /** Σ effort of held (lifecycle 'accepted') jobs grouped by the day a `dayOf` mapper assigns each
    *  deadline to. The cycle injects an EFFECTIVE-deadline-day mapper (the working day the work
    *  lands on) so the bucket key matches feasibility; the default is the raw Bangkok deadline date
    *  (`deadlineDayOf`) so the store stays usable standalone (ops/tests) without a work calendar.

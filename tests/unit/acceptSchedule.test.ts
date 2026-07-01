@@ -124,7 +124,7 @@ describe('evaluateAcceptSchedule', () => {
   it('words=0 → allow (deliverable instantly)', () => {
     expect(evaluateAcceptSchedule(base({ effort: 0 })).allow).toBe(true);
   });
-  it('throughputWordsPerHour=0 with words>0 → block with "throughput not configured" reason', () => {
+  it('throughputPerHour=0 with effort>0 → block with "throughput not configured" reason', () => {
     // Guard: a caller passing 0 throughput with words>0 would yield Infinity hours required,
     // which should block with a clear reason rather than a confusing NaN/Infinity in the output.
     const v = evaluateAcceptSchedule(base({ throughputPerHour: 0, effort: 300 }));
