@@ -353,6 +353,46 @@ describe('XtmPollLoop — daily report', () => {
     expect(rows).toHaveLength(0); // nothing enqueued before 09:00
   });
 
+  it('wwc-mode: daily-report payload labels effort as "WWC" when ACCEPT_EFFORT_METRIC=wwc', async () => {
+    fresh();
+    // Seed a job with fileWwc=120, due today (25 Jun 2026 Bangkok) so it lands in the
+    // "Due today" bucket. The loop must thread metric='wwc' to buildDailyReportCard so
+    // the output contains "120 WWC" (effortOf in wwc mode = fileWwc), not "120 words".
+    seedAcceptedJob(db, {
+      jobKey: 'J-WWC',
+      dueDate: '2026-06-25T15:00:00+07:00',
+      words: 500,
+      fileWwc: 120,
+    });
+
+    const clockAt10 = { nowMs: () => BKK_10_00, nowIso: () => new Date(BKK_10_00).toISOString() };
+    const client = new StubClient();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({
+        XTM_ACOLAD_OFFERS_URL: 'https://xtm.example.com',
+        ACCEPT_EFFORT_METRIC: 'wwc',
+        unit: { adj: 'WWC', noun: 'WWC' },
+        activeMaxPerDay: 1000,
+      } as Partial<AppConfig>),
+      noopLogger,
+      clockAt10,
+      { chatSender: okChat, sheetSender: new CapturingSheet(), heartbeat },
+    );
+
+    await loop.runOnce();
+
+    const rows = db
+      .prepare("SELECT * FROM outbox WHERE event_id = 'daily:2026-06-25' AND channel = 'team'")
+      .all() as { payload_json: string }[];
+    expect(rows).toHaveLength(1);
+    // Loop must thread metric='wwc' to buildDailyReportCard → effort = fileWwc=120, noun="WWC".
+    expect(rows[0]!.payload_json).toContain('120 WWC');
+    expect(rows[0]!.payload_json).not.toContain('500 words');
+  });
+
   it('a daily-report build throw does not page (no heartbeat.fail) and does not advance lastDailyReportDate', async () => {
     fresh();
     // 10:00 Bangkok on a working day (Thu 25 Jun 2026) → dueDailyReport true.

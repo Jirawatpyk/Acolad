@@ -237,6 +237,19 @@ describe('ACCEPT_EFFORT_METRIC config', () => {
     });
     expect(c.throughputPerHour).toBeCloseTo(100, 5); // 900/9, NOT 50
   });
+
+  it('D-new: explicit ACCEPT_THROUGHPUT_WWC_PER_HOUR overrides derived throughput in wwc mode', () => {
+    // Mirrors D7: the WWC explicit override must win over the cap-derived value (900/9≈100).
+    // Without this pin the override path could silently revert to derived — a capacity
+    // regression that over-accepts past the intended 50/h limit.
+    const c = loadConfig({
+      ...base,
+      ACCEPT_EFFORT_METRIC: 'wwc',
+      ACCEPT_MAX_WWC_PER_DAY: '900',
+      ACCEPT_THROUGHPUT_WWC_PER_HOUR: '50',
+    });
+    expect(c.throughputPerHour).toBe(50); // explicit override wins, NOT 900/9 ≈ 100
+  });
   it('explicit-0 WWC cap fails fast even with an override set', () => {
     expect(() =>
       loadConfig({

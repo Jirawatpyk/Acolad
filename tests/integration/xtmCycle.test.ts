@@ -1866,6 +1866,27 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(r.effort).toBe(861); // words mode: effort === words
     expect(r.metric).toBe('words');
   });
+
+  it('D9-wwc telemetry: a wwc-mode reject carries fileWwc as effort (not raw words)', async () => {
+    fresh();
+    // Tight deadline Mon 11:30 = 90 working minutes from MON_10 (10:00).
+    // wwc=169, throughput=1000/9≈111/h: need ceil(169/111*60)=92 min > 90 → feasibility REJECTED.
+    // Pins: effort in scheduleRejects must be fileWwc=169, NOT raw words=861.
+    const summary = await new XtmPollCycle(
+      db,
+      schedCfg({
+        ACCEPT_EFFORT_METRIC: 'wwc',
+        ACCEPT_MAX_WWC_PER_DAY: 1000,
+        activeMaxPerDay: 1000,
+        unit: { adj: 'WWC', noun: 'WWC' },
+      } as Partial<AppConfig>),
+      new StubAcceptor(),
+    ).run(snapAt([xraw({ words: 861, fileWwc: 169, dueDate: '2026-06-22T11:30:00+07:00' })], MON_10));
+    const r = summary.scheduleRejects[0]!;
+    expect(r.words).toBe(861);
+    expect(r.effort).toBe(169); // wwc mode: effort = fileWwc, NOT raw words
+    expect(r.metric).toBe('wwc');
+  });
 });
 
 describe('XtmPollCycle field-change re-sync / Bug B (sheet:fieldsync)', () => {
