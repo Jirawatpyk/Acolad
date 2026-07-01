@@ -271,6 +271,10 @@ export class XtmPollCycle {
           `${heldNoDeadline.length} accepted job(s) have no parseable deadline — the per-deadline-day capacity may under-count; accept same-day jobs manually / fix the due date`,
           {},
           `held_job_no_deadline:${bangkokDateString(detectedMs)}`,
+          this.cfg.unit,
+          this.cfg.ACCEPT_EFFORT_METRIC === 'wwc'
+            ? 'ACCEPT_MAX_WWC_PER_DAY'
+            : 'ACCEPT_MAX_WORDS_PER_DAY',
         );
       }
     }
@@ -464,6 +468,10 @@ export class XtmPollCycle {
               `the ${cap}-${this.cfg.unit.adj} daily cap is reached for ${capExhaustedDay}`,
               {},
               `daily_cap_reached:${capExhaustedDay}`,
+              this.cfg.unit,
+              this.cfg.ACCEPT_EFFORT_METRIC === 'wwc'
+                ? 'ACCEPT_MAX_WWC_PER_DAY'
+                : 'ACCEPT_MAX_WORDS_PER_DAY',
             );
           }
         }
