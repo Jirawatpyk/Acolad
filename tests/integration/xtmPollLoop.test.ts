@@ -815,7 +815,6 @@ describe('XtmPollLoop — holiday_calendar_stale pages on-call (C1)', () => {
     hoursStartMin: 9 * 60,
     hoursEndMin: 18 * 60,
     workdays: new Set([1, 2, 3, 4, 5]),
-    throughputWordsPerHour: 1000 / 9,
   };
   // The gate keys its Bangkok-year check off snapshot.capturedAt; the loop clock (NOW, 2026)
   // only drives daily-report/heartbeat timing — kept at 2026 so the daily report path is
@@ -887,7 +886,6 @@ describe('XtmPollLoop — schedule-gate reject logging (I1)', () => {
     hoursStartMin: 9 * 60,
     hoursEndMin: 18 * 60,
     workdays: new Set([1, 2, 3, 4, 5]),
-    throughputWordsPerHour: 1000 / 9,
   };
 
   it('logs one warn line per reject with the binding reason/words/dueDate', async () => {

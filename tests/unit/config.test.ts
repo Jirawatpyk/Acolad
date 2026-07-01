@@ -162,7 +162,7 @@ describe('ACCEPT_SCHEDULE config', () => {
     expect(c.hoursStartMin).toBe(540);
     expect(c.hoursEndMin).toBe(1080);
     expect([...c.workdays]).toEqual([1, 2, 3, 4, 5]);
-    expect(c.throughputWordsPerHour).toBeCloseTo(1000 / 9, 5);
+    expect(c.throughputPerHour).toBeCloseTo(1000 / 9, 5);
   });
 
   it("kill-switch '0' disables", () => {
@@ -171,15 +171,16 @@ describe('ACCEPT_SCHEDULE config', () => {
     );
   });
 
-  it('empty throughput → derived (not 0)', () => {
+  it('empty throughput → derived from cap (not 0)', () => {
+    // words mode: empty ACCEPT_THROUGHPUT_WORDS_PER_HOUR → derived from cap (1000/9h)
     expect(
-      loadConfig({ ...base, ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '' }).throughputWordsPerHour,
+      loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'words', ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '' }).throughputPerHour,
     ).toBeCloseTo(1000 / 9, 5);
   });
 
-  it('explicit throughput override wins', () => {
+  it('explicit throughput override wins over derived (words mode)', () => {
     expect(
-      loadConfig({ ...base, ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '100' }).throughputWordsPerHour,
+      loadConfig({ ...base, ACCEPT_EFFORT_METRIC: 'words', ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '100' }).throughputPerHour,
     ).toBe(100);
   });
 
@@ -245,6 +246,28 @@ describe('ACCEPT_EFFORT_METRIC config', () => {
         ACCEPT_THROUGHPUT_WWC_PER_HOUR: '111',
       }),
     ).toThrow();
+  });
+
+  it('I-2 dynamic path: words mode + cap 0 + explicit throughput → error names ACCEPT_MAX_WORDS_PER_DAY (not WWC)', () => {
+    // When ACCEPT_EFFORT_METRIC=words and ACCEPT_MAX_WORDS_PER_DAY=0, the superRefine must
+    // name ACCEPT_MAX_WORDS_PER_DAY in the error path, not ACCEPT_MAX_WWC_PER_DAY. An operator
+    // in words mode seeing the wrong var name would fix the wrong knob → prolonged outage.
+    const err = (() => {
+      try {
+        loadConfig({
+          ...base,
+          ACCEPT_EFFORT_METRIC: 'words',
+          ACCEPT_MAX_WORDS_PER_DAY: '0',
+          ACCEPT_THROUGHPUT_WORDS_PER_HOUR: '111',
+        });
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    })();
+    expect(err).not.toBeNull();
+    expect(err).toContain('ACCEPT_MAX_WORDS_PER_DAY');
+    expect(err).not.toContain('ACCEPT_MAX_WWC_PER_DAY');
   });
   it('kill-switch escape: schedule disabled + wwc + cap 0 does NOT throw', () => {
     expect(() =>

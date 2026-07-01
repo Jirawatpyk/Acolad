@@ -136,18 +136,8 @@ const schema = z
     // ReadonlySet: consumers only `.has()` it; typing it read-only stops a caller from
     // mutating the shared derived config (Set is assignable to ReadonlySet).
     const workdays: ReadonlySet<number> = parseWorkdays(c.ACCEPT_WORKDAYS);
-    const throughputWordsPerHour = resolveThroughput({
-      // exactOptionalPropertyTypes: only include 'explicit' when it has a number value
-      ...(c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR !== undefined
-        ? { explicit: c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR }
-        : {}),
-      maxWordsPerDay: c.ACCEPT_MAX_WORDS_PER_DAY,
-      hoursStartMin,
-      hoursEndMin,
-    });
     const activeMaxPerDay =
-      (c.ACCEPT_EFFORT_METRIC === 'wwc' ? c.ACCEPT_MAX_WWC_PER_DAY : c.ACCEPT_MAX_WORDS_PER_DAY) ??
-      0;
+      c.ACCEPT_EFFORT_METRIC === 'wwc' ? c.ACCEPT_MAX_WWC_PER_DAY : c.ACCEPT_MAX_WORDS_PER_DAY;
     const activeOverride =
       c.ACCEPT_EFFORT_METRIC === 'wwc'
         ? c.ACCEPT_THROUGHPUT_WWC_PER_HOUR
@@ -167,7 +157,6 @@ const schema = z
       hoursStartMin,
       hoursEndMin,
       workdays,
-      throughputWordsPerHour,
       activeMaxPerDay,
       throughputPerHour,
       unit,
@@ -190,6 +179,7 @@ const schema = z
   .refine(
     (c) =>
       !c.ACCEPT_SCHEDULE_ENABLED ||
+      // wwc: words-params inactive; throughput validated by the active-cap refines below
       c.ACCEPT_EFFORT_METRIC === 'wwc' ||
       c.ACCEPT_THROUGHPUT_WORDS_PER_HOUR !== undefined ||
       c.ACCEPT_MAX_WORDS_PER_DAY > 0,
@@ -202,12 +192,21 @@ const schema = z
   // Capacity cap must be positive when the gate is on — an override must NOT except it, so this is
   // a SEPARATE refine from throughput-resolvability. Both gate behind ACCEPT_SCHEDULE_ENABLED so the
   // kill-switch always lets an operator disable without fixing unrelated values.
-  .refine((c) => !c.ACCEPT_SCHEDULE_ENABLED || c.activeMaxPerDay > 0, {
-    path: ['ACCEPT_MAX_WWC_PER_DAY'],
-    message:
-      'the active daily cap (ACCEPT_MAX_WWC_PER_DAY in wwc mode / ACCEPT_MAX_WORDS_PER_DAY in words mode) must be > 0',
+  // I-2: superRefine so the error path names the ACTIVE metric's var (ACCEPT_MAX_WWC_PER_DAY in
+  // wwc mode, ACCEPT_MAX_WORDS_PER_DAY in words mode) — an operator in words mode seeing the wrong
+  // var name would fix the wrong knob → prolonged outage.
+  .superRefine((c, ctx) => {
+    if (c.ACCEPT_SCHEDULE_ENABLED && c.activeMaxPerDay <= 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [
+          c.ACCEPT_EFFORT_METRIC === 'wwc' ? 'ACCEPT_MAX_WWC_PER_DAY' : 'ACCEPT_MAX_WORDS_PER_DAY',
+        ],
+        message: 'the active daily cap must be > 0 when the schedule gate is on',
+      });
+    }
   })
-  .refine((c) => !c.ACCEPT_SCHEDULE_ENABLED || (c.throughputPerHour ?? 0) > 0, {
+  .refine((c) => !c.ACCEPT_SCHEDULE_ENABLED || c.throughputPerHour > 0, {
     path: ['ACCEPT_THROUGHPUT_WWC_PER_HOUR'],
     message: 'throughput must be resolvable to > 0 for the active metric',
   });

@@ -662,7 +662,6 @@ const SCHED_FIELDS = {
   hoursStartMin: 9 * 60,
   hoursEndMin: 18 * 60,
   workdays: new Set([1, 2, 3, 4, 5]),
-  throughputWordsPerHour: 1000 / 9,
   // Task 6: derived active-metric fields (mirrors what loadConfig.transform computes in
   // production; must be supplied explicitly here since cfg() is a bare cast, not a transform).
   activeMaxPerDay: 1000,
