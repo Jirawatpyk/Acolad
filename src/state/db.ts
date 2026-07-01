@@ -321,6 +321,20 @@ function backfillProjectQualifiedKey(db: DB): void {
     db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('job_key_backfill_v2', '1')").run();
   } catch (err) {
     // The enclosing migrate() transaction rolls back the partial re-keys before this propagates.
+    // Genuine FILE corruption / IO surfacing during the jobs read or update is NOT a migration
+    // logic error — it must still reach openDatabase's quarantine path (FR-017), so let those SQLite
+    // codes propagate RAW. Only a non-corruption throw (a PK collision from an already-occupied
+    // target key, or a bug in computeXtmJobKey) is a true logic error worth crashing loud while
+    // preserving the db.
+    const code = (err as { code?: string }).code ?? '';
+    if (
+      code === 'SQLITE_CORRUPT' ||
+      code === 'SQLITE_NOTADB' ||
+      code === 'SQLITE_CANTOPEN' ||
+      code.startsWith('SQLITE_IOERR')
+    ) {
+      throw err; // → openDatabase quarantines + starts fresh (FR-017 recovery)
+    }
     throw new MigrationError(
       `backfillProjectQualifiedKey failed after ${reKeyCount} re-key(s); the db is NOT corrupt — this is a migration logic error`,
       { cause: err },
