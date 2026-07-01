@@ -1,5 +1,5 @@
 export interface CapacityMember {
-  words: number;
+  effort: number;
   deadlineDate: string;
 }
 export type GroupCapacityVerdict =
@@ -25,7 +25,7 @@ export function decideGroupCapacity(
 ): GroupCapacityVerdict {
   const subtotalsByDay = new Map<string, number>();
   for (const mem of members)
-    subtotalsByDay.set(mem.deadlineDate, (subtotalsByDay.get(mem.deadlineDate) ?? 0) + mem.words);
+    subtotalsByDay.set(mem.deadlineDate, (subtotalsByDay.get(mem.deadlineDate) ?? 0) + mem.effort);
 
   if (cap > 0) {
     // Days in ascending deadline-date order so the named day is the EARLIEST relevant one

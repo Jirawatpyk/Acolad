@@ -69,7 +69,7 @@ export class XtmJobStore {
    *  trail (`summary.acceptedDueDays`, which only records days a NEW group advanced).
    *  `heldJobsMissingDeadline()` exposes exactly which held jobs were skipped so the cycle can
    *  FAIL LOUD (I1: a deduped warn alert) instead of silently dropping them. */
-  wordsDueByDeadline(
+  effortDueByDeadline(
     dayOf: (dueDate: string | null) => string | null = deadlineDayOf,
   ): ReadonlyMap<string, number> {
     const out = new Map<string, number>();
@@ -82,8 +82,8 @@ export class XtmJobStore {
   }
 
   /** Job keys of held (lifecycle 'accepted') jobs whose `dayOf` bucket key is null — exactly the
-   *  jobs `wordsDueByDeadline(dayOf)` skips (they contribute NOTHING to the per-deadline-day
-   *  capacity seed). PARTNERS with `wordsDueByDeadline`: a job is classified "missing-deadline"
+   *  jobs `effortDueByDeadline(dayOf)` skips (they contribute NOTHING to the per-deadline-day
+   *  capacity seed). PARTNERS with `effortDueByDeadline`: a job is classified "missing-deadline"
    *  iff `dayOf` returns null, so they can never disagree about which held jobs were dropped — the
    *  cycle MUST pass the SAME mapper to both. Default `deadlineDayOf` (raw date) keeps the store
    *  usable standalone (ops/tests). Normally empty (see the F1 invariant above); a non-empty result

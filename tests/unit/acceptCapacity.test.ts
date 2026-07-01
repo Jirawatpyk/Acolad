@@ -2,7 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { decideGroupCapacity, type CapacityMember } from '../../src/schedule/acceptCapacity.js';
 
 // T2: CapacityMember has no jobKey (decideGroupCapacity never reads it).
-const m = (words: number, deadlineDate: string): CapacityMember => ({ words, deadlineDate });
+const m = (words: number, deadlineDate: string): CapacityMember => ({
+  effort: words,
+  deadlineDate,
+});
 const empty = () => 0;
 
 describe('decideGroupCapacity', () => {

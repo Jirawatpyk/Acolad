@@ -84,7 +84,7 @@ afterEach(() => {
 });
 
 // Held-job seed + lifecycle helpers for the deadline-day capacity tests (Task 6). A held
-// job (lifecycle 'accepted') is what wordsDueByDeadline() buckets; finishJob moves it out
+// job (lifecycle 'accepted') is what effortDueByDeadline() buckets; finishJob moves it out
 // of 'accepted' (freeing its deadline-day quota); acceptedKeys/jobKeyFor read the result.
 const accepted = (over: {
   jobKey: string;
@@ -709,7 +709,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     // The held list (the single source of truth for capacity) now carries the accepted
     // job's words under its DEADLINE day — not a meta accept-day counter.
     expect(
-      new XtmJobStore(db).wordsDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
+      new XtmJobStore(db).effortDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
     ).toBe(100);
   });
 
@@ -729,7 +729,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(sheetRows().at(-1)?.note).toContain('cannot finish in time'); // reason surfaced
     expect(chatHasTitle('🆕')).toBe(true); // rendered as a new-job card
     expect(chatText()).toContain('Rejected —'); // reason threaded into Chat (I3)
-    expect(new XtmJobStore(db).wordsDueByDeadline().size).toBe(0); // nothing held → no bucket
+    expect(new XtmJobStore(db).effortDueByDeadline().size).toBe(0); // nothing held → no bucket
   });
 
   it('B#2/B#6: a gate-Rejected job that later becomes feasible but FAILS to accept shows Accept failed, not stale Rejected', async () => {
@@ -851,7 +851,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
       ),
     ).rejects.toThrow();
     // The record txn rolled back → job A's 'accepted' write was undone, so nothing is held.
-    expect(new XtmJobStore(db).wordsDueByDeadline().size).toBe(0);
+    expect(new XtmJobStore(db).effortDueByDeadline().size).toBe(0);
   });
 
   it('I3a: a single group whose OWN words exceed the daily cap → "exceed" message (accept manually)', async () => {
@@ -1065,7 +1065,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(acc.calls.flat()).toHaveLength(0); // group rejected as a unit (combined > cap)
     const states = [...new XtmJobStore(db).loadAll().values()];
     expect(states.every((s) => s.lifecycleStatus === 'rejected')).toBe(true);
-    expect(new XtmJobStore(db).wordsDueByDeadline().size).toBe(0); // nothing accepted → no held words
+    expect(new XtmJobStore(db).effortDueByDeadline().size).toBe(0); // nothing accepted → no held words
   });
 
   it('capacity: a group whose combined words would exceed the remaining deadline-day cap is rejected', async () => {
@@ -1079,7 +1079,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(acc.calls.flat()).toHaveLength(0);
     expect(only('a.docx').lifecycleStatus).toBe('rejected');
     expect(
-      new XtmJobStore(db).wordsDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
+      new XtmJobStore(db).effortDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
     ).toBe(950); // unchanged — the rejected job is not held
   });
 
@@ -1093,7 +1093,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(acc.calls.flat()).toHaveLength(1);
     expect(only('a.docx').lifecycleStatus).toBe('accepted');
     expect(
-      new XtmJobStore(db).wordsDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
+      new XtmJobStore(db).effortDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
     ).toBe(1000); // 950 held + 50 newly accepted, both due Wed
   });
 
@@ -1523,7 +1523,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     // 800 + 800 = 1600 > the 1000 cap, but each DEADLINE day holds only 800 → both accepted
     // (the old per-accept-day cap would have rejected the pair).
     expect(acc.calls.flat()).toHaveLength(2);
-    const m = new XtmJobStore(db).wordsDueByDeadline();
+    const m = new XtmJobStore(db).effortDueByDeadline();
     expect(m.get(bangkokDateString(Date.parse(dueTue18)))).toBe(800);
     expect(m.get(bangkokDateString(Date.parse(dueWed18)))).toBe(800);
   });
@@ -1659,7 +1659,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(only('a.docx').lifecycleStatus).toBe('accepted');
     // The audit entry records the resulting Wed bucket the accept decision used (held + advance).
     expect(summary.acceptedDueDays).toEqual([
-      { day: bangkokDateString(Date.parse(dueWed18)), resultingBucketWords: 300 },
+      { day: bangkokDateString(Date.parse(dueWed18)), resultingBucketEffort: 300 },
     ]);
   });
 

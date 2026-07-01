@@ -699,7 +699,12 @@ describe('acceptEligibleTasks — rowForTarget includes project cell in row filt
     await page.setContent(
       xtmActivePage(
         [
-          xtmMenuRow('emailA', 'finish', { project: 'EMAIL_1', file: FILE, step: STEP, role: ROLE }),
+          xtmMenuRow('emailA', 'finish', {
+            project: 'EMAIL_1',
+            file: FILE,
+            step: STEP,
+            role: ROLE,
+          }),
           xtmMenuRow('emailB', 'accept', { project: 'EMAIL', file: FILE, step: STEP, role: ROLE }),
         ],
         { total: 2 },
