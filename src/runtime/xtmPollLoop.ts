@@ -305,6 +305,16 @@ export class XtmPollLoop {
         );
       }
 
+      // A malformed lastSeenAt reached the Sheet-row build — the sticky-Rejected "(left Active …)"
+      // suffix was silently dropped. Unreachable in production, so a warn line makes the ops write /
+      // bug that produced it grep-able instead of an invisibly-degraded row.
+      for (const jobKey of summary.malformedLastSeen) {
+        this.logger.warn(
+          { module: 'xtmPollCycle', action: 'malformedLastSeen', jobKey },
+          'lastSeenAt did not parse — (left Active …) suffix omitted on the Sheet row',
+        );
+      }
+
       // ACCEPT_RECON (accept off): capture the live accept-menu DOM for the first
       // eligible job — hover only, NEVER accepts — while it is still in Active this
       // cycle (beats the < 1 min snatch window). Best-effort; a one-time Chat ping

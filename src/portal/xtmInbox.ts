@@ -1,11 +1,15 @@
 import type { Frame, Page } from 'playwright';
 import { z } from 'zod';
 import { XTM } from './selectors.js';
-import { LayoutChangedError, PortalTimeoutError, PaginationDetectedError } from './errors.js';
+import {
+  LayoutChangedError,
+  PortalTimeoutError,
+  PaginationDetectedError,
+  type GridDriftObservers,
+} from './errors.js';
 import { computeXtmJobKey } from '../detection/jobKey.js';
 import { BKK_OFFSET_MS } from '../schedule/bangkokCalendar.js';
 import type { XtmRawJob, XtmJobSnapshot } from '../detection/types.js';
-import type { Logger } from '../monitoring/logger.js';
 
 /**
  * Either a Page or a Frame works — production reads the Active grid inside
@@ -347,16 +351,6 @@ async function finalizeSnapshot(
   return { jobs, malformed, capturedAt, pollCycleId, emptyListConfirmed: false };
 }
 
-/** Optional observers for {@link readClosedKeys}, mirroring readActiveSnapshot's evidence
- * callback. Both are optional so the production caller (xtmClient) need not change to compile,
- * and the systematic-layout-drift signal is no-op until a logger/evidence sink is wired in. */
-export interface ReadClosedKeysObservers {
-  /** Structured logger for the layout-drift WARN (no-op when absent). */
-  logger?: Pick<Logger, 'warn'>;
-  /** Sanitized-evidence capture, same shape as readActiveSnapshot's `captureEvidence`. */
-  captureEvidence?: (reason: string) => Promise<string | undefined>;
-}
-
 /**
  * Read the job keys currently in the Closed tab (FR-014). Used only when an
  * accepted job disappears from Active, to tell Closed from Removed. Returns an
@@ -378,7 +372,7 @@ export interface ReadClosedKeysObservers {
  */
 export async function readClosedKeys(
   scope: GridScope,
-  observers: ReadClosedKeysObservers = {},
+  observers: GridDriftObservers = {},
 ): Promise<Set<string>> {
   await scope
     .locator(XTM.closed.gridContainer)

@@ -140,6 +140,9 @@ export function resolveSheetStatusAndNote(
   //  - B#2/B#6: lifecycle !== 'accept_failed' — a real accept FAILURE carrying a stale gate reason must
   //    surface as its true 'Accept failed' status, never be masked as a gate 'Rejected'. ('accept_failed'
   //    is also absent from TERMINAL_ABSENT, so it would have rendered a bare 'Rejected' with no suffix.)
+  //    Belt-and-suspenders: in the normal cycle path applyPresentDecision has already cleared
+  //    rejectReason to null before the accept is attempted, so a manually-constructed Pick (a test /
+  //    future caller) is the only way rejectReason is still set when lifecycle is 'accept_failed'.
   // Any other lifecycle (rejected/skipped/new/missing/closed/removed) with a real reason is sticky-Rejected.
   if (
     state.rejectReason != null &&

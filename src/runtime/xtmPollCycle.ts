@@ -112,6 +112,13 @@ export interface XtmCycleSummary {
    * Empty on every non-accepting / disabled / early path.
    */
   acceptedDueDays: AcceptedDueDay[];
+  /**
+   * Job keys whose `lastSeenAt` did not parse to a finite ms when building the Sheet row — so the
+   * sticky-Rejected "(left Active …)" suffix was silently omitted. In production `lastSeenAt` is
+   * always a valid ISO string (clock.nowIso), so this is empty; a non-empty array means a malformed
+   * timestamp reached the DB (a bug/ops write) and the loop logs it. Cycle stays logger-free.
+   */
+  malformedLastSeen: string[];
 }
 
 /**
@@ -202,6 +209,7 @@ export class XtmPollCycle {
       holidayCalendarStale: false,
       scheduleRejects: [],
       acceptedDueDays: [],
+      malformedLastSeen: [],
     };
     const detectedMs = Date.parse(snapshot.capturedAt);
     const currentYear = bangkokYear(detectedMs);
@@ -602,7 +610,7 @@ export class XtmPollCycle {
       }
       this.outbox.enqueue(
         `sheet:${base}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, note) }),
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, note, summary) }),
         snapshot.capturedAt,
         'sheets',
       );
@@ -688,7 +696,7 @@ export class XtmPollCycle {
       // 'accepted' and was reported above, skipped here).
       this.outbox.enqueue(
         `sheet:fieldsync:${dc.jobKey}|${snapshot.pollCycleId}`,
-        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, null) }),
+        JSON.stringify({ op: 'upsert', row: this.toSheetRow(s, null, summary) }),
         snapshot.capturedAt,
         'sheets',
       );
@@ -795,10 +803,15 @@ export class XtmPollCycle {
    * the job's own `lastSeenAt` (Finding #9) — the last cycle it was present, NOT the cycle's
    * missing-detection time — so no per-job parse of the snapshot capturedAt is needed (#14).
    */
-  private toSheetRow(s: XtmJobState, note: string | null): SheetRow {
+  private toSheetRow(s: XtmJobState, note: string | null, summary?: XtmCycleSummary): SheetRow {
+    const lastSeenAtMs = Date.parse(s.lastSeenAt);
+    // Observability for the otherwise-silent NaN degradation: an unparseable lastSeenAt drops the
+    // sticky-Rejected "(left Active …)" suffix. Unreachable in production (clock.nowIso), so record
+    // it for the loop to log rather than crash the row build.
+    if (summary && !Number.isFinite(lastSeenAtMs)) summary.malformedLastSeen.push(s.jobKey);
     const { status, note: resolvedNote } = resolveSheetStatusAndNote(s, {
       note,
-      lastSeenAtMs: Date.parse(s.lastSeenAt),
+      lastSeenAtMs,
     });
     return {
       jobKey: s.jobKey,

@@ -1,3 +1,5 @@
+import type { Logger } from '../monitoring/logger.js';
+
 /** Base class for all portal interaction failures (contracts/portal-adapter.md). */
 export abstract class PortalError extends Error {
   abstract readonly kind: string;
@@ -102,3 +104,14 @@ export type AcceptResult =
   | { jobKey: string; outcome: 'accepted'; at: string; clickedAt?: string }
   | { jobKey: string; outcome: 'missing' } // snatched / no longer acceptable
   | { jobKey: string; outcome: 'failed'; reason: string }; // success not confirmable
+
+/**
+ * Optional diagnostic sinks for a portal grid read: a soft drift WARN + sanitized evidence capture,
+ * WITHOUT throwing. Shared by the Active accept re-read ({@link readAcceptAvailability}) and the
+ * Closed-grid read (readClosedKeys) — both surface a systematic-mismatch signal this way. Optional
+ * so production callers compile unchanged and the signal is a no-op until a sink is wired in.
+ */
+export interface GridDriftObservers {
+  logger?: Pick<Logger, 'warn'>;
+  captureEvidence?: (reason: string) => Promise<string | undefined>;
+}
