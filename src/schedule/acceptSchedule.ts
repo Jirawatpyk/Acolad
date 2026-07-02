@@ -1,4 +1,5 @@
 import { bangkokCalendar, bangkokYear } from './bangkokCalendar.js';
+import { WORDS_UNIT, type EffortUnit } from './effort.js';
 import { isNonWorkingDay, workingMinutesBetween, type WorkCalendar } from './workingHours.js';
 
 export interface AcceptScheduleInput {
@@ -11,9 +12,9 @@ export interface AcceptScheduleInput {
   calendar: WorkCalendar;
   holidaysCuratedForSpan: boolean;
   /** Active metric unit — drives user-facing reason strings.
-   *  Defaults to `{ adj: 'word' }` (words mode) when omitted so all existing callers
+   *  Defaults to WORDS_UNIT (words mode) when omitted so all existing callers
    *  continue to emit the same byte-for-byte strings they do today. */
-  unit?: { adj: string };
+  unit?: Pick<EffortUnit, 'adj'>;
 }
 
 export type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: string };
@@ -21,7 +22,7 @@ export type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: st
 export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVerdict {
   if (!i.enabled) return { allow: true };
 
-  const unit = i.unit ?? { adj: 'word' };
+  const unit = i.unit ?? WORDS_UNIT;
   if (i.dueAtMs === null) return { allow: false, reason: 'deadline unknown' };
   if (i.effort === null) return { allow: false, reason: `${unit.adj} count unknown` };
   if (i.throughputPerHour <= 0)

@@ -1,5 +1,6 @@
 import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
+import { unitOf } from '../schedule/effort.js';
 import { parseHHMM, parseWorkdays, resolveThroughput } from '../schedule/parseSchedule.js';
 
 loadDotenv();
@@ -148,10 +149,7 @@ const schema = z
       hoursStartMin,
       hoursEndMin,
     });
-    const unit =
-      c.ACCEPT_EFFORT_METRIC === 'wwc'
-        ? { adj: 'WWC', noun: 'WWC' }
-        : { adj: 'word', noun: 'words' };
+    const unit = unitOf(c.ACCEPT_EFFORT_METRIC);
     return {
       ...c,
       hoursStartMin,
