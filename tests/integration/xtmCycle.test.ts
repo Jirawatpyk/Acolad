@@ -1703,7 +1703,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(activeHeldNoEffortAlerts()).toBe(0);
   });
 
-  it('§9 audit trail: an accepted Malay job surfaces {day, wordsDueOn(day)} in summary.acceptedDueDays', async () => {
+  it('§9 audit trail: an accepted Malay job surfaces {day, resultingBucketEffort} in summary.acceptedDueDays', async () => {
     fresh();
     // Held seed 200 due Wed, then accept a 100w-due-Wed job → the resulting Wed bucket is 300.
     new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 200 })]);

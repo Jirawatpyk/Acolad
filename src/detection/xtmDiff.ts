@@ -12,8 +12,8 @@ import type {
 const numStr = (n: number | null): string | null => (n === null ? null : String(n));
 
 /**
- * A job is "held" once accepted — its words sit in the per-deadline-day capacity bucket
- * (`XtmJobStore.wordsDueByDeadline`, keyed off `lifecycle_status='accepted'`) until it
+ * A job is "held" once accepted — its effort sits in the per-deadline-day capacity bucket
+ * (`XtmJobStore.effortDueByDeadline`, keyed off `lifecycle_status='accepted'`) until it
  * finishes. acceptStatus and lifecycleStatus are written together, but check BOTH so the
  * lock holds regardless of which one the orchestration mutates first.
  */
@@ -34,9 +34,12 @@ const usableNum = (n: number | null): boolean => n != null && Number.isFinite(n)
  * (deadline extensions still apply). Non-held jobs are untouched (their cells are not load-
  * bearing for capacity, and they are re-evaluated by the gate every cycle anyway).
  *
- * `fileWwc` is a committed-display field like `words` (logged to the Sheet's File WWC column): a
- * held job's committed File WWC must survive a transient blank/unparseable re-read the same way —
- * `0` stays a real value, only null/NaN locks. It does NOT affect capacity (the cap uses `words`).
+ * `fileWwc` is a committed field like `words` (logged to the Sheet's File WWC column): a held
+ * job's committed File WWC must survive a transient blank/unparseable re-read the same way —
+ * `0` stays a real value, only null/NaN locks. In wwc mode (the live default) fileWwc is the
+ * PRIMARY effort input to feasibility+capacity via `effortOf` (fileWwc > 0 wins, else words),
+ * so a held job's committed File WWC is as load-bearing for the capacity bucket as `words`;
+ * in words mode it is display-only.
  */
 function lockedDisplayFields(
   existing: XtmJobState,
