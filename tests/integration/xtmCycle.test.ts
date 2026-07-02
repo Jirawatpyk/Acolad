@@ -667,6 +667,7 @@ const SCHED_FIELDS = {
   activeMaxPerDay: 1000,
   throughputPerHour: 1000 / 9,
   unit: { adj: 'word', noun: 'words' },
+  capVar: 'ACCEPT_MAX_WORDS_PER_DAY' as const,
 };
 const schedCfg = (over: Partial<AppConfig> = {}): AppConfig =>
   cfg({ ...SCHED_FIELDS, ...over } as Partial<AppConfig>);
@@ -1847,6 +1848,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
         ACCEPT_EFFORT_METRIC: 'wwc',
         ACCEPT_MAX_WWC_PER_DAY: 1000,
         unit: { adj: 'WWC', noun: 'WWC' },
+        capVar: 'ACCEPT_MAX_WWC_PER_DAY' as const,
       } as Partial<AppConfig>),
       acc,
     ).run(snapAt([xraw({ words: null, fileWwc: null, dueDate: dueWed18 })], MON_10));
@@ -1879,6 +1881,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
         ACCEPT_MAX_WWC_PER_DAY: 1000,
         activeMaxPerDay: 1000,
         unit: { adj: 'WWC', noun: 'WWC' },
+        capVar: 'ACCEPT_MAX_WWC_PER_DAY' as const,
       } as Partial<AppConfig>),
       new StubAcceptor(),
     ).run(

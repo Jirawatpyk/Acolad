@@ -222,6 +222,9 @@ describe('ACCEPT_EFFORT_METRIC config', () => {
     expect(c.activeMaxPerDay).toBe(900);
     expect(c.throughputPerHour).toBeCloseTo(900 / 9, 5);
     expect(c.unit).toEqual({ adj: 'WWC', noun: 'WWC' });
+    // C7: the active cap env-var NAME is derived once in the transform so every
+    // consumer (I-2 refine path, xtmPollCycle alerts) names the same knob.
+    expect(c.capVar).toBe('ACCEPT_MAX_WWC_PER_DAY');
   });
   it('metric=words → active cap = ACCEPT_MAX_WORDS_PER_DAY (byte-for-byte), unit words', () => {
     const c = loadConfig({
@@ -232,6 +235,7 @@ describe('ACCEPT_EFFORT_METRIC config', () => {
     expect(c.activeMaxPerDay).toBe(1000);
     expect(c.throughputPerHour).toBeCloseTo(1000 / 9, 5);
     expect(c.unit).toEqual({ adj: 'word', noun: 'words' });
+    expect(c.capVar).toBe('ACCEPT_MAX_WORDS_PER_DAY');
   });
   it('D7 override isolation: a WORDS override does not leak into wwc throughput', () => {
     const c = loadConfig({
@@ -286,6 +290,48 @@ describe('ACCEPT_EFFORT_METRIC config', () => {
     expect(err).not.toBeNull();
     expect(err).toContain('ACCEPT_MAX_WORDS_PER_DAY');
     expect(err).not.toContain('ACCEPT_MAX_WWC_PER_DAY');
+  });
+  it('C2 dynamic path: words mode + unresolvable throughput → error names ACCEPT_THROUGHPUT_WORDS_PER_HOUR (not WWC)', () => {
+    // Reversed hours make the derived throughput 0 (resolveThroughput's divisor guard)
+    // WITHOUT tripping the words cap-resolvability refine (cap keeps its default 1000),
+    // so the only throughput issue is the final "resolvable to > 0" one. Its path must
+    // name the ACTIVE metric's var — words mode seeing ACCEPT_THROUGHPUT_WWC_PER_HOUR
+    // sends the operator to the wrong knob (same class the I-2 superRefine prevents).
+    // Complements the reversed-hours test above, which only pins that loadConfig throws.
+    const err = (() => {
+      try {
+        loadConfig({
+          ...base,
+          ACCEPT_EFFORT_METRIC: 'words',
+          ACCEPT_HOURS_START: '18:00',
+          ACCEPT_HOURS_END: '09:00',
+        });
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    })();
+    expect(err).not.toBeNull();
+    expect(err).toContain('ACCEPT_THROUGHPUT_WORDS_PER_HOUR');
+    expect(err).not.toContain('ACCEPT_THROUGHPUT_WWC_PER_HOUR');
+  });
+  it('C2 dynamic path: wwc mode + unresolvable throughput → error names ACCEPT_THROUGHPUT_WWC_PER_HOUR (not WORDS)', () => {
+    const err = (() => {
+      try {
+        loadConfig({
+          ...base,
+          ACCEPT_EFFORT_METRIC: 'wwc',
+          ACCEPT_HOURS_START: '18:00',
+          ACCEPT_HOURS_END: '09:00',
+        });
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    })();
+    expect(err).not.toBeNull();
+    expect(err).toContain('ACCEPT_THROUGHPUT_WWC_PER_HOUR');
+    expect(err).not.toContain('ACCEPT_THROUGHPUT_WORDS_PER_HOUR');
   });
   it('kill-switch escape: schedule disabled + wwc + cap 0 does NOT throw', () => {
     expect(() =>

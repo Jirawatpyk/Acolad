@@ -150,6 +150,10 @@ const schema = z
       hoursEndMin,
     });
     const unit = unitOf(c.ACCEPT_EFFORT_METRIC);
+    // C7: the ACTIVE cap env-var NAME, derived once so every consumer (the I-2 refine
+    // path below, xtmPollCycle's alert calls) names the same knob — no per-site ternary.
+    const capVar: 'ACCEPT_MAX_WWC_PER_DAY' | 'ACCEPT_MAX_WORDS_PER_DAY' =
+      c.ACCEPT_EFFORT_METRIC === 'wwc' ? 'ACCEPT_MAX_WWC_PER_DAY' : 'ACCEPT_MAX_WORDS_PER_DAY';
     return {
       ...c,
       hoursStartMin,
@@ -158,6 +162,7 @@ const schema = z
       activeMaxPerDay,
       throughputPerHour,
       unit,
+      capVar,
     };
   })
   // Only enforce the window floor when yield is ENABLED — otherwise a stale/small window
@@ -197,16 +202,26 @@ const schema = z
     if (c.ACCEPT_SCHEDULE_ENABLED && c.activeMaxPerDay <= 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: [
-          c.ACCEPT_EFFORT_METRIC === 'wwc' ? 'ACCEPT_MAX_WWC_PER_DAY' : 'ACCEPT_MAX_WORDS_PER_DAY',
-        ],
+        path: [c.capVar],
         message: 'the active daily cap must be > 0 when the schedule gate is on',
       });
     }
   })
-  .refine((c) => !c.ACCEPT_SCHEDULE_ENABLED || c.throughputPerHour > 0, {
-    path: ['ACCEPT_THROUGHPUT_WWC_PER_HOUR'],
-    message: 'throughput must be resolvable to > 0 for the active metric',
+  // C2: superRefine (like I-2 above) so the error path names the ACTIVE metric's
+  // throughput var — a words-mode operator seeing ACCEPT_THROUGHPUT_WWC_PER_HOUR would
+  // fix the wrong knob. `!(x > 0)` (not `x <= 0`) so a NaN/undefined throughput also fails.
+  .superRefine((c, ctx) => {
+    if (c.ACCEPT_SCHEDULE_ENABLED && !(c.throughputPerHour > 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [
+          c.ACCEPT_EFFORT_METRIC === 'wwc'
+            ? 'ACCEPT_THROUGHPUT_WWC_PER_HOUR'
+            : 'ACCEPT_THROUGHPUT_WORDS_PER_HOUR',
+        ],
+        message: 'throughput must be resolvable to > 0 for the active metric',
+      });
+    }
   });
 
 export type AppConfig = z.infer<typeof schema>;
