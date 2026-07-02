@@ -965,6 +965,8 @@ describe('XtmPollLoop — schedule-gate reject logging (I1)', () => {
       reason: string;
       words: number | null;
       dueDate: string | null;
+      effort: number | null;
+      metric: string;
     };
     expect(meta.reason).toContain('cannot finish'); // the WHY, not just a count
     // C3: pin REAL hours math — 5000 words ÷ (1000/9 words/h) = need ~45h, have ~1h.
@@ -973,6 +975,10 @@ describe('XtmPollLoop — schedule-gate reject logging (I1)', () => {
     expect(meta.reason).toMatch(/need ~\d+(\.\d+)?h/);
     expect(meta.reason).not.toContain('NaN');
     expect(meta.words).toBe(5000);
+    // C4: the effort the gate actually decided on must be in the log line, not just the
+    // raw words — in words mode effort === words; metric names which knob was active.
+    expect(meta.effort).toBe(5000);
+    expect(meta.metric).toBe('words');
     expect(meta.dueDate).toBe(tightDue);
     expect(meta.jobKey.length).toBeGreaterThan(0);
   });

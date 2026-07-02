@@ -236,7 +236,7 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
 **runbook ของ gate:**
 
 - **"ทำไมบอทไม่กดงาน X":** เปิด Google Sheet → ดู Status `Rejected` + reason ในคอลัมน์
-  Note (และ pino log `module:scheduleGate action:reject` — มี jobKey/reason/words/dueDate) →
+  Note (และ pino log `module:scheduleGate action:reject` — มี jobKey/reason/words/effort/metric/dueDate) →
   ถ้าเหตุผลผิด (holiday ผิด / throughput ต่ำ / cap) แก้ config แล้ว `npm run deploy`.
   **หมายเหตุ cutoff:** งานที่ DL เวลาก่อน 09:00 (หรือ DL ตรงวันหยุด/เสาร์-อาทิตย์) ถูกชาร์จเข้า cap ของ
   **วันทำงานก่อนหน้า** (effective deadline day) → วันที่ในเหตุผล reject อาจไม่ตรงกับวัน DL ดิบ.
