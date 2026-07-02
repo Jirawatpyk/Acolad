@@ -230,12 +230,17 @@ export class XtmPollCycle {
       holidaysForEffectiveDay(detectedMs),
     );
     // Schedule-gate state. Capacity is bucketed by EFFECTIVE deadline day (held-derived), not
-    // accept day: seed the per-day buckets ONCE from the held list (lifecycle 'accepted')
+    // accept day: seed the per-day buckets ONCE from the held snapshot (lifecycle 'accepted')
     // BEFORE this cycle records any new 'accepted' row — otherwise a job accepted this cycle
     // would be counted both in the seed and the optimistic advance (design §3). When the
     // gate is disabled the kill-switch path seeds nothing. A null/unparseable deadline is
     // already skipped by effortDueByDeadline (no NaN key).
     const scheduleEnabled = this.cfg.ACCEPT_SCHEDULE_ENABLED;
+    // ONE shared held-list snapshot per cycle (C6): a single listByLifecycle('accepted') scan
+    // feeds the seed AND both missing-field detectors below, so the three can never disagree
+    // about the held set. Read here — the same pre-record point the seed needs (see above).
+    // The gate-off kill-switch path fetches nothing (it seeds an empty Map and skips the alerts).
+    const held = scheduleEnabled ? this.store.listByLifecycle('accepted') : [];
     // Running per-day buckets for THIS cycle: a shallow copy of the held seed (`new Map(...)` so
     // optimistic advances below mutate OUR map, never the store's read-only one), or empty when
     // the gate is off (the kill-switch enforces no cap).
@@ -244,6 +249,7 @@ export class XtmPollCycle {
           this.store.effortDueByDeadline(
             effDayOf,
             (s) => effortOf(s, this.cfg.ACCEPT_EFFORT_METRIC) ?? 0,
+            held,
           ),
         )
       : new Map<string, number>();
@@ -262,10 +268,11 @@ export class XtmPollCycle {
     // loadConfig's transform (C7) so alerts and the config refines name the same knob.
     const capVar = this.cfg.capVar;
     if (scheduleEnabled) {
-      // Pass the SAME effDayOf mapper the seed uses (F10): a held job is "missing-deadline" iff its
-      // bucket key is null, so the detector and the seed can never disagree about which jobs were
-      // dropped from the per-deadline-day capacity count.
-      const heldNoDeadline = this.store.heldJobsMissingDeadline(effDayOf);
+      // Pass the SAME effDayOf mapper the seed uses (F10) AND the SAME held snapshot (C6): a held
+      // job is "missing-deadline" iff its bucket key is null, so the detector and the seed can
+      // never disagree about which jobs were dropped from the per-deadline-day capacity count —
+      // nor about which jobs are held.
+      const heldNoDeadline = this.store.heldJobsMissingDeadline(effDayOf, held);
       if (heldNoDeadline.length > 0) {
         raiseAlert(
           this.db,
@@ -283,9 +290,11 @@ export class XtmPollCycle {
       // contributes NOTHING to its deadline-day bucket (effortDueByDeadline uses `?? 0` for
       // the seed; see the effortOf call there). This can under-count the cap → over-accept past
       // it on the irreversible bulk-claim path. Alert once per Bangkok day (deduped), same
-      // pattern as held_job_no_deadline. Only meaningful while the gate is ON.
-      const heldNoEffort = this.store.heldJobsMissingEffort((s) =>
-        effortOf(s, this.cfg.ACCEPT_EFFORT_METRIC),
+      // pattern as held_job_no_deadline. Only meaningful while the gate is ON. Same shared
+      // held snapshot as the seed (C6).
+      const heldNoEffort = this.store.heldJobsMissingEffort(
+        (s) => effortOf(s, this.cfg.ACCEPT_EFFORT_METRIC),
+        held,
       );
       if (heldNoEffort.length > 0) {
         raiseAlert(
