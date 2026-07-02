@@ -12,7 +12,7 @@ import { dash } from './cardText.js';
 import { bangkokCalendar, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { deadlineMsOf, deadlineDayOf } from '../schedule/deadlineDay.js';
 import { isNonWorkingDay } from '../schedule/workingHours.js';
-import { effortOf, type EffortMetric } from '../schedule/effort.js';
+import { effortOf, unitOf, type EffortMetric } from '../schedule/effort.js';
 import type { XtmJobState } from '../detection/types.js';
 
 // ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ export function buildDailyReportCard(
 ): { cardsV2: unknown[] } {
   const today = bangkokDateString(nowMs);
   // Derive the unit noun from the metric so callers need only pass `metric`.
-  const noun = metric === 'wwc' ? 'WWC' : 'words';
+  const noun = unitOf(metric).noun;
 
   // Returns the deadline as epoch ms, or +Infinity for null/unparseable (sorts last).
   // Canonical parse (F8) — same one the capacity gate + store bucket use.

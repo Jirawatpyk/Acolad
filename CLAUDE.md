@@ -222,11 +222,11 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
 - **capacity = held-derived per deadline day (PR #14; bucket by effective day PR #19):** cap =
   ≤`ACCEPT_MAX_WORDS_PER_DAY` คำที่ **effective deadline day ตรงวันเดียวกัน** (วันทำงานที่งานไปตกจริง —
   DL เวลาก่อน 09:00 ถูกชาร์จเข้า cap ของ**วันทำงานก่อนหน้า** ไม่ใช่วันที่ DL ดิบ; ดู `schedule/deadlineDay.ts`)
-  อ่านจาก held list (`XtmJobStore.wordsDueByDeadline()`) **ไม่ใช่วันกดรับ**
+  อ่านจาก held list (`XtmJobStore.effortDueByDeadline()`) **ไม่ใช่วันกดรับ**
   → **งาน finish คืนโควต้า** (source เดียว = held; ไม่มี meta word-counter แล้ว). ตัดสินด้วย pure
   helper `schedule/acceptCapacity.ts` (`decideGroupCapacity`, all-or-nothing per bulk-group **ครอบทั้ง
   feasibility + capacity** กัน owned-but-Rejected); seed จาก held ครั้งเดียว/รอบ **ก่อน** record
-  (memoize, advance per-DL-day). audit: `XtmCycleSummary.acceptedDueDays` log `wordsDueOn` ตอน accept
+  (memoize, advance per-DL-day). audit: `XtmCycleSummary.acceptedDueDays` log `resultingBucketEffort` ตอน accept
 - daily report 09:00 (`dailyReport.ts`) ส่ง **เฉพาะวันทำการ** (PR #8) — **`📋 Daily Report`:
   Due today (Σ คำ held ที่ **effective deadline day = วันนี้** — งานที่ DL เวลาก่อน 09:00 นับเข้า**วันทำงานก่อนหน้า**
   ไม่ใช่วันที่ปฏิทินดิบ; cutoff PR #19) / ⚠️ Overdue (instant `dueAtMs<now`) / In progress top-5 by
@@ -236,7 +236,7 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
 **runbook ของ gate:**
 
 - **"ทำไมบอทไม่กดงาน X":** เปิด Google Sheet → ดู Status `Rejected` + reason ในคอลัมน์
-  Note (และ pino log `module:scheduleGate action:reject` — มี jobKey/reason/words/dueDate) →
+  Note (และ pino log `module:scheduleGate action:reject` — มี jobKey/reason/words/effort/metric/dueDate) →
   ถ้าเหตุผลผิด (holiday ผิด / throughput ต่ำ / cap) แก้ config แล้ว `npm run deploy`.
   **หมายเหตุ cutoff:** งานที่ DL เวลาก่อน 09:00 (หรือ DL ตรงวันหยุด/เสาร์-อาทิตย์) ถูกชาร์จเข้า cap ของ
   **วันทำงานก่อนหน้า** (effective deadline day) → วันที่ในเหตุผล reject อาจไม่ตรงกับวัน DL ดิบ.

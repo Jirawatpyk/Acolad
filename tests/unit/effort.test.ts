@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { effortOf } from '../../src/schedule/effort.js';
+import { effortOf, unitOf, WORDS_UNIT, WWC_UNIT } from '../../src/schedule/effort.js';
 import type { XtmJobState } from '../../src/detection/types.js';
 
 const j = (
@@ -25,5 +25,20 @@ describe('effortOf', () => {
   });
   it('both null → null (feasibility "effort unknown" guard fires downstream)', () => {
     expect(effortOf(j(null, null), 'wwc')).toBeNull();
+  });
+});
+
+describe('unitOf / canonical unit constants (C8)', () => {
+  it('WORDS_UNIT is the canonical words-mode label shape', () => {
+    expect(WORDS_UNIT).toEqual({ adj: 'word', noun: 'words' });
+  });
+  it('WWC_UNIT is the canonical wwc-mode label shape', () => {
+    expect(WWC_UNIT).toEqual({ adj: 'WWC', noun: 'WWC' });
+  });
+  it("unitOf('words') returns WORDS_UNIT (the same instance, not a copy)", () => {
+    expect(unitOf('words')).toBe(WORDS_UNIT);
+  });
+  it("unitOf('wwc') returns WWC_UNIT (the same instance, not a copy)", () => {
+    expect(unitOf('wwc')).toBe(WWC_UNIT);
   });
 });

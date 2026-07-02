@@ -852,6 +852,7 @@ describe('XtmPollLoop — holiday_calendar_stale pages on-call (C1)', () => {
   const SCHED = {
     ACCEPT_SCHEDULE_ENABLED: true,
     ACCEPT_MAX_WORDS_PER_DAY: 1000,
+    throughputPerHour: 1000 / 9, // derived field (Task 9 loadConfig) — cap ÷ 9 working hours
     hoursStartMin: 9 * 60,
     hoursEndMin: 18 * 60,
     workdays: new Set([1, 2, 3, 4, 5]),
@@ -923,6 +924,7 @@ describe('XtmPollLoop — schedule-gate reject logging (I1)', () => {
     ACCEPT_ENABLED: true,
     ACCEPT_SCHEDULE_ENABLED: true,
     ACCEPT_MAX_WORDS_PER_DAY: 1000,
+    throughputPerHour: 1000 / 9, // derived field (Task 9 loadConfig) — cap ÷ 9 working hours
     hoursStartMin: 9 * 60,
     hoursEndMin: 18 * 60,
     workdays: new Set([1, 2, 3, 4, 5]),
@@ -963,9 +965,20 @@ describe('XtmPollLoop — schedule-gate reject logging (I1)', () => {
       reason: string;
       words: number | null;
       dueDate: string | null;
+      effort: number | null;
+      metric: string;
     };
     expect(meta.reason).toContain('cannot finish'); // the WHY, not just a count
+    // C3: pin REAL hours math — 5000 words ÷ (1000/9 words/h) = need ~45h, have ~1h.
+    // An undefined cfg.throughputPerHour yields "need ~NaNh" which still contains
+    // 'cannot finish', so the regex + NaN guard keep this test from greening on NaN.
+    expect(meta.reason).toMatch(/need ~\d+(\.\d+)?h/);
+    expect(meta.reason).not.toContain('NaN');
     expect(meta.words).toBe(5000);
+    // C4: the effort the gate actually decided on must be in the log line, not just the
+    // raw words — in words mode effort === words; metric names which knob was active.
+    expect(meta.effort).toBe(5000);
+    expect(meta.metric).toBe('words');
     expect(meta.dueDate).toBe(tightDue);
     expect(meta.jobKey.length).toBeGreaterThan(0);
   });

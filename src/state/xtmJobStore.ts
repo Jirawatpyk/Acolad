@@ -68,13 +68,19 @@ export class XtmJobStore {
    *  would silently under-count the bucket → risk over-accept; it is NOT covered by the §9 audit
    *  trail (`summary.acceptedDueDays`, which only records days a NEW group advanced).
    *  `heldJobsMissingDeadline()` exposes exactly which held jobs were skipped so the cycle can
-   *  FAIL LOUD (I1: a deduped warn alert) instead of silently dropping them. */
+   *  FAIL LOUD (I1: a deduped warn alert) instead of silently dropping them.
+   *
+   *  `held` is the held-job snapshot to bucket; the default (a fresh `listByLifecycle('accepted')`
+   *  scan) keeps the store usable standalone (ops/tests). The cycle passes ONE shared snapshot to
+   *  this and both PARTNER detectors (`heldJobsMissingDeadline`/`heldJobsMissingEffort`) so the
+   *  three can never disagree about the held set — and pay one SQL scan per cycle, not three (C6). */
   effortDueByDeadline(
     dayOf: (dueDate: string | null) => string | null = deadlineDayOf,
     effortOf: (s: XtmJobState) => number = (s) => s.words ?? 0,
+    held: readonly XtmJobState[] = this.listByLifecycle('accepted'),
   ): ReadonlyMap<string, number> {
     const out = new Map<string, number>();
-    for (const s of this.listByLifecycle('accepted')) {
+    for (const s of held) {
       const d = dayOf(s.dueDate); // null = null/unparseable deadline (skipped, surfaced by heldJobsMissingDeadline)
       if (d === null) continue;
       out.set(d, (out.get(d) ?? 0) + effortOf(s));
@@ -86,35 +92,41 @@ export class XtmJobStore {
    *  jobs `effortDueByDeadline(dayOf)` skips (they contribute NOTHING to the per-deadline-day
    *  capacity seed). PARTNERS with `effortDueByDeadline`: a job is classified "missing-deadline"
    *  iff `dayOf` returns null, so they can never disagree about which held jobs were dropped — the
-   *  cycle MUST pass the SAME mapper to both. Default `deadlineDayOf` (raw date) keeps the store
-   *  usable standalone (ops/tests). Normally empty (see the F1 invariant above); a non-empty result
-   *  is the over-accept anomaly the cycle alerts on (I1). Reads the same held list as the bucket so
-   *  the two can never disagree about which jobs are held. */
+   *  cycle MUST pass the SAME mapper AND the SAME `held` snapshot to both (one shared
+   *  `listByLifecycle('accepted')` read per cycle, C6) so the partners can never disagree about
+   *  which jobs are held either. Defaults (`deadlineDayOf`, fresh scan) keep the store usable
+   *  standalone (ops/tests). Normally empty (see the F1 invariant above); a non-empty result
+   *  is the over-accept anomaly the cycle alerts on (I1). */
   heldJobsMissingDeadline(
     dayOf: (dueDate: string | null) => string | null = deadlineDayOf,
+    held: readonly XtmJobState[] = this.listByLifecycle('accepted'),
   ): string[] {
     const out: string[] = [];
-    for (const s of this.listByLifecycle('accepted')) {
+    for (const s of held) {
       if (dayOf(s.dueDate) === null) out.push(s.jobKey);
     }
     return out;
   }
 
-  /** Held (lifecycle 'accepted') jobs whose `effortOf` returns null — exactly the jobs
-   *  `effortDueByDeadline(dayOf, effortOf)` credits with 0 effort instead of their real
+  /** Job keys of held (lifecycle 'accepted') jobs whose `effortOf` returns null — exactly the
+   *  jobs `effortDueByDeadline(dayOf, effortOf)` credits with 0 effort instead of their real
    *  count. PARTNERS with `effortDueByDeadline` and `heldJobsMissingDeadline`: a job is
    *  classified "missing-effort" iff `effortOf(s)` returns null. When the schedule gate is
    *  ON a null-effort held job under-counts the per-deadline-day capacity seed → a later
    *  same-day group could over-accept past the cap on the IRREVERSIBLE bulk path. The cycle
-   *  MUST call this (alongside heldJobsMissingDeadline) and raise a deduped warn alert.
-   *  Normally empty (gate-ON held jobs come through the feasibility check first, which
-   *  blocks null-effort jobs); a non-empty result is the anomaly to alert on (I-1). */
+   *  MUST call this (alongside heldJobsMissingDeadline) and raise a deduped warn alert, passing
+   *  the SAME `held` snapshot it seeded from (one shared `listByLifecycle('accepted')` read per
+   *  cycle, C6) so the three partners can never disagree about the held set; the default (fresh
+   *  scan) keeps the store usable standalone (ops/tests). Normally empty (gate-ON held jobs come
+   *  through the feasibility check first, which blocks null-effort jobs); a non-empty result is
+   *  the anomaly to alert on (I-1). */
   heldJobsMissingEffort(
     effortOf: (s: XtmJobState) => number | null,
-  ): XtmJobState[] {
-    const out: XtmJobState[] = [];
-    for (const s of this.listByLifecycle('accepted')) {
-      if (effortOf(s) === null) out.push(s);
+    held: readonly XtmJobState[] = this.listByLifecycle('accepted'),
+  ): string[] {
+    const out: string[] = [];
+    for (const s of held) {
+      if (effortOf(s) === null) out.push(s.jobKey);
     }
     return out;
   }

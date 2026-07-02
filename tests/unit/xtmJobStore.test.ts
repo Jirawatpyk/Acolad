@@ -282,7 +282,7 @@ describe('XtmJobStore', () => {
   });
 
   describe('heldJobsMissingEffort (I-1 — null-effort held-job guard)', () => {
-    it('returns held jobs whose effortOf is null (wwc mode: both-null → missing)', () => {
+    it('returns the keys of held jobs whose effortOf is null (wwc mode: both-null → missing)', () => {
       const store = freshStore();
       store.upsertMany([
         accepted({ jobKey: 'ok-wwc', dueDate: DUE, words: 100, fileWwc: 50 }), // effortOf(wwc)=50
@@ -291,17 +291,17 @@ describe('XtmJobStore', () => {
         accepted({ jobKey: 'null-wwc', dueDate: DUE, words: 100, fileWwc: null }),
       ]);
       const missing = store.heldJobsMissingEffort((s) => effortOf(s, 'wwc'));
-      expect(missing.map((s) => s.jobKey)).toEqual(['null-both']);
+      expect(missing).toEqual(['null-both']);
     });
 
-    it('words mode: returns held jobs with null words', () => {
+    it('words mode: returns the keys of held jobs with null words', () => {
       const store = freshStore();
       store.upsertMany([
         accepted({ jobKey: 'ok', dueDate: DUE, words: 100 }),
         accepted({ jobKey: 'null-words', dueDate: DUE, words: null, fileWwc: 50 }),
       ]);
       const missing = store.heldJobsMissingEffort((s) => effortOf(s, 'words'));
-      expect(missing.map((s) => s.jobKey)).toEqual(['null-words']);
+      expect(missing).toEqual(['null-words']);
     });
 
     it('is empty when every held job has non-null effort', () => {
@@ -317,7 +317,46 @@ describe('XtmJobStore', () => {
         accepted({ jobKey: 'held-no-words', dueDate: DUE, words: null, fileWwc: null }),
       ]);
       const missing = store.heldJobsMissingEffort((s) => effortOf(s, 'wwc'));
-      expect(missing.map((s) => s.jobKey)).toEqual(['held-no-words']);
+      expect(missing).toEqual(['held-no-words']);
+    });
+  });
+
+  describe('shared held-list snapshot (C6 — one scan per cycle)', () => {
+    it('honors a pre-fetched held array over the live DB (all three consumers)', () => {
+      const store = freshStore();
+      store.upsertMany([accepted({ jobKey: 'a', dueDate: DUE, words: 100, fileWwc: 40 })]);
+      // The cycle's ONE snapshot — taken BEFORE any new 'accepted' row is recorded.
+      const held = store.listByLifecycle('accepted');
+      // Jobs held AFTER the snapshot: visible to a fresh DB scan, absent from the snapshot.
+      // 'late' (null deadline + null effort) would trip BOTH detectors on a re-scan;
+      // 'late2' (valid deadline, real effort) would add a bucket the seed must NOT have.
+      store.upsertMany([
+        accepted({
+          jobKey: 'late',
+          fileName: 'late.docx',
+          dueDate: null,
+          words: null,
+          fileWwc: null,
+        }),
+        accepted({
+          jobKey: 'late2',
+          fileName: 'late2.docx',
+          dueDate: '2026-06-26T18:00:00+07:00',
+          words: 500,
+          fileWwc: 300,
+        }),
+      ]);
+      const day = (d: string | null) => d && d.slice(0, 10);
+      // Seed: buckets exactly the snapshot's jobs — neither late job contributes.
+      const m = store.effortDueByDeadline(day, (s) => effortOf(s, 'wwc') ?? 0, held);
+      expect([...m.keys()]).toEqual([DUE.slice(0, 10)]); // no '2026-06-26' bucket from 'late2'
+      expect(m.get(DUE.slice(0, 10))).toBe(40);
+      // Detectors: the late job is NOT flagged — it is not in the shared snapshot.
+      expect(store.heldJobsMissingDeadline(day, held)).toEqual([]);
+      expect(store.heldJobsMissingEffort((s) => effortOf(s, 'wwc'), held)).toEqual([]);
+      // Sanity: the default (standalone fresh scan) DOES see the late job.
+      expect(store.heldJobsMissingDeadline(day)).toEqual(['late']);
+      expect(store.heldJobsMissingEffort((s) => effortOf(s, 'wwc'))).toEqual(['late']);
     });
   });
 

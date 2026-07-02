@@ -1,4 +1,5 @@
 import type { DB } from '../state/db.js';
+import type { EffortUnit } from '../schedule/effort.js';
 import { SystemEventStore } from '../state/systemEvents.js';
 import { Outbox } from '../state/outbox.js';
 import { buildCard } from './chatCard.js';
@@ -47,10 +48,19 @@ interface TriggerSpec {
    * (the merge in raiseAlert fills missing fields from the static spec).
    */
   builder?: (
-    unit: { adj: string },
+    unit: Pick<EffortUnit, 'adj'>,
     capVar: string,
   ) => Partial<{ title: string; impact: string; action: string }>;
 }
+
+/** Shared builder for the two held_job_* under-count alerts (C10): both customise ONLY
+ *  the impact line with the active metric's adjective — one helper so the byte-for-byte
+ *  identical string cannot drift between the two triggers. */
+const underCountImpact = (
+  unit: Pick<EffortUnit, 'adj'>,
+): Partial<{ title: string; impact: string; action: string }> => ({
+  impact: `A later job due the same day could be over-accepted past the daily ${unit.adj} cap`,
+});
 
 /** Action text per trigger (contracts/notifications.md §4). */
 const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
@@ -199,9 +209,7 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     action:
       'Open XTM, find the accepted job(s) missing a due date, and accept further same-day jobs manually until the due date is fixed',
     hasRecovered: false,
-    builder: (unit, _capVar) => ({
-      impact: `A later job due the same day could be over-accepted past the daily ${unit.adj} cap`,
-    }),
+    builder: underCountImpact,
   },
   // Raised (deduped once per Bangkok day, dedupKey `held_job_no_effort:<date>`) when a HELD
   // (accepted) job has null effort under the ACTIVE metric (effortOf → null) so it is seeded
@@ -216,9 +224,7 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
     action:
       'Open XTM, find the accepted job(s) missing a word/WWC count, and accept further same-day jobs manually until the count is fixed',
     hasRecovered: false,
-    builder: (unit, _capVar) => ({
-      impact: `A later job due the same day could be over-accepted past the daily ${unit.adj} cap`,
-    }),
+    builder: underCountImpact,
   },
 };
 
@@ -261,7 +267,7 @@ export function raiseAlert(
    *  that recur per job (e.g. accept_failed) so distinct failures each alert. */
   dedupKey?: string,
   /** Effort-unit label (e.g. `{ adj: 'WWC' }` or `{ adj: 'word' }`). */
-  unit?: { adj: string },
+  unit?: Pick<EffortUnit, 'adj'>,
   /** Active cap env-var name (e.g. `'ACCEPT_MAX_WWC_PER_DAY'`). */
   capVar?: string,
 ): boolean {

@@ -299,6 +299,11 @@ export class XtmPollLoop {
             jobKey: r.jobKey,
             reason: r.reason,
             words: r.words,
+            // C4: the effort the gate actually decided on + the active metric — in wwc
+            // mode effort is File WWC (not `words`), so without these the log line
+            // cannot explain a reject driven by the WWC numbers.
+            effort: r.effort,
+            metric: r.metric,
             dueDate: r.dueDate,
           },
           'job blocked by schedule gate',
