@@ -106,11 +106,22 @@ export class Outbox {
       .run(next, nowIso, row.outbox_id);
   }
 
-  /** Ops: requeue dead rows back to pending (npm run outbox:requeue). */
+  /**
+   * Ops: requeue dead rows back to pending (npm run outbox:requeue).
+   *
+   * `created_at` is refreshed for the same reason `recordPermanentFailure` refreshes it, and
+   * the omission here mattered more: `recordFailure` measures the dead-age clock from
+   * `created_at`, and a row that died of AGE rather than of the retry cap is by definition
+   * already older than `deadAfterHours`. Resetting only `attempts` left such a row to be
+   * marked dead again on its very first retry — so the recovery command silently failed on
+   * precisely the rows most in need of recovery, and the older the row the less it worked.
+   */
   requeueDead(nowIso: string): number {
     const res = this.db
-      .prepare(`UPDATE outbox SET status = 'pending', attempts = 0, next_attempt_at = ? WHERE status = 'dead'`)
-      .run(nowIso);
+      .prepare(
+        `UPDATE outbox SET status = 'pending', attempts = 0, next_attempt_at = ?, created_at = ? WHERE status = 'dead'`,
+      )
+      .run(nowIso, nowIso);
     return res.changes;
   }
 

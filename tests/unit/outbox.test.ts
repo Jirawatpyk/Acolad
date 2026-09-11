@@ -193,6 +193,40 @@ describe('Outbox — core behaviour', () => {
     db.close();
   });
 
+  it('requeueDead gives an aged-out row a fresh retry budget, not an instant second death', () => {
+    // The case ops actually reaches for `npm run outbox:requeue` in: a row that died of AGE
+    // rather than of the retry cap. `recordFailure` measures that age from `created_at`, so
+    // leaving it untouched means the requeued row is still older than deadAfterHours and is
+    // marked dead again on its very first retry — the rows most in need of recovery being
+    // exactly the ones the recovery command cannot recover.
+    //
+    // The existing requeue test above cannot see this: it uses retryCap=1, so its row dies of
+    // the cap, which `attempts = 0` genuinely does reset.
+    //
+    // `recordPermanentFailure` already refreshes `created_at` for this same reason, and says
+    // so in its comment. This is that rule applied where it was missed.
+    const dir = tmp();
+    const { db } = openDatabase(dir, NOW);
+    const ob = new Outbox(db, 10, 6); // cap far out of reach; age is what will kill it
+
+    const sevenHoursLater = new Date(Date.parse(NOW) + 7 * 3_600_000).toISOString();
+    const rowOf = (id: string): Parameters<typeof ob.recordFailure>[0] =>
+      db.prepare('SELECT * FROM outbox WHERE event_id=?').get(id) as Parameters<
+        typeof ob.recordFailure
+      >[0];
+
+    ob.enqueue('aged', '{"text":"x"}', NOW, 'chat');
+    expect(ob.recordFailure(rowOf('aged'), Date.parse(sevenHoursLater))).toBe('dead');
+
+    expect(ob.requeueDead(sevenHoursLater)).toBe(1);
+
+    expect(ob.recordFailure(rowOf('aged'), Date.parse(sevenHoursLater))).toBe('pending');
+    expect(ob.countByStatus('pending')).toBe(1);
+    expect(ob.countByStatus('dead')).toBe(0);
+
+    db.close();
+  });
+
   it('requeueDead resets all dead rows to pending with 0 attempts', () => {
     const dir = tmp();
     const { db } = openDatabase(dir, NOW);
