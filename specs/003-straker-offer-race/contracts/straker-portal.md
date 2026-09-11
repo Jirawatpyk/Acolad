@@ -78,3 +78,4 @@ Per the spec's non-goals, the bot never declines an offer, never fetches an offe
 | Budget headers disappear | Fall back to the hard ceiling and warn — never to unrestrained polling |
 | `Origin` rejection reappears | Fail loud; it means the portal's rules changed again |
 | An unrecognised rejection on a claim | Treat as a fault, alert, and let reconciliation determine the truth |
+| The portal is repeatedly unreachable or failing | Back off exponentially with jitter up to a defined cap, then alert (FR-019b). Never keep reading at the normal rhythm: that means hammering a system already in trouble, and a failing portal may send no budget headers to restrain it. The **claim** path never backs off, because it never retries at all |

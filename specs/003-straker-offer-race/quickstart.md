@@ -63,14 +63,14 @@ Legend: **A** = buildable now · **B** = waits for the capture probe · **P** = 
 | **V7** | A reply that stops being the expected shape fails loud instead of reading as zero offers | A | FR-023 | Stub returns an envelope where a bare list is expected |
 | **V8** | An expired session is renewed and the run continues; a server fault is **not** retried | A | FR-021, constitution VI | Already covered by the probe's failure-mode tests; extend to the claim path |
 | **V9** | A claim whose outcome is unknown is **never retried**; reconciliation repairs the record and marks it recovered | A | FR-016a/b, SC-009, R7 | Kill the process between claim and record; restart; assert the record converges and the row is marked recovered |
-| **V10** | Every offer seen produces a row — won, lost and skipped alike | A | US2, FR-014, SC-004 | Run a mixed scenario; reconcile the row count against offers seen |
+| **V10** | Every offer seen produces a row — won, lost and skipped alike — keyed on **offer identity together with event type** | A | US2, FR-014, SC-004 | Run a mixed scenario; reconcile the row count against offers seen, and confirm a sighting, a claim and a recovery of one offer are three rows rather than one |
 | **V11** | A reporting destination being down loses no outcome | A | FR-016 | Stub the destination as failing, then recovering |
-| **V12** | **Releasing or restarting either bot leaves the other untouched** | A | SC-008, FR-024/026 | Restart each in turn; assert the other's uptime and restart count are unchanged |
+| **V12** | **Releasing or restarting either bot leaves the other untouched** | A | SC-008, FR-024, FR-025, FR-026 | Restart each in turn; assert the other's uptime and restart count are unchanged |
 | **V13** | Killing the Straker side raises an alert **naming it**, while the XTM side keeps running | A | SC-010, FR-026a/b | Stop the Straker process; confirm the alert names the portal |
 | **V14** | **The XTM bot's behaviour is unchanged** | A | **SC-005** | Full suite green with the coverage gate intact; compare XTM detect/accept figures for 7 days before and after release |
 | **V15** | Never exceeds 300 requests/minute; the reported remainder never falls below 60 | A | SC-003 | Count requests over a sustained run; assert against the logged budget headers |
 | **V16** | Zero claims bypassed the schedule gate or the ceiling | A | SC-006 | Audit the stored record against the gate's decisions |
-| **V17** | The daily summary shows both portals separately and combined, and says so plainly when one record is unreadable | A | FR-018, US3 | Make one record unreadable; assert the summary reports the readable one and states the gap |
+| **V17** | The daily summary shows both portals separately and combined, **plus retries performed and uptime**, and says so plainly when one record is unreadable | A | FR-018, US3 | Make one record unreadable; assert the summary reports the readable one and states the gap |
 | **V18** | The coverage gate actually covers the new decision and state logic | A | Constitution II, R12 | `npm run test:coverage` — assert the Straker modules appear in the report |
 | **V23** | Reaching the ceiling does not stop reading; skips are still recorded and reconciliation still runs | A | FR-007a | Drive the ledger to its ceiling in a stub run; assert reads continue and rows keep appearing |
 | **V24** | Reconciliation failing three times running raises an alert | A | FR-016c | Stub the assigned-work read as failing |
@@ -79,6 +79,10 @@ Legend: **A** = buildable now · **B** = waits for the capture probe · **P** = 
 | **V27** | An account-blocked rejection alerts immediately and stops claiming, without a sign-in retry loop | A | Edge case, Contract §4a | Stub the blocked rejection |
 | **V28** | Alerts de-duplicate once per offer identity per outcome | A | FR-019a | Repeat the same condition on one offer, then on a second |
 | **V29** | Below 120 remaining budget deferrable work stops; below 60 reading pauses | A | FR-019 | Drive the stubbed budget headers down through both thresholds |
+| **V30** | A repeatedly failing offer-list read backs off exponentially with jitter, and alerts once the cap is exhausted rather than retrying forever | A | FR-019b, Constitution IV | Stub sustained failure; assert the growing intervals and the alert |
+| **V31** | The backoff is **never** applied to the claim path | A | FR-019c | Assert an unknown claim outcome produces no second attempt at any interval — the risk there is a duplicate irreversible commitment, not a wasted request |
+| **V32** | **No further enquiry about an offer is made between noticing it and claiming it** | A | FR-002 | Assert no detail fetch or file listing occurs on the path from read to claim — it costs a round trip where a round trip decides the outcome, and nothing else looks wrong |
+| **V33** | Both bots use the same names, with the same meanings, for sighting, claim outcome, effort unit and gate decision | A | FR-028 (DC-2) | Compare the shared type names against the XTM bot's — drift here is what would make the deferred core extraction stop being mechanical |
 | **V19** | **Probe exit reached: 10 distinct offers captured, or 14 days elapsed — whichever first — with lifetimes measured** | **P** | **SC-000 — gates the rest** | `fixtures/straker/offers/` and the probe's event log. A sample under 10 is recorded as an explicit limitation. |
 | **V20** | Detect→claim ≤ 400 ms at p95 | B *(conditional)* | SC-001 | Only if V19 shows offers are short-lived; otherwise **struck** |
 | **V21** | Gap between consecutive successful checks ≤ 1.3× the configured rhythm | B *(conditional)* | SC-002 | As V20 |

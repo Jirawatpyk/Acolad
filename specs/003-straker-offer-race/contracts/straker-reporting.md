@@ -18,7 +18,7 @@ A **separate spreadsheet file** from the XTM record, not a tab within it.
 
 | Must carry | Why |
 |---|---|
-| Offer identifier | The stable key; rows are deduplicated on it (constitution VII) |
+| Offer identifier | The stable key. Rows are deduplicated on **identity together with event type** (FR-014, constitution VII) — one offer legitimately produces a sighting, a claim and possibly a recovery, and identity alone would collapse them into a single row |
 | **Language direction** | FR-011a — with all 44 directions eligible, the claimed language mix must be visible early, not discovered at delivery |
 | Effort and deadline | What the gate decided on |
 | Outcome — `won` / `lost` / `failed` / `unknown` / `recovered` | `lost` is a normal result and must never read as a fault |
@@ -77,6 +77,7 @@ Produced on working days only, as the XTM bot's already is.
 | Each portal's committed workload | Separately |
 | The **combined** total | The agreed mitigation for two ceilings that can sum past the crew's real capacity |
 | Straker's win rate for the period | Reported from the start; a target is set only after a baseline, and at 2–3 offers a day an early figure is a weak signal, not a verdict |
+| **Retries performed** and **uptime** for the period | Named by the constitution's observability principle (FR-018). They are the two figures that distinguish a bot **limping** from one that is either healthy or plainly dead — a bot retrying its way through every cycle still reports success |
 
 Because the two records live in separate files, the summary reads both — and when one is unreadable it **says so** rather than presenting a partial total as a whole one.
 
