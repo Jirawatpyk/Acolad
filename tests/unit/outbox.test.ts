@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../../src/state/db.js';
 import { Outbox } from '../../src/state/outbox.js';
+import type { OutboxChannel } from '../../src/state/outbox.js';
 
 const NOW = '2026-06-25T03:00:00.000Z';
 
@@ -189,6 +190,72 @@ describe('Outbox — core behaviour', () => {
     expect(ob.countDeadExcludingChannel('team')).toBe(1); // only chat row
     expect(ob.countDeadExcludingChannel('chat')).toBe(1); // only team row
     expect(ob.countDeadExcludingChannel('sheets')).toBe(2); // both
+
+    db.close();
+  });
+
+  it('enqueue reports a genuine duplicate quietly, because a re-run must not double-send', () => {
+    const dir = tmp();
+    const { db } = openDatabase(dir, NOW);
+    const ob = new Outbox(db, 10, 6);
+
+    expect(ob.enqueue('dup', '{"text":"x"}', NOW, 'chat')).toBe(true);
+    expect(ob.enqueue('dup', '{"text":"x"}', NOW, 'chat')).toBe(false);
+    expect(ob.countByStatus('pending')).toBe(1);
+
+    db.close();
+  });
+
+  it('enqueue still queues the same event on a DIFFERENT channel, since dedup is per channel', () => {
+    const dir = tmp();
+    const { db } = openDatabase(dir, NOW);
+    const ob = new Outbox(db, 10, 6);
+
+    expect(ob.enqueue('both', '{"text":"x"}', NOW, 'chat')).toBe(true);
+    expect(ob.enqueue('both', '{"text":"x"}', NOW, 'team')).toBe(true);
+    expect(ob.countByStatus('pending')).toBe(2);
+
+    db.close();
+  });
+
+  it('enqueue throws on a channel the table does not accept, instead of dropping the event', () => {
+    // `INSERT OR IGNORE` suppresses EVERY constraint violation, not just the dedup conflict,
+    // and the caller cannot tell the two apart: both arrive as `false`, which reads as
+    // "already queued, nothing to do". The event is then gone with nothing reporting it —
+    // the exact opposite of FR-013/FR-018, which route every notifiable event through here.
+    //
+    // The realistic trigger is not a typo: it is adding a channel to `OutboxChannel` and
+    // forgetting the CHECK migration. That has happened in this file once already — the
+    // 'team' channel needed `ensureOutboxChannel` written to widen an existing table — and
+    // next time it would take every message on the new channel down in silence.
+    const dir = tmp();
+    const { db } = openDatabase(dir, NOW);
+    const ob = new Outbox(db, 10, 6);
+
+    expect(() => ob.enqueue('bad', '{"text":"x"}', NOW, 'email' as OutboxChannel)).toThrow(
+      /CHECK constraint failed/,
+    );
+    expect(ob.countByStatus('pending')).toBe(0);
+
+    db.close();
+  });
+
+  it('enqueue leaves the enclosing transaction to roll back, so no state change outlives a lost event', () => {
+    // enqueue is called inside the same transaction as the state change that produced the
+    // event. Swallowing the failure would commit the state change with no notification
+    // queued; throwing rolls both back and the cycle reports it. Loud and consistent beats
+    // quiet and half-applied.
+    const dir = tmp();
+    const { db } = openDatabase(dir, NOW);
+    const ob = new Outbox(db, 10, 6);
+
+    const tx = db.transaction(() => {
+      ob.enqueue('good', '{"text":"x"}', NOW, 'chat');
+      ob.enqueue('bad', '{"text":"x"}', NOW, 'email' as OutboxChannel);
+    });
+
+    expect(() => tx()).toThrow(/CHECK constraint failed/);
+    expect(ob.countByStatus('pending')).toBe(0);
 
     db.close();
   });
