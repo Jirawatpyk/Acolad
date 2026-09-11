@@ -38,7 +38,26 @@ export class Outbox {
     private readonly deadAfterHours: number,
   ) {}
 
-  /** Idempotent enqueue (unique on event_id+channel). Returns false if already queued. */
+  /**
+   * Idempotent enqueue (unique on event_id+channel). Returns false if already queued.
+   *
+   * The conflict target is named rather than using `INSERT OR IGNORE`, and the difference is
+   * not stylistic: `OR IGNORE` suppresses EVERY constraint violation — a CHECK, a NOT NULL,
+   * any of them — and hands the caller the same `false` a real duplicate produces. The event
+   * would then be gone with nothing reporting it, while the caller reads "already queued,
+   * nothing to do". That is the one outcome FR-013/FR-018 exist to prevent, since every
+   * notifiable event is supposed to reach a human through this table.
+   *
+   * The realistic trigger is not a typo but a widening: adding a value to `OutboxChannel`
+   * and forgetting the CHECK migration. That has already happened here once — the 'team'
+   * channel needed `ensureOutboxChannel` written to widen an existing table — and next time
+   * every message on the new channel would vanish silently instead of failing on the first.
+   *
+   * Naming the target keeps deduplication exactly as quiet as it was and lets everything
+   * else throw. A throw here aborts the enclosing transaction, so the state change that
+   * produced the event rolls back with it and the poll loop reports the cycle as failed —
+   * loud and consistent, rather than committed with its notification lost.
+   */
   enqueue(
     eventId: string,
     payloadJson: string,
@@ -47,8 +66,9 @@ export class Outbox {
   ): boolean {
     const res = this.db
       .prepare(
-        `INSERT OR IGNORE INTO outbox (event_id, channel, payload_json, status, attempts, next_attempt_at, created_at)
-         VALUES (?, ?, ?, 'pending', 0, ?, ?)`,
+        `INSERT INTO outbox (event_id, channel, payload_json, status, attempts, next_attempt_at, created_at)
+         VALUES (?, ?, ?, 'pending', 0, ?, ?)
+         ON CONFLICT (event_id, channel) DO NOTHING`,
       )
       .run(eventId, channel, payloadJson, nowIso, nowIso);
     return res.changes > 0;
@@ -106,11 +126,22 @@ export class Outbox {
       .run(next, nowIso, row.outbox_id);
   }
 
-  /** Ops: requeue dead rows back to pending (npm run outbox:requeue). */
+  /**
+   * Ops: requeue dead rows back to pending (npm run outbox:requeue).
+   *
+   * `created_at` is refreshed for the same reason `recordPermanentFailure` refreshes it, and
+   * the omission here mattered more: `recordFailure` measures the dead-age clock from
+   * `created_at`, and a row that died of AGE rather than of the retry cap is by definition
+   * already older than `deadAfterHours`. Resetting only `attempts` left such a row to be
+   * marked dead again on its very first retry — so the recovery command silently failed on
+   * precisely the rows most in need of recovery, and the older the row the less it worked.
+   */
   requeueDead(nowIso: string): number {
     const res = this.db
-      .prepare(`UPDATE outbox SET status = 'pending', attempts = 0, next_attempt_at = ? WHERE status = 'dead'`)
-      .run(nowIso);
+      .prepare(
+        `UPDATE outbox SET status = 'pending', attempts = 0, next_attempt_at = ?, created_at = ? WHERE status = 'dead'`,
+      )
+      .run(nowIso, nowIso);
     return res.changes;
   }
 
