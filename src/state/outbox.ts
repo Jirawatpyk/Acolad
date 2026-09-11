@@ -1,5 +1,6 @@
 import type { DB } from './db.js';
 import type { AppConfig } from '../config/index.js';
+import { decideOutboxRetry } from '../shared/outboxRetry.js';
 
 export type OutboxChannel = 'chat' | 'sheets' | 'team';
 
@@ -15,8 +16,6 @@ export interface OutboxRow {
   sent_at: string | null;
 }
 
-const BASE_BACKOFF_MS = 30_000;
-const MAX_BACKOFF_MS = 5 * 60_000;
 /** Permanent failures (webhook revoked) retry slowly, not toward the dead cap (FR-018). */
 const PERMANENT_RETRY_MS = 30 * 60_000;
 
@@ -69,23 +68,29 @@ export class Outbox {
   /**
    * Record a failed attempt. Returns 'dead' when the row exhausts the retry cap
    * or has aged past deadAfterHours, else 'pending' with backoff applied.
+   *
+   * The schedule itself lives in `shared/outboxRetry.ts` — the same policy the Straker
+   * queue runs on, so the two cannot drift into hitting a struggling webhook at different
+   * rates. This method's job is only to translate: the policy speaks epoch milliseconds,
+   * this table stores ISO strings.
    */
   recordFailure(row: OutboxRow, nowMs: number): 'pending' | 'dead' {
-    const attempts = row.attempts + 1;
-    const ageMs = nowMs - Date.parse(row.created_at);
-    const expired = ageMs >= this.deadAfterHours * 3_600_000;
-    if (attempts >= this.retryCap || expired) {
+    const decision = decideOutboxRetry(
+      { attempts: row.attempts, createdAtMs: Date.parse(row.created_at) },
+      nowMs,
+      { retryCap: this.retryCap, deadAfterHours: this.deadAfterHours },
+    );
+    if (decision.kind === 'dead') {
       this.db.prepare(`UPDATE outbox SET status = 'dead', attempts = ? WHERE outbox_id = ?`).run(
-        attempts,
+        decision.attempts,
         row.outbox_id,
       );
       return 'dead';
     }
-    const backoff = Math.min(BASE_BACKOFF_MS * 2 ** (attempts - 1), MAX_BACKOFF_MS);
-    const next = new Date(nowMs + backoff).toISOString();
+    const next = new Date(decision.nextAttemptAtMs).toISOString();
     this.db
       .prepare(`UPDATE outbox SET attempts = ?, next_attempt_at = ? WHERE outbox_id = ?`)
-      .run(attempts, next, row.outbox_id);
+      .run(decision.attempts, next, row.outbox_id);
     return 'pending';
   }
 

@@ -164,3 +164,63 @@ describe('loadStrakerBotConfig — the scheduling rules are the team own, reused
     expect(cfg.pollIntervalMs).toBe(1_000);
   });
 });
+
+describe('loadStrakerBotConfig — the path the documentation actually tells an operator to take', () => {
+  /**
+   * `.env.example` ships several variables as bare `KEY=` lines whose comments say "empty =
+   * derived" or "leave blank until 2FA is on". dotenv turns those into `''`, not `undefined`
+   * — and zod's `.optional()` and `.default()` only treat `undefined` as absent, while
+   * `z.coerce.number()` turns `''` into 0. So the documented happy path threw, and a first
+   * deploy would have been a PM2 crash loop with the operator having followed the file
+   * exactly. The XTM config already carries this fix; this one did not.
+   */
+  const BLANK = {
+    ...VALID_BOT,
+    STRAKER_TOTP_CODE: '',
+    STRAKER_THROUGHPUT_WORDS_PER_HOUR: '',
+    STRAKER_SHEETS_TAB_NAME: '',
+    STRAKER_STATE_DIR: '',
+    STRAKER_LOG_DIR: '',
+    STRAKER_SINGLE_INSTANCE_PORT: '',
+    STRAKER_POLL_INTERVAL_MS: '',
+    STRAKER_EXCLUDED_LANGUAGE_PAIRS: '',
+    ACCEPT_HOURS_START: '',
+    ACCEPT_HOURS_END: '',
+    ACCEPT_WORKDAYS: '',
+  };
+
+  it('loads when every optional variable is present but blank, as copying the example leaves them', () => {
+    expect(() => loadStrakerBotConfig(BLANK)).not.toThrow();
+  });
+
+  it('treats a blank throughput as "derive it", which is what the comment beside it promises', () => {
+    const cfg = loadStrakerBotConfig({ ...BLANK, STRAKER_MAX_WORDS_PER_DAY: '900' });
+
+    expect(cfg.throughputWordsPerHour).toBe(100);
+  });
+
+  it('falls back to each default rather than rejecting the blank line that stands for it', () => {
+    const cfg = loadStrakerBotConfig(BLANK);
+
+    expect(cfg.singleInstancePort).toBe(47812);
+    expect(cfg.stateDir).toBe('state/straker');
+    expect(cfg.trackingTabName).toBe('Straker_Tracking');
+    expect(cfg.pollIntervalMs).toBe(10_000);
+    expect(cfg.hoursStartMin).toBe(9 * 60);
+    expect([...cfg.workdays].sort()).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('still rejects a blank value for a variable that has no default and no derivation', () => {
+    // Blank must mean "absent", not "zero" — and absent is still fatal for the ceiling,
+    // which the code must never guess (U4 leaves the real number unknown until the probe).
+    expect(() => loadStrakerBotConfig({ ...BLANK, STRAKER_MAX_WORDS_PER_DAY: '' })).toThrow(
+      /STRAKER_MAX_WORDS_PER_DAY/,
+    );
+  });
+
+  it('leaves the probe loader able to start from the same blank lines', () => {
+    expect(() =>
+      loadStrakerReconConfig({ ...VALID, STRAKER_TOTP_CODE: '', STRAKER_POLL_INTERVAL_MS: '' }),
+    ).not.toThrow();
+  });
+});

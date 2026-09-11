@@ -3,7 +3,9 @@ import {
   createHttpClient,
   StrakerHttpError,
   StrakerRetryExhaustedError,
+  StrakerTimeoutError,
 } from '../../../src/straker/httpClient.js';
+import type { StrakerHttpClient } from '../../../src/straker/httpClient.js';
 
 function jsonResponse(body: unknown, init: { status?: number; headers?: Headers } = {}): Response {
   const headers = init.headers ?? new Headers();
@@ -430,5 +432,524 @@ describe('createHttpClient — backoff on the reading path (FR-019b)', () => {
     const retried = new Headers(fetchImpl.mock.calls[1]?.[1]?.headers);
     expect(retried.get('origin')).toBe('https://portal.test');
     expect(retried.get('cookie')).toBe('session=abc123');
+  });
+});
+
+/**
+ * Guards that survived mutation until this point: each `it` below fails if the one line of
+ * restraint it names is deleted or inverted. They are grouped by the decision they protect
+ * rather than by the function they touch, because that is how the decision reads to
+ * whoever is about to change it.
+ */
+
+/** A reply whose body dies while it is being read — a failing portal, cut off mid-sentence. */
+function bodyDiesResponse(status: number): Response {
+  const dying = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.error(new TypeError('terminated'));
+    },
+  });
+  return new Response(dying, {
+    status,
+    // Content-Length promises a body that never arrives, which is what makes the read fail
+    // rather than come back empty: the shape of a 503 whose connection resets behind it.
+    headers: { 'content-type': 'application/json', 'content-length': '120' },
+  });
+}
+
+const SANE_BUDGET = {
+  'x-ratelimit-limit': '300',
+  'x-ratelimit-remaining': '294',
+  'x-ratelimit-reset': '1788000060',
+};
+
+describe('createHttpClient — a retry policy that would misbehave is refused at construction', () => {
+  const build = (retry: Partial<Record<string, number>>): (() => unknown) => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse([]));
+    return () => createHttpClient({ baseUrl: 'https://portal.test', fetchImpl, retry });
+  };
+
+  it('refuses a policy with no attempts in it', () => {
+    expect(build({ maxAttempts: 0 })).toThrow(/maxAttempts/);
+  });
+
+  it('refuses a factor below 1 — the only thing making "the intervals grow" true for a custom policy', () => {
+    // Every interval assertion in this file uses factor 2, so a shrinking factor sails past
+    // all of them: at 0.5 the waits would be 100, 50, 25 and the client would come back
+    // FASTER the longer the portal stayed broken.
+    expect(build({ maxAttempts: 4, baseDelayMs: 100, factor: 0.5, maxDelayMs: 1_000 })).toThrow(
+      /factor/,
+    );
+  });
+
+  it('refuses a ceiling below the first step, which would silently discard the whole curve', () => {
+    expect(build({ baseDelayMs: 250, maxDelayMs: 100 })).toThrow(/maxDelayMs/);
+  });
+
+  it('refuses a base delay of zero — an immediate retry has not backed off at all', () => {
+    expect(build({ baseDelayMs: 0 })).toThrow(/baseDelayMs/);
+  });
+
+  it('accepts factor 1, the boundary, and holds the intervals steady rather than shrinking them', async () => {
+    const fetchImpl = alwaysFailing(500);
+    const timer = sleepRecorder();
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      retry: { maxAttempts: 4, baseDelayMs: 100, factor: 1, maxDelayMs: 1_000 },
+      sleep: timer.sleep,
+      random: () => 1,
+    });
+
+    await client.getJsonWithBackoff(OFFERS_PATH).catch(() => undefined);
+
+    // A flat policy is a legitimate choice; a shrinking one is not. This pins where the
+    // line sits, so the guard cannot be "tidied" into `factor > 1` either.
+    expect(timer.waits).toEqual([100, 100, 100]);
+  });
+});
+
+describe('createHttpClient — what is, and is not, worth asking again about', () => {
+  it('does not retry a 2xx whose body is not JSON — a contract violation is not a blip', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(() =>
+      Promise.resolve(
+        new Response('<html>scheduled maintenance</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        }),
+      ),
+    );
+    const timer = sleepRecorder();
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      retry: TEST_POLICY,
+      sleep: timer.sleep,
+      random: () => 1,
+    });
+
+    const error: unknown = await client.getJsonWithBackoff(OFFERS_PATH).catch((e: unknown) => e);
+
+    // Retrying it would spend three more requests to reach the same verdict, and delay by
+    // seconds the loud failure FR-023 asks for.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(timer.waits).toEqual([]);
+    expect(error).not.toBeInstanceOf(StrakerRetryExhaustedError);
+  });
+
+  it('does not retry a 429 — waiting it out spends the very allowance it reports is running low', async () => {
+    const fetchImpl = alwaysFailing(429);
+    const timer = sleepRecorder();
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      retry: TEST_POLICY,
+      sleep: timer.sleep,
+      random: () => 1,
+    });
+
+    const error: unknown = await client.getJsonWithBackoff(OFFERS_PATH).catch((e: unknown) => e);
+
+    // 429 belongs to the graduated budget response (FR-019, T064/T065), not to the backoff.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(timer.waits).toEqual([]);
+    expect(error).toMatchObject({ status: 429 });
+  });
+
+  it('retries a 408 — the portal saying it was too slow is exactly the "slow" of FR-019b', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({}, { status: 408 }))
+      .mockResolvedValueOnce(jsonResponse([{ obj_id: 'off-1' }]));
+    const timer = sleepRecorder();
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      retry: TEST_POLICY,
+      sleep: timer.sleep,
+      random: () => 1,
+    });
+
+    await expect(client.getJsonWithBackoff(OFFERS_PATH)).resolves.toEqual([{ obj_id: 'off-1' }]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('createHttpClient — a reply whose body dies mid-read', () => {
+  it('keeps the status, which is the diagnostic, when a rejected reply body dies', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(() => Promise.resolve(bodyDiesResponse(503)));
+    const client = createHttpClient({ baseUrl: 'https://portal.test', fetchImpl });
+
+    const error: unknown = await client.getJson(OFFERS_PATH).catch((e: unknown) => e);
+
+    // Left unguarded, the stream rejection escapes the attempt entirely and the caller is
+    // told `TypeError: terminated` — true, useless, and with the 503 thrown away.
+    expect(error).toBeInstanceOf(StrakerHttpError);
+    expect(error).toMatchObject({ status: 503 });
+  });
+
+  it('still backs off on it: the verdict comes from the status, not from the body', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(() => Promise.resolve(bodyDiesResponse(503)));
+    const timer = sleepRecorder();
+    const onAlert = vi.fn();
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      retry: TEST_POLICY,
+      sleep: timer.sleep,
+      random: () => 1,
+      onAlert,
+    });
+
+    const error: unknown = await client.getJsonWithBackoff(OFFERS_PATH).catch((e: unknown) => e);
+
+    // An escaping rejection bypasses all of this at once: no backoff, no alert, and an
+    // exhaustion error that never arrives.
+    expect(fetchImpl).toHaveBeenCalledTimes(TEST_POLICY.maxAttempts);
+    expect(error).toBeInstanceOf(StrakerRetryExhaustedError);
+    expect((error as StrakerRetryExhaustedError).cause).toMatchObject({ status: 503 });
+    expect(onAlert).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createHttpClient — a nonsensical budget reading is no reading at all', () => {
+  const unusable: ReadonlyArray<readonly [string, Record<string, string>]> = [
+    ['an allowance of zero', { ...SANE_BUDGET, 'x-ratelimit-limit': '0' }],
+    ['a negative remainder', { ...SANE_BUDGET, 'x-ratelimit-remaining': '-5' }],
+    [
+      'a reset stamp of zero, which reads as "the budget refreshed in 1970" and lifts all restraint',
+      { ...SANE_BUDGET, 'x-ratelimit-reset': '0' },
+    ],
+    ['a word where a number belongs', { ...SANE_BUDGET, 'x-ratelimit-limit': 'unlimited' }],
+  ];
+
+  for (const [name, headers] of unusable) {
+    it(`reports no budget for ${name}`, async () => {
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(jsonResponse([], { headers: new Headers(headers) }));
+      const client = createHttpClient({ baseUrl: 'https://portal.test', fetchImpl });
+
+      await client.getJson(OFFERS_PATH);
+
+      // FR-019 and contract section 3: a missing or nonsensical value must leave the hard
+      // ceiling in charge. Handing a pacer a number it can do arithmetic on is how
+      // restraint gets lost — `Number.isFinite` alone lets every one of these through.
+      expect(client.lastRateLimit()).toBeNull();
+    });
+  }
+
+  it('keeps a remainder of zero — a real reading, and the most restrictive one there is', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse([], {
+        headers: new Headers({ ...SANE_BUDGET, 'x-ratelimit-remaining': '0' }),
+      }),
+    );
+    const client = createHttpClient({ baseUrl: 'https://portal.test', fetchImpl });
+
+    await client.getJson(OFFERS_PATH);
+
+    // The guard above must not swallow this one: "you have none left" is the single most
+    // important budget reading the portal ever sends.
+    expect(client.lastRateLimit()).toEqual({
+      limit: 300,
+      remaining: 0,
+      resetAtEpoch: 1788000060,
+    });
+  });
+});
+
+describe('createHttpClient — the budget going unreadable is warned about, not silently forgotten', () => {
+  /**
+   * Replies are built per call, never shared: one `Response` body can only be read once,
+   * so a reused instance fails on the second request for a reason that has nothing to do
+   * with the budget. The last entry repeats, which is how "and it stays that way" is said.
+   */
+  function clientWithWarnings(replies: ReadonlyArray<() => Response>): {
+    client: StrakerHttpClient;
+    warnings: ReturnType<typeof vi.fn>;
+  } {
+    let index = 0;
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(() => {
+      const reply = replies[Math.min(index, replies.length - 1)] as () => Response;
+      index += 1;
+      return Promise.resolve(reply());
+    });
+    const warnings = vi.fn();
+    return {
+      client: createHttpClient({ baseUrl: 'https://portal.test', fetchImpl, onWarning: warnings }),
+      warnings,
+    };
+  }
+
+  it('warns when the budget headers disappear from a reply that used to carry them', async () => {
+    const { client, warnings } = clientWithWarnings([
+      () => jsonResponse([], { headers: new Headers(SANE_BUDGET) }),
+      () => jsonResponse([]),
+    ]);
+
+    await client.getJson(OFFERS_PATH);
+    await client.getJson(OFFERS_PATH);
+
+    // Change-detection table: budget headers disappearing must fall back to the hard
+    // ceiling AND warn. Overwriting the snapshot with null does the forgetting silently.
+    expect(warnings).toHaveBeenCalledTimes(1);
+    expect(warnings.mock.calls[0]?.[0]).toMatchObject({
+      kind: 'rate_limit_unknown',
+      reason: 'headers_missing',
+    });
+  });
+
+  it('warns once while they stay missing, rather than on every reply', async () => {
+    const { client, warnings } = clientWithWarnings([() => jsonResponse([])]);
+
+    await client.getJson(OFFERS_PATH);
+    await client.getJson(OFFERS_PATH);
+    await client.getJson(OFFERS_PATH);
+
+    // At a ten-second rhythm, one warning per reply is 8,640 lines a day about one fact.
+    expect(warnings).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells a nonsensical reading apart from a missing one — they are different faults', async () => {
+    const { client, warnings } = clientWithWarnings([
+      () =>
+        jsonResponse([], { headers: new Headers({ ...SANE_BUDGET, 'x-ratelimit-reset': '-1' }) }),
+    ]);
+
+    await client.getJson(OFFERS_PATH);
+
+    expect(warnings.mock.calls[0]?.[0]).toMatchObject({ reason: 'headers_nonsensical' });
+  });
+
+  it('stays quiet while the budget keeps reading normally', async () => {
+    const { client, warnings } = clientWithWarnings([
+      () => jsonResponse([], { headers: new Headers(SANE_BUDGET) }),
+    ]);
+
+    await client.getJson(OFFERS_PATH);
+    await client.getJson(OFFERS_PATH);
+
+    expect(warnings).not.toHaveBeenCalled();
+  });
+
+  it('keeps a good read alive when the warning sink itself throws', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(() => Promise.resolve(jsonResponse([{ obj_id: 'off-1' }])));
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      onWarning: () => {
+        throw new Error('log transport is down');
+      },
+    });
+
+    // The warning rides the SUCCESS path, so a sink that throws would turn a perfectly good
+    // offer-list read into a failed one — the failure an observability hook must never add.
+    await expect(client.getJson(OFFERS_PATH)).resolves.toEqual([{ obj_id: 'off-1' }]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createHttpClient — the alert sink cannot replace the failure it reports', () => {
+  it('lets the read failure through when the alert sink itself throws', async () => {
+    const fetchImpl = alwaysFailing(500);
+    const timer = sleepRecorder();
+    const onAlert = vi.fn(() => {
+      throw new Error('chat webhook is down');
+    });
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      retry: TEST_POLICY,
+      sleep: timer.sleep,
+      random: () => 1,
+      onAlert,
+    });
+
+    const error: unknown = await client.getJsonWithBackoff(OFFERS_PATH).catch((e: unknown) => e);
+
+    // Without the try/catch the caller is told the webhook is down — true, and not the
+    // thing that just happened. The read failure is the signal that has to survive.
+    expect(error).toBeInstanceOf(StrakerRetryExhaustedError);
+    expect(onAlert).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Constitution VI — "every network operation MUST have an explicit timeout; no unbounded
+ * waits" — and the **slow** branch of FR-019b, which cannot exist without one.
+ *
+ * A portal that accepts the connection and then goes quiet is bounded by nothing but
+ * Node's socket defaults (~300s), so four attempts can hold one read for twenty minutes
+ * while the loop stops polling and the liveness signal neither succeeds nor fails.
+ *
+ * The deadlines below are milliseconds: what is under test is the wiring and the
+ * classification, never the clock.
+ */
+const DEADLINE_MS = 5;
+
+/**
+ * A portal that accepts the connection and then goes quiet: it settles only when the
+ * request is aborted. With no signal nothing would ever settle — which is the bug — so the
+ * stub says so at once rather than hanging the suite for a minute to make the same point.
+ */
+const goesQuiet: typeof fetch = (_input, init) =>
+  new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) {
+      reject(new Error('STUB: no AbortSignal was sent, so nothing would ever stop this request'));
+      return;
+    }
+    signal.addEventListener('abort', () => reject(signal.reason as Error));
+  });
+
+/**
+ * Headers arrive; the body dies when the deadline fires. This is what undici does to a
+ * body still streaming when the signal aborts, and the failure lands on `response.json()`
+ * — the branch that must not mistake it for a malformed payload.
+ *
+ * `delivered()` counts the replies that actually reached that branch, so a test can tell
+ * this path apart from a plain `fetch` rejection instead of assuming which one it got.
+ */
+function quietUntilBodyDies(): { impl: typeof fetch; delivered: () => number } {
+  let delivered = 0;
+  return {
+    delivered: () => delivered,
+    impl: (_input, init) =>
+      new Promise<Response>((resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) {
+          reject(
+            new Error('STUB: no AbortSignal was sent, so nothing would ever stop this request'),
+          );
+          return;
+        }
+        signal.addEventListener('abort', () => {
+          delivered += 1;
+          resolve(bodyDiesResponse(200));
+        });
+      }),
+  };
+}
+
+describe('createHttpClient — every request carries a deadline (Constitution VI)', () => {
+  it('gives up on a portal that goes quiet, instead of waiting out the platform default', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(goesQuiet);
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      timeoutMs: DEADLINE_MS,
+    });
+
+    const error: unknown = await client.getJson(OFFERS_PATH).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(StrakerTimeoutError);
+    expect(error).toMatchObject({ path: OFFERS_PATH, timeoutMs: DEADLINE_MS });
+  });
+
+  it('sends no signal at all when no deadline is configured, so the capture probe is unchanged', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse([]));
+    const client = createHttpClient({ baseUrl: 'https://portal.test', fetchImpl });
+
+    await client.getJson(OFFERS_PATH);
+
+    // The probe builds its client with `{ baseUrl }` and nothing else. A default deadline
+    // here would change a run that is collecting the SC-000 evidence right now.
+    expect(fetchImpl.mock.calls[0]?.[1]?.signal).toBeUndefined();
+  });
+
+  it('counts a stalled attempt as transient, which is what makes the "slow" branch of FR-019b work', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementationOnce(goesQuiet)
+      .mockResolvedValue(jsonResponse([{ obj_id: 'off-1' }]));
+    const timer = sleepRecorder();
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      retry: TEST_POLICY,
+      sleep: timer.sleep,
+      random: () => 1,
+      timeoutMs: DEADLINE_MS,
+    });
+
+    // Before the deadline existed there was nothing to turn "slow" into a failure the
+    // retry loop could see: the first attempt simply never came back.
+    await expect(client.getJsonWithBackoff(OFFERS_PATH)).resolves.toEqual([{ obj_id: 'off-1' }]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    // The stalled attempt was stopped by us, not by the stub giving up: without a signal
+    // on the wire there is no deadline and this whole scenario cannot happen.
+    expect(fetchImpl.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('gives every attempt its own deadline, so a quiet portal cannot hold the read open', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(goesQuiet);
+    const timer = sleepRecorder();
+    const onAlert = vi.fn();
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      retry: TEST_POLICY,
+      sleep: timer.sleep,
+      random: () => 1,
+      timeoutMs: DEADLINE_MS,
+      onAlert,
+    });
+
+    const error: unknown = await client.getJsonWithBackoff(OFFERS_PATH).catch((e: unknown) => e);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(TEST_POLICY.maxAttempts);
+    // One signal per attempt, not one shared across the sequence: a single deadline for
+    // the whole loop would abort attempt four before it had a chance to answer.
+    expect(new Set(fetchImpl.mock.calls.map((call) => call[1]?.signal)).size).toBe(
+      TEST_POLICY.maxAttempts,
+    );
+    expect(error).toBeInstanceOf(StrakerRetryExhaustedError);
+    expect((error as StrakerRetryExhaustedError).cause).toBeInstanceOf(StrakerTimeoutError);
+    // The operator reads this line, not the stack: "gave no answer within 5ms" says what
+    // happened, where `AbortError: This operation was aborted` would not.
+    expect(onAlert.mock.calls[0]?.[0]).toMatchObject({
+      reason: expect.stringContaining(`${DEADLINE_MS}ms`) as unknown as string,
+    });
+  });
+
+  it('reads a body killed by its own deadline as a stall, not as a malformed payload', async () => {
+    const stalledBody = quietUntilBodyDies();
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementationOnce(stalledBody.impl)
+      .mockResolvedValue(jsonResponse([]));
+    const timer = sleepRecorder();
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      retry: TEST_POLICY,
+      sleep: timer.sleep,
+      random: () => 1,
+      timeoutMs: DEADLINE_MS,
+    });
+
+    // The two 2xx-body failures look identical at the catch and must be classified
+    // oppositely: JSON the portal never finished sending is transient, JSON it sent and
+    // meant is a contract violation (asserted a few describes above).
+    await expect(client.getJsonWithBackoff(OFFERS_PATH)).resolves.toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    // Proof that the retry followed a dead BODY and not a rejected `fetch`: the reply was
+    // handed over, headers and all, and died on the way to being parsed.
+    expect(stalledBody.delivered()).toBe(1);
+  });
+
+  it('refuses a deadline of zero at construction rather than aborting every request at 3am', () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse([]));
+
+    expect(() =>
+      createHttpClient({ baseUrl: 'https://portal.test', fetchImpl, timeoutMs: 0 }),
+    ).toThrow(/timeoutMs/);
   });
 });

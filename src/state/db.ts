@@ -1,7 +1,6 @@
 import Database from 'better-sqlite3';
-import { mkdirSync, renameSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { computeXtmJobKey } from '../detection/jobKey.js';
+import { openSqliteWithQuarantine } from '../shared/sqliteOpen.js';
 
 export type DB = Database.Database;
 
@@ -104,42 +103,39 @@ export class MigrationError extends Error {
   }
 }
 
+/** This bot's state file. Named here so the quarantine copy is named from it too. */
+const DB_FILENAME = 'acolad.db';
+
 /**
  * Open (and migrate) the SQLite state db with WAL. On a corrupt/unopenable file
  * the original is quarantined as acolad.db.corrupt-<ts> (never overwritten) and
  * a fresh db is created — caller treats this as a cold start + alert (FR-017).
- * A `MigrationError` (our own migration logic bug) is re-thrown, NOT quarantined.
+ * A `MigrationError` (our own migration logic bug) is re-thrown, NOT quarantined —
+ * quarantining there would rename a perfectly valid acolad.db and silently discard all
+ * job history for a code bug (PR #23).
+ *
+ * The open/quarantine sequence itself lives in `shared/sqliteOpen.ts`, which both bots
+ * use; what stays here is what is this bot's own — the filename, the migration, and which
+ * error means "our code is wrong".
  */
 export function openDatabase(stateDir: string, nowIso: string): OpenResult {
-  mkdirSync(stateDir, { recursive: true });
-  const dbPath = join(stateDir, 'acolad.db');
-
-  let attempt: DB | undefined;
-  try {
-    attempt = new Database(dbPath);
-    attempt.pragma('journal_mode = WAL');
-    migrate(attempt);
-    return { db: attempt, recoveredFromCorruption: false };
-  } catch (err) {
-    // Release any handle opened above so the file can be renamed (Windows EBUSY).
-    try {
-      attempt?.close();
-    } catch {
-      // ignore — best-effort close before quarantine
-    }
-    // A migration LOGIC error (our code threw) is NOT file corruption. Quarantining here would
-    // rename a perfectly valid acolad.db to .corrupt and silently discard all job history for a
-    // code bug. Crash loud instead: propagate so the bot fails to start + pages, db preserved.
-    if (err instanceof MigrationError) throw err;
-    if (!existsSync(dbPath)) throw err;
-    const stamp = nowIso.replace(/[:.]/g, '-');
-    const corruptCopyPath = join(stateDir, `acolad.db.corrupt-${stamp}`);
-    renameSync(dbPath, corruptCopyPath);
-    const db = new Database(dbPath);
-    db.pragma('journal_mode = WAL');
-    migrate(db);
-    return { db, recoveredFromCorruption: true, corruptCopyPath };
-  }
+  const opened = openSqliteWithQuarantine({
+    dir: stateDir,
+    fileName: DB_FILENAME,
+    nowIso,
+    migrate,
+    isLogicError: (err) => err instanceof MigrationError,
+  });
+  // Rebuilt rather than spread, on purpose: `OpenResult` carries no `path`, and its
+  // `corruptCopyPath` must stay ABSENT (not present-and-undefined) on the healthy path —
+  // the shape callers have always been handed.
+  return opened.corruptCopyPath === undefined
+    ? { db: opened.db, recoveredFromCorruption: opened.recoveredFromCorruption }
+    : {
+        db: opened.db,
+        recoveredFromCorruption: opened.recoveredFromCorruption,
+        corruptCopyPath: opened.corruptCopyPath,
+      };
 }
 
 /**

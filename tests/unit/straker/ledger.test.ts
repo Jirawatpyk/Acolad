@@ -20,16 +20,52 @@
  *   Mon 14 · Tue 15 · Wed 16 · Thu 17 · Fri 18 · Sat 19 · Sun 20
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { openDatabase } from '../../../src/state/db.js';
 import {
   StrakerStore,
   openStrakerDatabase,
   type StrakerDB,
 } from '../../../src/straker/strakerStore.js';
 import { StrakerLedger, type LedgerWorkCalendar } from '../../../src/straker/ledger.js';
+
+const LEDGER_SOURCE = fileURLToPath(new URL('../../../src/straker/ledger.ts', import.meta.url));
+
+/**
+ * Every module `file` imports, with relative specifiers resolved to real paths.
+ *
+ * Resolving beats pattern-matching the source text, which is what the previous version of
+ * this guard did: it looked for `from '../state/` and so said nothing about
+ * `from '../../src/state/db.js'` — the same import, a different spelling. A guard that a
+ * spelling can walk past is worse than no guard, because it reports green while checking
+ * nothing.
+ */
+function importedModules(file: string): string[] {
+  const source = readFileSync(file, 'utf8');
+  const specifiers = [
+    ...source.matchAll(/\bfrom\s*['"]([^'"]+)['"]|\bimport\s*\(?\s*['"]([^'"]+)['"]/g),
+  ].map((m) => m[1] ?? m[2] ?? '');
+  return specifiers.map((spec) =>
+    spec.startsWith('.') ? resolve(dirname(file), spec).replace(/\\/g, '/') : spec,
+  );
+}
+
+/** Every file under `root`, as sorted relative paths — the "did anything appear?" probe. */
+function filesUnder(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string, rel: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const relPath = rel === '' ? entry.name : `${rel}/${entry.name}`;
+      if (entry.isDirectory()) walk(join(dir, entry.name), relPath);
+      else out.push(relPath);
+    }
+  };
+  walk(root, '');
+  return out.sort();
+}
 
 const NOW_MS = Date.parse('2026-09-14T10:00:00+07:00'); // Monday, mid-morning
 const at = (iso: string): number => Date.parse(iso);
@@ -63,6 +99,12 @@ function freshLedger(
       ? new StrakerLedger(store, ceiling, CALENDAR)
       : new StrakerLedger(store, ceiling, CALENDAR, holidaysAt);
   return { ledger, store, dir };
+}
+
+/** Put one environment variable back exactly as it was, unset included. */
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
 }
 
 afterEach(() => {
@@ -192,14 +234,103 @@ describe('a ceiling of its own', () => {
     const { ledger } = freshLedger(2_500);
     expect(ledger.ceiling).toBe(2_500);
     expect(ledger.remainingOn('2026-09-17', NOW_MS)).toBe(2_500);
+    expect(readFileSync(LEDGER_SOURCE, 'utf8')).not.toMatch(/ACCEPT_MAX/);
+  });
 
-    const source = readFileSync(
-      fileURLToPath(new URL('../../../src/straker/ledger.ts', import.meta.url)),
-      'utf8',
+  it('keeps its own ceiling while the XTM bot settings in the environment say otherwise', () => {
+    // The behavioural half of "Straker's ceiling is Straker's own": the XTM bot reads its
+    // ceiling from these variables, so a ledger that had reached for the XTM config would
+    // answer 99_000 here. Only a figure passed in by Straker's own caller survives.
+    const before = {
+      words: process.env.ACCEPT_MAX_WORDS_PER_DAY,
+      wwc: process.env.ACCEPT_MAX_WWC_PER_DAY,
+      metric: process.env.ACCEPT_EFFORT_METRIC,
+    };
+    process.env.ACCEPT_MAX_WORDS_PER_DAY = '99000';
+    process.env.ACCEPT_MAX_WWC_PER_DAY = '99000';
+    process.env.ACCEPT_EFFORT_METRIC = 'wwc';
+    try {
+      const { ledger } = freshLedger(1_000);
+      ledger.hold({ objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON }, NOW_MS);
+
+      expect(ledger.ceiling).toBe(1_000);
+      expect(ledger.remainingOn('2026-09-17', NOW_MS)).toBe(600);
+      expect(
+        ledger.checkCapacity({ objId: 'big', effortWords: 900, deadlineMs: THU_AFTERNOON }, NOW_MS),
+      ).toMatchObject({ fits: false });
+    } finally {
+      restoreEnv('ACCEPT_MAX_WORDS_PER_DAY', before.words);
+      restoreEnv('ACCEPT_MAX_WWC_PER_DAY', before.wwc);
+      restoreEnv('ACCEPT_EFFORT_METRIC', before.metric);
+    }
+  });
+
+  it('runs a whole cycle without touching the XTM database or any file outside its own', () => {
+    // The bulkhead as behaviour, not as a comment — the same proof the store and the
+    // outbox carry, against a REAL XTM database opened alongside. An import of the XTM
+    // state layer that actually wrote anything would land here.
+    const root = mkdtempSync(join(tmpdir(), 'straker-ledger-bulkhead-'));
+    dirs.push(root);
+    const xtmDir = join(root, 'xtm');
+    const strakerDir = join(root, 'straker');
+    mkdirSync(xtmDir, { recursive: true });
+    mkdirSync(strakerDir, { recursive: true });
+
+    const xtm = openDatabase(xtmDir, new Date(NOW_MS).toISOString()).db;
+    xtm.prepare("INSERT INTO meta (key, value) VALUES ('straker-ledger-marker', '1')").run();
+    const xtmFilesBefore = filesUnder(xtmDir);
+
+    const opened = openStrakerDatabase(strakerDir, NOW_MS);
+    openDbs.push(opened.db);
+    const ledger = new StrakerLedger(new StrakerStore(opened.db), CEILING, CALENDAR);
+
+    ledger.hold({ objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.checkCapacity({ objId: 'offer-2', effortWords: 400, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.committedByDay(NOW_MS);
+    ledger.heldWorkMissingDeadline(NOW_MS);
+    ledger.release('offer-1', NOW_MS + 3_600_000);
+
+    expect(filesUnder(xtmDir)).toEqual(xtmFilesBefore);
+    expect(filesUnder(root).filter((p) => !p.startsWith('xtm/'))).not.toEqual([]);
+    expect(
+      filesUnder(root)
+        .filter((p) => !p.startsWith('xtm/'))
+        .every((p) => p.startsWith('straker/')),
+    ).toBe(true);
+    expect(xtm.prepare("SELECT value FROM meta WHERE key = 'straker-ledger-marker'").get()).toEqual(
+      {
+        value: '1',
+      },
     );
-    expect(source).not.toMatch(/from '\.\.\/state\//);
-    expect(source).not.toMatch(/from '\.\.\/config\//);
-    expect(source).not.toMatch(/ACCEPT_MAX/);
+    expect((xtm.prepare('SELECT COUNT(*) AS n FROM jobs').get() as { n: number }).n).toBe(0);
+    expect((xtm.prepare('SELECT COUNT(*) AS n FROM outbox').get() as { n: number }).n).toBe(0);
+    xtm.close();
+  });
+
+  it('never imports the XTM state or configuration layer, however the path is spelled', () => {
+    // The structural backstop behind the two behavioural tests above. It resolves each
+    // specifier instead of matching its text, because the text form of this check could be
+    // walked past by writing '../../src/state/db.js' for '../state/db.js'.
+    const imports = importedModules(LEDGER_SOURCE);
+
+    // Guard the guard: an extractor that silently found nothing would "pass" everything.
+    expect(imports.some((m) => m.endsWith('/src/schedule/acceptCapacity.js'))).toBe(true);
+    expect(imports.some((m) => m.endsWith('/src/straker/outcomePolicy.js'))).toBe(true);
+    expect(imports.filter((m) => /(^|\/)(state|config)(\/|$)/.test(m))).toEqual([]);
+  });
+
+  it('draws the line at the ceiling itself: exactly full fits, one word more does not', () => {
+    // The boundary is where an off-by-one turns into an over-commitment, and an
+    // irreversible claim is a poor place to discover one.
+    const { ledger } = freshLedger();
+    ledger.hold({ objId: 'held', effortWords: 600, deadlineMs: THU_AFTERNOON }, NOW_MS);
+
+    expect(
+      ledger.checkCapacity({ objId: 'exact', effortWords: 400, deadlineMs: THU_AFTERNOON }, NOW_MS),
+    ).toMatchObject({ fits: true });
+    expect(
+      ledger.checkCapacity({ objId: 'over', effortWords: 401, deadlineMs: THU_AFTERNOON }, NOW_MS),
+    ).toMatchObject({ fits: false, reason: 'ceiling_reached' });
   });
 
   it('refuses a ceiling that is not a positive number rather than reading it as unlimited', () => {
@@ -325,6 +456,26 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
     ).toMatchObject({ fits: true });
   });
 
+  it('reports no breach for a hold that lands exactly on the ceiling', () => {
+    // Exactly full is full, not over: `committedEffort >= ceiling` here would warn about a
+    // day that is precisely within its budget, and an FR-016d warning that cries wolf is a
+    // warning nobody reads on the day it matters.
+    const { ledger } = freshLedger();
+    ledger.hold({ objId: 'held', effortWords: 600, deadlineMs: THU_AFTERNOON }, NOW_MS);
+
+    const exact = ledger.hold(
+      { objId: 'exact', effortWords: 400, deadlineMs: THU_AFTERNOON },
+      NOW_MS,
+    );
+    expect(exact.committedEffort).toBe(CEILING);
+    expect(exact.ceilingExceeded).toBe(false);
+
+    // And one word past it is a breach.
+    const over = ledger.hold({ objId: 'over', effortWords: 1, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    expect(over.committedEffort).toBe(CEILING + 1);
+    expect(over.ceilingExceeded).toBe(true);
+  });
+
   it('reports no breach for a hold that stays inside the ceiling', () => {
     const { ledger } = freshLedger();
     const result = ledger.hold(
@@ -341,6 +492,9 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
     const result = ledger.hold({ objId: 'offer-1', effortWords: 5_000, deadlineMs: null }, NOW_MS);
 
     expect(result.deadlineDay).toBeNull();
+    // No day means no day total. Reporting 0 for a 5_000-word hold reads as "that day has
+    // nothing committed", which is the opposite of what happened.
+    expect(result.committedEffort).toBeNull();
     expect(result.ceilingExceeded).toBe(false);
     expect(ledger.heldWorkMissingDeadline(NOW_MS)).toEqual(['offer-1']);
   });

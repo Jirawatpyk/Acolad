@@ -11,15 +11,19 @@
  * `strakerStore.ts` alongside the rest of Straker's schema). It shares nothing with the
  * XTM bot's `outbox` — R11 — and this file imports neither `src/state/` nor `src/config/`.
  *
- * The discipline is copied from the XTM outbox, which has run in production since
- * 2026-06: idempotent enqueue, attempt counting, exponential backoff, and a `dead` state
- * once the retries are spent. **Dead is visible, not lost**: a dead row still holds its
+ * The discipline is the XTM outbox's, which has run in production since 2026-06:
+ * idempotent enqueue, attempt counting, exponential backoff, and a `dead` state once the
+ * retries are spent. The backoff and the give-up rule are not copied from it but literally
+ * shared with it (`shared/outboxRetry.ts`) — a pure policy function, which is a different
+ * thing from a shared database and leaves R11 exactly where it was.
+ * **Dead is visible, not lost**: a dead row still holds its
  * payload and `requeueDead` brings it back, which is what an operator does after fixing a
  * webhook. Delivery is at-least-once — a row is marked sent immediately after the
  * destination accepts it, and the resulting window is the one the XTM plan already
  * recorded in its Complexity Tracking.
  */
 
+import { decideOutboxRetry } from '../shared/outboxRetry.js';
 import type { StrakerDB } from './strakerStore.js';
 
 /**
@@ -31,7 +35,28 @@ import type { StrakerDB } from './strakerStore.js';
 export const STRAKER_OUTBOX_CHANNELS = ['offers', 'tracking', 'alerts'] as const;
 export type StrakerOutboxChannel = (typeof STRAKER_OUTBOX_CHANNELS)[number];
 
-export type StrakerOutboxStatus = 'pending' | 'sent' | 'dead';
+/**
+ * A queued outcome's three states. A runtime list rather than a bare union because
+ * `strakerStore.ts` generates this column's CHECK from it: a status named in one place and
+ * retyped in the other is a disagreement that type-checks (FR-016).
+ */
+export const STRAKER_OUTBOX_STATUSES = ['pending', 'sent', 'dead'] as const;
+export type StrakerOutboxStatus = (typeof STRAKER_OUTBOX_STATUSES)[number];
+
+/**
+ * What `enqueue` did — and when it queued nothing, which situation it found. A boolean
+ * collapsed three answers into one, and the three call for different things:
+ *
+ * - `queued` — the outcome is now durable and will be delivered.
+ * - `already_pending` — a re-run of a cycle that had already queued it. Nothing to do:
+ *   the outcome is still on its way.
+ * - `already_sent` — it reached its destination on an earlier pass. Also nothing to do,
+ *   but it says the earlier cycle completed, which `already_pending` does not.
+ * - `already_dead` — delivery was given up on. **The opposite conclusion**: the outcome
+ *   will never arrive unless an operator runs a requeue, so a caller that treats this as
+ *   "already handled" has silently dropped it (FR-016). It is worth surfacing.
+ */
+export type StrakerEnqueueResult = 'queued' | 'already_pending' | 'already_sent' | 'already_dead';
 
 export interface StrakerOutboxRow {
   readonly outboxId: number;
@@ -61,9 +86,6 @@ export interface StrakerOutboxOptions {
 const DEFAULT_RETRY_CAP = 10;
 const DEFAULT_DEAD_AFTER_HOURS = 6;
 
-const BASE_BACKOFF_MS = 30_000;
-const MAX_BACKOFF_MS = 5 * 60_000;
-
 interface OutboxRowShape {
   outbox_id: number;
   event_id: string;
@@ -91,8 +113,12 @@ export class StrakerOutbox {
   /**
    * Queue one outcome for one destination. Idempotent on event id **together with**
    * channel: re-running a cycle after a crash re-queues nothing, while the same outcome
-   * still reaches every destination it must. Returns false when the row was already
-   * queued.
+   * still reaches every destination it must.
+   *
+   * When it queues nothing it says **which** situation it found, rather than a bare false
+   * — see `StrakerEnqueueResult`. The distinction is not decoration: `already_dead` means
+   * this outcome will never be delivered, and is the one answer a caller must not read as
+   * "already handled".
    *
    * An unknown channel is refused by the schema, not merely by the type — a channel the
    * dispatcher cannot route would be an outcome queued into silence.
@@ -102,7 +128,7 @@ export class StrakerOutbox {
     channel: StrakerOutboxChannel,
     payloadJson: string,
     nowMs: number,
-  ): boolean {
+  ): StrakerEnqueueResult {
     // `ON CONFLICT (event_id, channel) DO NOTHING` rather than `INSERT OR IGNORE`: the
     // latter ignores EVERY constraint violation, so a channel the dispatcher cannot route
     // would be dropped silently instead of raising. Only the dedup conflict is meant to
@@ -115,7 +141,28 @@ export class StrakerOutbox {
          ON CONFLICT (event_id, channel) DO NOTHING`,
       )
       .run(eventId, channel, payloadJson, nowMs, nowMs);
-    return res.changes > 0;
+    if (res.changes > 0) return 'queued';
+
+    const existing = this.db
+      .prepare('SELECT status FROM straker_outbox WHERE event_id = ? AND channel = ?')
+      .get(eventId, channel) as { status: StrakerOutboxStatus } | undefined;
+    if (existing === undefined) {
+      // The insert was refused by the dedup index, so the row it collided with was there a
+      // statement ago. Nothing in this module deletes a row, so reaching here means the
+      // table was changed by something else — and answering "already queued" about an
+      // outcome that is not queued is how an outcome gets lost quietly (FR-016).
+      throw new Error(
+        `straker_outbox: ${eventId} on '${channel}' collided with a row that is no longer there`,
+      );
+    }
+    switch (existing.status) {
+      case 'sent':
+        return 'already_sent';
+      case 'dead':
+        return 'already_dead';
+      case 'pending':
+        return 'already_pending';
+    }
   }
 
   /** Rows ready to be sent, oldest first, so outcomes leave in the order they happened. */
@@ -145,20 +192,24 @@ export class StrakerOutbox {
    *
    * Returns `'dead'` once the retry cap is spent or the row has aged past
    * `deadAfterHours`. A dead row keeps its payload and is brought back by `requeueDead`.
+   *
+   * The schedule is `shared/outboxRetry.ts` — one policy for both bots' queues, which is
+   * what makes "the same figures the XTM bot runs on" a fact rather than an intention.
    */
   recordFailure(row: StrakerOutboxRow, nowMs: number): 'pending' | 'dead' {
-    const attempts = row.attempts + 1;
-    const agedOut = nowMs - row.createdAtMs >= this.deadAfterHours * 3_600_000;
-    if (attempts >= this.retryCap || agedOut) {
+    const decision = decideOutboxRetry(row, nowMs, {
+      retryCap: this.retryCap,
+      deadAfterHours: this.deadAfterHours,
+    });
+    if (decision.kind === 'dead') {
       this.db
         .prepare(`UPDATE straker_outbox SET status = 'dead', attempts = ? WHERE outbox_id = ?`)
-        .run(attempts, row.outboxId);
+        .run(decision.attempts, row.outboxId);
       return 'dead';
     }
-    const backoff = Math.min(BASE_BACKOFF_MS * 2 ** (attempts - 1), MAX_BACKOFF_MS);
     this.db
       .prepare('UPDATE straker_outbox SET attempts = ?, next_attempt_at_ms = ? WHERE outbox_id = ?')
-      .run(attempts, nowMs + backoff, row.outboxId);
+      .run(decision.attempts, decision.nextAttemptAtMs, row.outboxId);
     return 'pending';
   }
 

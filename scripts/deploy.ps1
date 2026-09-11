@@ -22,6 +22,22 @@ $root = Split-Path -Parent $PSScriptRoot
 # One descriptor per bot. Every value under `xtm` is the literal this script used inline
 # when it knew about a single bot: the XTM release path changed in where it reads its
 # constants, never in what it runs with them.
+#
+# LogGlob is where step 5/5 looks for proof of life, and each one is coupled to TWO
+# settings rather than one - the pino-roll base name, which is a constant in the bot's
+# source, AND the log directory, which is an env var with a default and can therefore be
+# moved in .env alone. Both halves, for both bots:
+#
+#   bot      base name                                   log directory (default 'logs')
+#   xtm      'acolad'          src/monitoring/logger.ts  LOG_DIR
+#   straker  STRAKER_LOG_NAME  src/straker/logger.ts     STRAKER_LOG_DIR
+#
+# Change either half without changing the glob here and a perfectly healthy deploy FAILs
+# its verify step - which invites exactly the manual `pm2 restart` this script exists to
+# make unnecessary. This script deliberately does not read .env (the same convention that
+# has the lock ports below kept in sync by hand), so setting STRAKER_LOG_DIR=logs/straker
+# and leaving this table alone is enough to break a healthy deploy. If step 5/5 FAILs on a
+# bot that is plainly running, check the glob against BOTH halves before touching PM2.
 $Bots = @{
   xtm     = @{
     App       = 'acolad-bot'
@@ -38,10 +54,8 @@ $Bots = @{
     App       = 'jobcatch-straker'
     Port      = 47812
     Ecosystem = 'straker.config.cjs'
-    # Must match what the bot actually writes: the pino-roll base name in
-    # src/straker/logger.ts (STRAKER_LOG_NAME). Rename it there and rename it here in the
-    # same change - otherwise a perfectly healthy deploy fails its verify step and invites
-    # the manual restart this script exists to make unnecessary.
+    # Both halves of this glob are load-bearing - the 'logs' directory is STRAKER_LOG_DIR's
+    # default, the base name is STRAKER_LOG_NAME. See the LogGlob note above the table.
     LogGlob   = 'logs/jobcatch-straker.*.log'
     # The SAME marker the XTM bot uses, which is what DC-3 asks of both loops: it proves a
     # cycle completed, not merely that a process started. `startStrakerBot`'s runOnce emits
@@ -159,14 +173,22 @@ try {
     'both'    { @('xtm', 'straker') }
   }
 
+  # Bulkhead guard (FR-024/FR-026): a mistyped port or app name in the table above would
+  # let a Straker release stop the live XTM bot - the one outcome the split exists to
+  # prevent. EVERY descriptor in this run is checked in its own pass first, so the guard
+  # fails while nothing has been stopped yet. Inside the release loop it did not: for
+  # -Target both it reached the straker entry only on the second iteration, by which time
+  # Release-Bot had already stopped and restarted the LIVE XTM bot - doing the damage the
+  # guard exists to prevent before reporting that it was possible.
   foreach ($name in $order) {
     $bot = $Bots[$name]
-    # Bulkhead guard (FR-024/FR-026): a mistyped port or app name in the table above would
-    # let a Straker release stop the live XTM bot - the one outcome the split exists to
-    # prevent. Checked here because it fails before anything has been stopped.
     if ($name -ne 'xtm' -and ($bot.Port -eq $Bots.xtm.Port -or $bot.App -eq $Bots.xtm.App)) {
       throw "bot register broken: $($bot.App) collides with the XTM bot's port or app name"
     }
+  }
+
+  foreach ($name in $order) {
+    $bot = $Bots[$name]
     Release-Bot $bot ($order.Count -gt 1)
   }
 }

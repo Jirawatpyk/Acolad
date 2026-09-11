@@ -26,6 +26,29 @@ Current probe state: **0 offers captured** (running since 2026-09-11 11:56 BKK).
 
 Single project. Straker code extends `src/straker/`, started by the capture probe. `src/schedule/` and `src/monitoring/` are **reused unchanged**. `src/config/index.ts` and every existing XTM file are **not touched** — see plan §Scope decision.
 
+### Carried into Phase 3+ from the Phase 2 review wave (2026-09-11)
+
+Four reviewers audited the Phase 1+2 commit; the fixes changed three shapes that later tasks
+consume, and two of them fail *silently* if a caller assumes the old shape:
+
+- **`StrakerLedger.hold()` returns a discriminated union.** Read `deadlineDay` before
+  `committedEffort` — the null-deadline branch carries `committedEffort: null`, deliberately
+  not `0`, because `0` reads as "nothing booked that day" for work of any size.
+- **`StrakerOutbox.enqueue()` returns `'queued' | 'already_pending' | 'already_sent' |
+  'already_dead'`**, not a boolean. **`already_dead` must never be read as "handled"**: that
+  outcome will not be delivered until ops requeues it, so treating it as done loses the
+  outcome — exactly what FR-016 forbids.
+- **`StrakerStore.endSighting()` returns a boolean**, and unlike `release()`'s `false`
+  ("nothing to release, which is normal") a `false` here means the tracker and the store have
+  diverged, which the caller should alert on.
+
+Two habits worth carrying, both learned the hard way in this wave: a capability built inside
+`httpClient.ts` was twice left **unreachable** because no caller passed the option that
+switches it on (the retrying read door, then the request deadline), so the composition root's
+wiring is now asserted by tests of its own; and `src/straker/types.ts` is **type-only** — its
+runtime members live in `outcomePolicy.ts`, because the coverage gate excludes `**/types.ts`
+repo-wide and executable code must not hide behind a name the gate skips.
+
 ---
 
 ## Phase 1: Setup (Shared Infrastructure)
@@ -57,7 +80,7 @@ Single project. Straker code extends `src/straker/`, started by the capture prob
 - [x] T014 Emit the Straker liveness signal in `src/straker/main.ts` (FR-026a, FR-025), monitored separately so neither bot can hide the other's death
 - [x] T015 [P] Write failing tests that an outcome survives a reporting destination being unavailable and is delivered on recovery, in `tests/unit/straker/outbox.test.ts` (FR-016, FR-016b, V11)
 - [x] T016 Implement durable outcome queuing in `src/straker/outbox.ts` (FR-016)
-- [x] T017 Wire the capture probe's proven modules into the bot — `httpClient.ts` (transport, cookie jar, Origin/Referer, budget headers), `session.ts` (sign-in, vendor identity read from the portal every time and never pinned — FR-022), `offersApi.ts` (open-offer read with its shape guards — FR-023) and `offerTracker.ts` (the pure sighting transition) — consumed by `src/straker/main.ts` and `src/straker/pollCycle.ts` rather than rewritten. These already exist and are tested; nothing else in the plan picks them up
+- [x] T017 Wire the capture probe's proven modules into the bot — `httpClient.ts` (transport, cookie jar, Origin/Referer, budget headers), `session.ts` (sign-in, vendor identity read from the portal every time and never pinned — FR-022), `offersApi.ts` (open-offer read with its shape guards — FR-023) and `offerTracker.ts` (the pure sighting transition) — consumed by `src/straker/main.ts` and `src/straker/pollCycle.ts` rather than rewritten. These already exist and are tested; nothing else in the plan picks them up. **Scope note (2026-09-11)**: only the `main.ts` half is done — `pollCycle.ts` does not exist yet and is T037's to create. The four modules are consumed today by `createStrakerPortal` / `createSightingTracker` / `createSightingCycle` in `main.ts`, and `createSightingCycle` is explicitly the seam T037 replaces with the full fetch -> diff -> gate -> act -> persist -> notify sequence
 - [x] T018 [P] (FR-032) Add a `jobcatch-straker` logger in `src/straker/logger.ts` with the credential values redacted, independent of the XTM bot's logger (which is bound to `AppConfig`)
 
 - [x] T019 [P] Write failing tests for **exponential backoff with jitter and a defined cap** on the reading path, and that exhausting the cap **raises an alert** rather than retrying forever, in `tests/unit/straker/httpClient.test.ts` (FR-019b, V30, Constitution IV)

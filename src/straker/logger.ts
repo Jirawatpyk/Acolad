@@ -4,20 +4,20 @@
  * Separate from `src/monitoring/logger.ts` because that one is bound to `AppConfig` — the
  * XTM bot's config object, which the Straker bot deliberately does not have (adding
  * required Straker variables to `src/config/index.ts` would fail-fast the live XTM bot on
- * start). What is NOT duplicated is the redaction itself: `redactSecrets`, `maskString`
- * and `flushWithCap` are imported from the XTM logger, so a fix to how a secret is masked
- * lands in both bots at once rather than in whichever one someone remembered.
+ * start). What is NOT duplicated is anything underneath that binding: the rotation,
+ * retention and key-censoring policy is `shared/rollingLogger.ts`, and the value-based
+ * redaction (`redactSecrets`, `maskString`, `flushWithCap`) is imported from the XTM
+ * logger — so a fix to how a secret is masked, or to how long a log is kept, lands in both
+ * bots at once rather than in whichever one someone remembered.
  *
  * The two bots share one log directory (an enumerated, accepted sharing in the spec), so
  * the file base below must be the bot's own name or the two would write into each other's
  * rotated files.
  */
 
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
-import pino from 'pino';
 import type { LogFields, Logger } from '../monitoring/logger.js';
 import { flushWithCap, maskString, redactSecrets } from '../monitoring/logger.js';
+import { LOG_FLUSH_CAP_MS, createRollingLogger } from '../shared/rollingLogger.js';
 import { strakerSecretValues, type StrakerBotConfig } from './config.js';
 
 /** ADR-002: the program is named JobCatch, and naming this feature introduces follows it. */
@@ -58,37 +58,14 @@ export function withRedaction(target: PinoLike, secrets: string[]): Logger {
  * minimum, matching the XTM bot so an incident spanning both is reconstructable).
  */
 export function createStrakerLogger(cfg: StrakerBotConfig): Logger {
-  mkdirSync(cfg.logDir, { recursive: true });
-
-  const transport = pino.transport({
-    target: 'pino-roll',
-    options: {
-      file: join(cfg.logDir, STRAKER_LOG_NAME),
-      frequency: 'daily',
-      mkdir: true,
-      limit: { count: 14 },
-      extension: '.log',
-      dateFormat: 'yyyy-MM-dd',
-    },
+  const logger = createRollingLogger({
+    logDir: cfg.logDir,
+    fileName: STRAKER_LOG_NAME,
+    // Stamped on every line so the two bots remain tellable apart in the shared log
+    // directory even after a line is copied out of its file.
+    base: { bot: STRAKER_LOG_NAME },
   });
 
-  const logger = pino(
-    {
-      level: 'info',
-      // Key-based censoring as well as the value-based masking below: the two catch
-      // different things, and the portal's session cookie is exactly the kind of value
-      // that arrives under a well-known key without ever appearing in config.
-      redact: {
-        paths: ['password', 'cookie', 'token', '*.password', '*.cookie'],
-        censor: '[REDACTED]',
-      },
-      // Stamped on every line so the two bots remain tellable apart in the shared log
-      // directory even after a line is copied out of its file.
-      base: { bot: STRAKER_LOG_NAME },
-    },
-    transport,
-  );
-
   const redacted = withRedaction(logger, strakerSecretValues(cfg));
-  return { ...redacted, flush: () => flushWithCap(logger, 500) };
+  return { ...redacted, flush: () => flushWithCap(logger, LOG_FLUSH_CAP_MS) };
 }

@@ -1,10 +1,10 @@
 /**
  * Straker transport, deliberately confined to ONE file (brief DC-4, FR-030): the cookie
- * jar, the browser-shaped headers, the rate-limit headers, the JSON plumbing and the
- * retry-with-backoff of FR-019b all live here, so a future portal in the same family can
- * copy this file and change the base URL. Nothing that issues or paces a request may live
- * outside it — a separate rate-limiter or retry module would be the first thing to break
- * that rule.
+ * jar, the browser-shaped headers, the rate-limit headers, the JSON plumbing, the
+ * per-attempt deadline of Constitution VI and the retry-with-backoff of FR-019b all live
+ * here, so a future portal in the same family can copy this file and change the base URL.
+ * Nothing that issues or paces a request may live outside it — a separate rate-limiter or
+ * retry module would be the first thing to break that rule.
  *
  * Node's global fetch has no cookie jar, and the Straker session is an HttpOnly cookie
  * (recon note §2), so the jar below is not optional.
@@ -45,9 +45,11 @@ export class StrakerHttpError extends Error {
 
 /**
  * Thrown when the read backoff runs out of attempts (FR-019b). A separate type from
- * `StrakerHttpError` on purpose: "the portal has been failing for several seconds and we
- * have stopped asking" is a different operational event from one rejected request, and the
- * two must not be handled by the same branch. Carries the last failure as `cause`.
+ * `StrakerHttpError` on purpose: "the portal has been failing across a whole retry
+ * sequence and we have stopped asking" is a different operational event from one rejected
+ * request, and the two must not be handled by the same branch. `waitedMs` counts only the
+ * backoff — how long the attempts themselves took is bounded by `timeoutMs`, not by this.
+ * Carries the last failure as `cause`.
  */
 export class StrakerRetryExhaustedError extends Error {
   constructor(
@@ -60,6 +62,27 @@ export class StrakerRetryExhaustedError extends Error {
       cause,
     });
     this.name = 'StrakerRetryExhaustedError';
+  }
+}
+
+/**
+ * Thrown when an attempt passed its deadline (Constitution VI: "every network operation
+ * MUST have an explicit timeout; no unbounded waits"). Its own type because a portal that
+ * accepts the connection and then goes quiet is a different fault from one that refuses
+ * it: the request may well have been received, and the retry loop needs to see "slow" as
+ * a failure it can act on — the branch of FR-019b that cannot work without a deadline.
+ *
+ * Raised only when a deadline is configured; a client built without `timeoutMs` cannot
+ * produce one, which is what keeps the capture probe's behaviour untouched.
+ */
+export class StrakerTimeoutError extends Error {
+  constructor(
+    readonly path: string,
+    readonly timeoutMs: number,
+    cause: unknown,
+  ) {
+    super(`Straker ${path} gave no answer within ${timeoutMs}ms`, { cause });
+    this.name = 'StrakerTimeoutError';
   }
 }
 
@@ -88,8 +111,18 @@ export interface RetryPolicy {
 
 /**
  * Sized against the poll rhythm rather than against a generic HTTP client: the read is the
- * race path, so the whole retry sequence has to stay inside a couple of seconds or the bot
- * stops reading while it waits. 250/500/1000ms of jittered backoff, then the alert.
+ * race path, so a failing read has to give up while the next poll is still worth making.
+ * Three jittered waits — 125-250, 250-500, 500-1000ms — put at most ~1.75s of *waiting*
+ * between the first attempt and the alert.
+ *
+ * **The waits are only half the sequence.** The other half is how long an attempt may take,
+ * and this policy does not bound that. Without `timeoutMs` an attempt is bounded only by
+ * the platform's socket defaults — around 300s in Node — so four attempts at a portal that
+ * accepts the connection and then goes quiet can hold one read for roughly twenty minutes,
+ * during which the loop does not poll and the liveness signal neither succeeds nor fails.
+ * With a deadline set, the worst case is `maxAttempts × timeoutMs + ~1.75s`: about 9.75s
+ * at a 2s deadline, about 17.75s at 4s. Anything that has to stay inside one poll interval
+ * must size the two together — the deadline is the term that dominates.
  */
 export const DEFAULT_READ_RETRY_POLICY: RetryPolicy = {
   maxAttempts: 4,
@@ -103,6 +136,18 @@ export interface HttpClientOptions {
   readonly fetchImpl?: typeof fetch;
   /** Overrides for the READ backoff (FR-019b). Absent fields keep the defaults above. */
   readonly retry?: Partial<RetryPolicy>;
+  /**
+   * Deadline for a single attempt, in milliseconds (Constitution VI). Applied at the one
+   * seam every request passes through, so reads, retried reads, sign-in and claims are all
+   * bounded by it — a claim that hangs is the worst unbounded wait in the feature, because
+   * its outcome stays unknown for as long as it hangs.
+   *
+   * **Opt-in, and unset by default on purpose.** The capture probe builds its client with
+   * `{ baseUrl }` alone while it collects the SC-000 evidence; without this field no abort
+   * signal is sent and its behaviour is byte-for-byte what it was. The bot must set it —
+   * absent it, an attempt is bounded only by Node's socket defaults (~300s).
+   */
+  readonly timeoutMs?: number;
   /** Injected by tests so intervals are asserted without waiting; real callers omit it. */
   readonly sleep?: (ms: number) => Promise<void>;
   /** Jitter source, injectable for the same reason. Defaults to `Math.random`. */
@@ -114,6 +159,18 @@ export interface HttpClientOptions {
    * the transport does not know.
    */
   readonly onAlert?: (alert: StrakerTransportAlert) => void;
+  /**
+   * Raised when the portal's budget reading stops being usable (contract Change-detection:
+   * "fall back to the hard ceiling **and warn**"). Warn-level, once per change of state
+   * rather than once per reply — the condition can persist for hours.
+   *
+   * **Not wired to a sink yet.** `createStrakerPortal` in `main.ts` (coordinator-owned)
+   * passes `onAlert` and not this, so today the warning has nowhere to go; it needs the
+   * matching `onWarning: (w) => report(() => logger.warn({ module: 'httpClient', ...w },
+   * w.detail))`. Routed through `onAlert` instead it would arrive as an error labelled
+   * "read gave up after exhausting its retry cap", which is a different and untrue event.
+   */
+  readonly onWarning?: (warning: StrakerTransportWarning) => void;
 }
 
 /** Server-reported request budget; recon measured limit=300 per minute. */
@@ -121,6 +178,43 @@ export interface RateLimitSnapshot {
   readonly limit: number;
   readonly remaining: number;
   readonly resetAtEpoch: number;
+}
+
+/**
+ * Why the transport has no usable budget reading. **None of these means "no limit"** —
+ * that is the whole reason they are named: the hard per-minute ceiling (FR-019, T065)
+ * applies to every one of them.
+ */
+export type RateLimitUnknownReason =
+  /** Nothing has come back yet; there is nothing to have read. */
+  | 'no_reply_yet'
+  /** The reply carried none of the three headers — contract change, or a portal in trouble. */
+  | 'headers_missing'
+  /** The headers were there and could not be believed (see `budgetHeader`). */
+  | 'headers_nonsensical';
+
+/**
+ * The budget as the transport currently understands it — a union rather than
+ * `RateLimitSnapshot | null`, so the pacing of T065 has to narrow it before it can pace on
+ * anything. A bare `null` reads far too easily as "nothing is limiting us", which is the
+ * exact inverse of what a missing header means, and inverting it silently is how an
+ * account earns a block.
+ */
+export type RateLimitBudget =
+  | { readonly known: true; readonly snapshot: RateLimitSnapshot }
+  | { readonly known: false; readonly reason: RateLimitUnknownReason };
+
+/**
+ * Something an operator should see, but which is not a failure: the read succeeded and the
+ * bot carries on. Separate from `StrakerTransportAlert` because the two need different
+ * volumes — an alert is an incident, a warning is a fact about the portal that changed.
+ */
+export interface StrakerTransportWarning {
+  readonly kind: 'rate_limit_unknown';
+  readonly reason: RateLimitUnknownReason;
+  readonly path: string;
+  /** Plain-language "what happened and what now", ready to be logged as-is. */
+  readonly detail: string;
 }
 
 export interface StrakerHttpClient {
@@ -134,7 +228,14 @@ export interface StrakerHttpClient {
   getJsonWithBackoff<T>(path: string): Promise<T>;
   /** One attempt. No retry, ever — the claim path's only door (FR-019c). */
   postJson<T>(path: string, body: unknown): Promise<T>;
-  /** Budget seen on the most recent reply, or null when the server sent no headers. */
+  /**
+   * Budget seen on the most recent reply, or `null` when there is no usable reading.
+   *
+   * `null` means **unknown, so the hard ceiling governs** (FR-019) — it never means
+   * "unlimited". The reason it is unknown is kept as a `RateLimitBudget` inside the client,
+   * where the pacing of T065 lives and has to narrow it; this projection stays nullable
+   * only because it is what the recon logger already reads.
+   */
   lastRateLimit(): RateLimitSnapshot | null;
 }
 
@@ -151,10 +252,11 @@ type AttemptResult<T> =
 export function createHttpClient(options: HttpClientOptions): StrakerHttpClient {
   const doFetch = options.fetchImpl ?? fetch;
   const retryPolicy = resolveRetryPolicy(options.retry);
+  const timeoutMs = resolveTimeout(options.timeoutMs);
   const sleep = options.sleep ?? defaultSleep;
   const random = options.random ?? Math.random;
   const jar = new Map<string, string>();
-  let rateLimit: RateLimitSnapshot | null = null;
+  let budget: RateLimitBudget = { known: false, reason: 'no_reply_yet' };
 
   async function attempt<T>(path: string, init: RequestInit): Promise<AttemptResult<T>> {
     const headers = new Headers(init.headers);
@@ -168,32 +270,44 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
     const cookie = [...jar].map(([name, value]) => `${name}=${value}`).join('; ');
     if (cookie) headers.set('cookie', cookie);
 
+    // Each attempt gets its OWN deadline, not a share of one spanning the retry sequence:
+    // a single signal for the loop would abort the last attempt before it could answer.
+    const deadline = startDeadline(path, timeoutMs);
+
     let response: Response;
     try {
       // The single chokepoint through which every Straker request passes — which is also
-      // where the per-minute pacing of FR-019/T065 will attach when Phase 6 arrives.
-      response = await doFetch(`${options.baseUrl}${path}`, { ...init, headers });
+      // where the per-minute pacing of FR-019/T065 will attach when Phase 6 arrives. Pace
+      // on `budget`, the narrowed union: `lastRateLimit()` flattens every unknown to the
+      // same `null`, which cannot tell "the portal stopped reporting" from "no limit".
+      response = await doFetch(`${options.baseUrl}${path}`, {
+        ...init,
+        headers,
+        ...deadline.fetchInit,
+      });
     } catch (error) {
-      // Unreachable, refused, or the connection died mid-flight: the portal never
-      // answered, which is precisely the transient case FR-019b exists for.
-      return { ok: false, error, retryable: true };
+      // Unreachable, refused, the connection died mid-flight, or our own deadline fired:
+      // the portal never answered, which is precisely the transient case FR-019b exists
+      // for — "slow" included, which is the case nothing could reach before the deadline.
+      return { ok: false, error: deadline.name(error), retryable: true };
     }
     storeCookies(jar, response);
-    rateLimit = readRateLimit(response);
+    updateBudget(path, response);
 
     if (!response.ok) {
-      const error = new StrakerHttpError(
-        response.status,
-        path,
-        (await response.text()).slice(0, 200),
-      );
+      const error = new StrakerHttpError(response.status, path, await bodyExcerpt(response));
       return { ok: false, error, retryable: isTransientStatus(response.status) };
     }
     try {
       return { ok: true, value: (await response.json()) as T };
     } catch (error) {
-      // A 2xx whose body is not JSON is a contract violation, not a blip. Retrying it
-      // would delay the loud failure FR-023 demands and spend requests doing so.
+      // Two failures land here looking identical and must be judged oppositely. A body cut
+      // off by our own deadline is a stall — the portal never finished its sentence — so
+      // it is transient and the loop should ask again.
+      if (deadline.expired()) return { ok: false, error: deadline.name(error), retryable: true };
+      // A body the portal did finish, and which is not JSON, is a contract violation, not
+      // a blip. Retrying it would delay the loud failure FR-023 demands and spend requests
+      // doing so.
       return { ok: false, error, retryable: false };
     }
   }
@@ -240,6 +354,27 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
     }
   }
 
+  /**
+   * Record what this reply says about the budget, and say so out loud when it stops saying
+   * anything usable. The snapshot is replaced either way — a stale reading is worse than
+   * none — but replacing it is no longer silent, and what replaces it names its reason
+   * instead of being a bare `null` that a pacer could read as "unrestrained".
+   *
+   * Warned once per change of state, not per reply: at a ten-second rhythm the latter is
+   * 8,640 lines a day about one unchanging fact, which is how a real signal gets buried.
+   */
+  function updateBudget(path: string, response: Response): void {
+    const previous = budget;
+    budget = readBudget(response);
+    if (budget.known || (!previous.known && previous.reason === budget.reason)) return;
+    raiseWarning({
+      kind: 'rate_limit_unknown',
+      reason: budget.reason,
+      path,
+      detail: BUDGET_UNKNOWN_DETAIL[budget.reason],
+    });
+  }
+
   function raiseAlert(alert: StrakerTransportAlert): void {
     if (options.onAlert === undefined) return;
     try {
@@ -247,6 +382,17 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
     } catch {
       // A broken alert sink must not replace the read failure with its own: the throw that
       // follows this call is the signal that has to reach the caller intact.
+    }
+  }
+
+  function raiseWarning(warning: StrakerTransportWarning): void {
+    if (options.onWarning === undefined) return;
+    try {
+      options.onWarning(warning);
+    } catch {
+      // This one rides the SUCCESS path: a sink that throws here would turn a good
+      // offer-list read into a failed one, which is the one thing an observability hook
+      // must never do.
     }
   }
 
@@ -259,7 +405,7 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       }),
-    lastRateLimit: () => rateLimit,
+    lastRateLimit: () => (budget.known ? budget.snapshot : null),
   };
 }
 
@@ -314,6 +460,53 @@ function resolveRetryPolicy(overrides: Partial<RetryPolicy> | undefined): RetryP
   return policy;
 }
 
+/**
+ * Fail fast on a deadline that would make every request impossible: `AbortSignal.timeout(0)`
+ * fires before the socket is open, so a zero or negative value does not mean "no deadline",
+ * it means "nothing ever succeeds". Refused at construction, like the retry policy.
+ */
+function resolveTimeout(timeoutMs: number | undefined): number | undefined {
+  if (timeoutMs === undefined) return undefined;
+  if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) {
+    throw new Error(`Straker timeoutMs must be above zero when set (got ${timeoutMs})`);
+  }
+  return timeoutMs;
+}
+
+/** One attempt's deadline: what to put on the wire, and how to read what came back. */
+interface Deadline {
+  /** Spread into the fetch init — an abort signal, or nothing at all when unset. */
+  readonly fetchInit: { readonly signal?: AbortSignal };
+  /** Did this attempt run out of time? Asked after a failure, to classify it. */
+  expired(): boolean;
+  /**
+   * Give a failure its real name when the deadline caused it. What the platform raises is
+   * `AbortError: This operation was aborted` — or, for a body cut off mid-stream, an
+   * indistinguishable `TypeError: terminated`. Neither says how long we waited, and that
+   * number is the first thing an operator needs.
+   */
+  name(error: unknown): unknown;
+}
+
+/**
+ * `AbortSignal.timeout` rather than a hand-rolled controller: its timer does not hold the
+ * event loop open, so there is nothing to clear when a request finishes early and no way
+ * to leak one per attempt. The signal also covers the body, not just the headers — undici
+ * errors a body that is still streaming when it fires — which matters because "headers
+ * arrived, body never did" is exactly how a stalled read looks.
+ */
+function startDeadline(path: string, timeoutMs: number | undefined): Deadline {
+  if (timeoutMs === undefined) {
+    return { fetchInit: {}, expired: () => false, name: (error) => error };
+  }
+  const signal = AbortSignal.timeout(timeoutMs);
+  return {
+    fetchInit: { signal },
+    expired: () => signal.aborted,
+    name: (error) => (signal.aborted ? new StrakerTimeoutError(path, timeoutMs, error) : error),
+  };
+}
+
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -322,21 +515,99 @@ function describe(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
-function readRateLimit(response: Response): RateLimitSnapshot | null {
-  const limit = numericHeader(response, 'x-ratelimit-limit');
-  const remaining = numericHeader(response, 'x-ratelimit-remaining');
-  const resetAtEpoch = numericHeader(response, 'x-ratelimit-reset');
-  if (limit === null || remaining === null || resetAtEpoch === null) return null;
-  return { limit, remaining, resetAtEpoch };
+/**
+ * The body of a rejected reply, or a note saying why there is none.
+ *
+ * Reading it can fail on its own — a 503 that promises a Content-Length and then has its
+ * connection reset is an ordinary shape for a portal in trouble. Outside a `try` that
+ * rejection escapes `attempt()` altogether: no retry classification, no backoff, no alert,
+ * no `StrakerRetryExhaustedError`, and the status — the one diagnostic worth having —
+ * replaced by `TypeError: terminated`. The excerpt is the expendable part here; the status
+ * is not, so the read is allowed to fail and the status carries on without it.
+ */
+async function bodyExcerpt(response: Response): Promise<string> {
+  try {
+    return (await response.text()).slice(0, 200);
+  } catch (error) {
+    return `<body unreadable: ${describe(error)}>`;
+  }
 }
 
-function numericHeader(response: Response, name: string): number | null {
+/** Operator-facing text for each way the budget can stop being readable. */
+const BUDGET_UNKNOWN_DETAIL: Record<RateLimitUnknownReason, string> = {
+  no_reply_yet: 'no reply seen yet, so no request budget has been read',
+  headers_missing:
+    'the portal stopped reporting its request budget (x-ratelimit-*) — the hard per-minute ceiling is now the only restraint',
+  headers_nonsensical:
+    'the portal reported a request budget that cannot be believed — the hard per-minute ceiling is now the only restraint',
+};
+
+/**
+ * What this reply says about the budget. Three headers, all or nothing: a partial set is
+ * as unusable as none, because pacing needs the remainder AND the moment it resets.
+ */
+function readBudget(response: Response): RateLimitBudget {
+  // Floors, not just finiteness: an allowance of zero is not an allowance, a negative
+  // remainder is not a count, and a reset stamp at the epoch is a deadline in 1970.
+  const limit = budgetHeader(response, 'x-ratelimit-limit', 1);
+  const remaining = budgetHeader(response, 'x-ratelimit-remaining', 0);
+  const resetAtEpoch = budgetHeader(response, 'x-ratelimit-reset', 1);
+
+  if (
+    typeof limit !== 'number' ||
+    typeof remaining !== 'number' ||
+    typeof resetAtEpoch !== 'number'
+  )
+    return {
+      known: false,
+      reason:
+        limit === 'absent' && remaining === 'absent' && resetAtEpoch === 'absent'
+          ? 'headers_missing'
+          : 'headers_nonsensical',
+    };
+
+  return { known: true, snapshot: { limit, remaining, resetAtEpoch } };
+}
+
+/** A budget header as it arrived: not sent, sent but unbelievable, or a number to pace on. */
+type HeaderReading = 'absent' | 'unusable' | number;
+
+/**
+ * `Number.isFinite` alone accepts `-5` and `0`, and the contract is explicit that a
+ * nonsensical value must not remove restraint (FR-019, contract §3). The reset stamp is
+ * the dangerous one: pacing that waits for the reset would read a stamp in the past as
+ * "the budget already refreshed" and poll freely — restraint removed by a bad value,
+ * exactly the case the hard ceiling exists to cover. So an implausible reading is treated
+ * as no reading, which routes it to that ceiling instead of into arithmetic.
+ */
+function budgetHeader(response: Response, name: string, floor: number): HeaderReading {
   const raw = response.headers.get(name);
-  if (raw === null || raw.trim() === '') return null;
+  if (raw === null || raw.trim() === '') return 'absent';
   const value = Number(raw);
-  return Number.isFinite(value) ? value : null;
+  return Number.isFinite(value) && value >= floor ? value : 'unusable';
 }
 
+/**
+ * Two known gaps here, deliberately left open — **recorded, not fixed** (reviewer finding
+ * F6, 2026-09-11):
+ *
+ * 1. A `Set-Cookie` value this cannot parse is dropped with no trace, so a portal that
+ *    changed its session mechanism looks identical to one that sent no cookie.
+ * 2. A deletion — `Set-Cookie: session=; Max-Age=0` — is stored as an empty value and kept.
+ *    The send site above tests the *joined* string for truthiness, so an empty pair still
+ *    goes out as `session=`, which is not the same as sending nothing.
+ *
+ * Both converge rather than wedge: an empty or stale session cookie earns a 401, and 401 is
+ * the one status both callers answer by signing in again (`isSessionExpired` in `main.ts`,
+ * `readWithOneReloginOn401` in `probe.ts`), which overwrites the jar. The cost is a wasted
+ * round trip, not a stuck bot.
+ *
+ * Deferred because the fix cannot be made opt-in the way the deadline was: the jar is on
+ * every client, so changing it changes the capture probe's behaviour while it is still
+ * collecting the SC-000 evidence, which is the one thing this phase may not do. Worth doing
+ * with T061's failure-mode suite (session expiry is already on its list), where a clock can
+ * be injected and `Expires` handled alongside `Max-Age` rather than half of it now.
+ */
 function storeCookies(jar: Map<string, string>, response: Response): void {
   for (const raw of response.headers.getSetCookie()) {
     const pair = raw.split(';', 1)[0] ?? '';

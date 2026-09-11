@@ -129,12 +129,37 @@ describe('enqueuing the same outcome twice', () => {
   it('queues one row per outcome per destination, so a re-run never duplicates a message', () => {
     const { outbox } = freshOutbox();
 
-    expect(outbox.enqueue('offer-1:claim', 'tracking', payload('won'), NOW_MS)).toBe(true);
+    expect(outbox.enqueue('offer-1:claim', 'tracking', payload('won'), NOW_MS)).toBe('queued');
     expect(outbox.enqueue('offer-1:claim', 'tracking', payload('won'), NOW_MS + 30_000)).toBe(
-      false,
+      'already_pending',
     );
 
     expect(outbox.due(NOW_MS + MINUTE)).toHaveLength(1);
+  });
+
+  it('says which kind of duplicate it refused, because they are not the same news', () => {
+    // A single `false` collapses three different situations. "Still queued" and "already
+    // delivered" both mean there is nothing to do; **dead** means the outcome was given up
+    // on and will never arrive unless an operator requeues it — the opposite conclusion,
+    // and the one a caller must be able to reach without guessing.
+    const { outbox } = freshOutbox({ retryCap: 1 });
+
+    expect(outbox.enqueue('offer-1:claim', 'tracking', payload('won'), NOW_MS)).toBe('queued');
+    expect(outbox.enqueue('offer-1:claim', 'tracking', payload('won'), NOW_MS)).toBe(
+      'already_pending',
+    );
+
+    outbox.markSent((outbox.due(NOW_MS)[0] as StrakerOutboxRow).outboxId, NOW_MS);
+    expect(outbox.enqueue('offer-1:claim', 'tracking', payload('won'), NOW_MS)).toBe(
+      'already_sent',
+    );
+
+    outbox.enqueue('offer-2:claim', 'tracking', payload('won'), NOW_MS);
+    outbox.recordFailure(outbox.due(NOW_MS)[0] as StrakerOutboxRow, NOW_MS);
+    expect(outbox.countByStatus('dead')).toBe(1);
+    expect(outbox.enqueue('offer-2:claim', 'tracking', payload('won'), NOW_MS)).toBe(
+      'already_dead',
+    );
   });
 
   it('queues the same outcome separately for each destination it must reach', () => {
@@ -283,7 +308,11 @@ describe('isolation from the XTM outbox', () => {
       fileURLToPath(new URL('../../../src/straker/outbox.ts', import.meta.url)),
       'utf8',
     );
-    expect(source).not.toMatch(/from '\.\.\/state\//);
-    expect(source).not.toMatch(/from '\.\.\/config\//);
+    // Any specifier that reaches into the XTM state or config layer, however it is
+    // spelled: '../state/db.js' and '../../src/state/db.js' are the same import, and a
+    // guard that only knows the first reports green while checking nothing. (The ledger
+    // test resolves specifiers properly; that is the form to hoist when these three
+    // bulkhead guards get a shared home.)
+    expect(source).not.toMatch(/(?:from|import)\s*\(?\s*['"][^'"]*(?:^|\/)(?:state|config)\//);
   });
 });

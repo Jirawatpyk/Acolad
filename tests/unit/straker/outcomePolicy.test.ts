@@ -7,7 +7,8 @@ import {
   XTM_ACCEPT_OUTCOME_OF,
   alertsOn,
   countsTowardLedger,
-} from '../../../src/straker/types.js';
+  alertsOnSkip,
+} from '../../../src/straker/outcomePolicy.js';
 
 /**
  * DC-2 (FR-028) / V33: both portals must use the same names, with the same meanings, for
@@ -90,5 +91,31 @@ describe('SkipReason — why an offer that appeared was never claimed (data-mode
     // needs a human. Collapsing them is how a permanently un-claimable offer goes unseen.
     expect(SKIP_REASONS).toContain('ceiling_reached');
     expect(SKIP_REASONS).toContain('exceeds_daily_ceiling_entirely');
+  });
+});
+
+describe('alertsOnSkip — the two skips that mean a contract assumption failed (FR-023a, V26)', () => {
+  it('alerts when the offer arrived without the effort the scheduling rules need', () => {
+    expect(alertsOnSkip('effort_unknown')).toBe(true);
+  });
+
+  it('alerts when the offer arrived without a deadline', () => {
+    expect(alertsOnSkip('deadline_unknown')).toBe(true);
+  });
+
+  it('stays quiet for every skip that is our own rules working as intended', () => {
+    // These are decisions, not faults. Alerting on them would page someone every time the
+    // bot correctly declined work, and the page that cries wolf is the one nobody reads.
+    for (const reason of SKIP_REASONS) {
+      if (reason === 'effort_unknown' || reason === 'deadline_unknown') continue;
+      expect(alertsOnSkip(reason)).toBe(false);
+    }
+  });
+
+  it('treats a missing number as louder than an ordinary ceiling skip', () => {
+    // The distinction this asserts: one offer being too big for today is routine; the list
+    // not carrying what the decision needs means the premise the gate rests on has failed.
+    expect(alertsOnSkip('effort_unknown')).toBe(true);
+    expect(alertsOnSkip('ceiling_reached')).toBe(false);
   });
 });

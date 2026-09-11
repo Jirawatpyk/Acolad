@@ -27,17 +27,11 @@
  * a presentation concern and are applied by the reporting layer, not by storage.
  */
 
-import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, renameSync } from 'node:fs';
-import { join } from 'node:path';
-import {
-  CLAIM_OUTCOMES,
-  SKIP_REASONS,
-  type ClaimOutcome,
-  type EndedOfferSighting,
-  type OfferSighting,
-  type SkipReason,
-} from './types.js';
+import type Database from 'better-sqlite3';
+import { openSqliteWithQuarantine } from '../shared/sqliteOpen.js';
+import { STRAKER_OUTBOX_CHANNELS, STRAKER_OUTBOX_STATUSES } from './outbox.js';
+import { CLAIM_OUTCOMES, SKIP_REASONS } from './outcomePolicy.js';
+import type { ClaimOutcome, EndedOfferSighting, OfferSighting, SkipReason } from './types.js';
 
 export type StrakerDB = Database.Database;
 
@@ -72,8 +66,40 @@ export type OfferEventType = (typeof OFFER_EVENT_TYPES)[number];
  */
 export class MissingOfferIdentityError extends Error {
   constructor(what: string) {
-    super(`${what} arrived without an offer identity — refusing to store an unidentified offer`);
+    super(`${what} arrived without an offer identity — refusing to guess which offer was meant`);
     this.name = 'MissingOfferIdentityError';
+  }
+}
+
+/**
+ * A recorded outcome was about to be replaced by a different settled one — `won` by
+ * `failed`, say.
+ *
+ * The upsert in `recordEvent` exists so that re-running a cycle converges instead of
+ * duplicating rows (Constitution VII), and that is still what it does for everything a
+ * re-run legitimately changes: timings, effort, a deadline, a skip reason, and the
+ * resolution of an outcome that was left `unknown`. What it must not do is quietly replace
+ * an answer with a contradicting one, because the act behind a claim outcome is
+ * irreversible: if the portal committed the work to the team, a later `failed` overwriting
+ * `won` erases the only record that the team owns it, and leaves no trace that it did.
+ *
+ * A re-run that produces the same outcome is silent, as it should be. A re-run that
+ * produces a different one is not a retry — it is two answers to a question with one
+ * answer, and which of them is true cannot be decided here.
+ */
+export class OutcomeOverwriteError extends Error {
+  constructor(
+    readonly objId: string,
+    readonly eventType: OfferEventType,
+    readonly stored: ClaimOutcome,
+    readonly incoming: ClaimOutcome | null,
+  ) {
+    super(
+      `offer ${objId}: its ${eventType} already recorded '${stored}' — refusing to overwrite ` +
+        `that with '${String(incoming)}'. The claim behind it cannot be taken back, so the ` +
+        'two answers must be reconciled by a human rather than by whichever wrote last.',
+    );
+    this.name = 'OutcomeOverwriteError';
   }
 }
 
@@ -101,8 +127,38 @@ function sqlSet(values: readonly string[]): string {
 }
 
 /**
+ * Every CHECK in this schema whose values come from a shared vocabulary, declared once and
+ * used twice: `ddl()` renders them into the CREATE TABLE statements, and
+ * `assertVocabularyCovered` verifies at open time that the database on disk carries all of
+ * them. Both halves read this table, so a value added to a vocabulary can neither reach a
+ * fresh schema missing from the CHECK nor sit unnoticed against an older database.
+ *
+ * The outbox's channels and statuses are listed here for the same reason the event types
+ * are, and are imported from `outbox.ts` rather than retyped: a hand-written copy is
+ * exactly the disagreement this table exists to make impossible — it type-checks, it
+ * passes the coverage check, and then the first enqueue on the new channel throws inside
+ * the transaction the outcome shares with the state change that produced it, rolling that
+ * back too.
+ *
+ * A new table with a vocabulary CHECK needs its entry here. `ddl()` renders from this
+ * object, so the two cannot drift for a table that is listed; for one that is not, the
+ * coverage check simply has nothing to say about it.
+ */
+const VOCABULARY_CHECKS = {
+  offer_events: {
+    event_type: OFFER_EVENT_TYPES,
+    outcome: CLAIM_OUTCOMES,
+    skip_reason: SKIP_REASONS,
+  },
+  straker_outbox: {
+    channel: STRAKER_OUTBOX_CHANNELS,
+    status: STRAKER_OUTBOX_STATUSES,
+  },
+} as const satisfies Record<string, Record<string, readonly string[]>>;
+
+/**
  * The CHECK constraints below are generated from the shared vocabulary rather than
- * retyped, so a value added to `types.ts` cannot silently disagree with the schema. An
+ * retyped, so a value added to a vocabulary cannot silently disagree with the schema. An
  * *existing* database still carries the older CHECK — SQLite cannot alter one in place —
  * which is what `assertVocabularyCovered` catches at open time instead of letting it
  * surface as a mysterious insert failure in the middle of a night shift. Widening one
@@ -121,9 +177,9 @@ CREATE TABLE IF NOT EXISTS offer_sightings (
 
 CREATE TABLE IF NOT EXISTS offer_events (
   obj_id TEXT NOT NULL CHECK (obj_id <> ''),
-  event_type TEXT NOT NULL CHECK (event_type IN (${sqlSet(OFFER_EVENT_TYPES)})),
-  outcome TEXT CHECK (outcome IS NULL OR outcome IN (${sqlSet(CLAIM_OUTCOMES)})),
-  skip_reason TEXT CHECK (skip_reason IS NULL OR skip_reason IN (${sqlSet(SKIP_REASONS)})),
+  event_type TEXT NOT NULL CHECK (event_type IN (${sqlSet(VOCABULARY_CHECKS.offer_events.event_type)})),
+  outcome TEXT CHECK (outcome IS NULL OR outcome IN (${sqlSet(VOCABULARY_CHECKS.offer_events.outcome)})),
+  skip_reason TEXT CHECK (skip_reason IS NULL OR skip_reason IN (${sqlSet(VOCABULARY_CHECKS.offer_events.skip_reason)})),
   effort_words INTEGER CHECK (effort_words IS NULL OR effort_words >= 0),
   deadline_ms INTEGER,
   occurred_at_ms INTEGER NOT NULL,
@@ -146,9 +202,10 @@ CREATE TABLE IF NOT EXISTS held_work (
 CREATE TABLE IF NOT EXISTS straker_outbox (
   outbox_id INTEGER PRIMARY KEY,
   event_id TEXT NOT NULL,
-  channel TEXT NOT NULL CHECK (channel IN ('offers', 'tracking', 'alerts')),
+  channel TEXT NOT NULL CHECK (channel IN (${sqlSet(VOCABULARY_CHECKS.straker_outbox.channel)})),
   payload_json TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'dead')),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN (${sqlSet(VOCABULARY_CHECKS.straker_outbox.status)})),
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at_ms INTEGER NOT NULL,
   created_at_ms INTEGER NOT NULL,
@@ -169,7 +226,8 @@ export interface OpenStrakerDbResult {
   /** True when the previous file was unusable and was quarantined; the caller treats
    *  this as a cold start plus an alert. */
   readonly recoveredFromCorruption: boolean;
-  readonly corruptCopyPath?: string;
+  /** Absent — not present-and-undefined — when nothing was quarantined. */
+  readonly corruptCopyPath?: string | undefined;
 }
 
 /**
@@ -177,34 +235,21 @@ export interface OpenStrakerDbResult {
  * given and nowhere else. An unusable file is renamed aside as
  * `straker.db.corrupt-<stamp>` — never overwritten — and a fresh database is created. A
  * `StrakerSchemaError` (our own logic, not a broken file) propagates instead.
+ *
+ * The sequence itself is `shared/sqliteOpen.ts`, which the XTM bot's `openDatabase` also
+ * uses. Sharing the *procedure* is not sharing a database: the file below is Straker's,
+ * the schema below is Straker's, and nothing about R11 changes. What is passed in is all
+ * that ever differed between the two — the filename, the migration, and which error means
+ * "our code is wrong".
  */
 export function openStrakerDatabase(stateDir: string, nowMs: number): OpenStrakerDbResult {
-  mkdirSync(stateDir, { recursive: true });
-  const path = join(stateDir, STRAKER_DB_FILENAME);
-
-  let attempt: StrakerDB | undefined;
-  try {
-    attempt = new Database(path);
-    attempt.pragma('journal_mode = WAL');
-    migrate(attempt);
-    return { db: attempt, path, recoveredFromCorruption: false };
-  } catch (err) {
-    // Release the handle first or Windows refuses the rename (EBUSY).
-    try {
-      attempt?.close();
-    } catch {
-      // best-effort close before quarantine
-    }
-    if (err instanceof StrakerSchemaError) throw err;
-    if (!existsSync(path)) throw err;
-    const stamp = new Date(nowMs).toISOString().replace(/[:.]/g, '-');
-    const corruptCopyPath = join(stateDir, `${STRAKER_DB_FILENAME}.corrupt-${stamp}`);
-    renameSync(path, corruptCopyPath);
-    const db = new Database(path);
-    db.pragma('journal_mode = WAL');
-    migrate(db);
-    return { db, path, recoveredFromCorruption: true, corruptCopyPath };
-  }
+  return openSqliteWithQuarantine({
+    dir: stateDir,
+    fileName: STRAKER_DB_FILENAME,
+    nowIso: new Date(nowMs).toISOString(),
+    migrate,
+    isLogicError: (err) => err instanceof StrakerSchemaError,
+  });
 }
 
 function migrate(db: StrakerDB): void {
@@ -215,25 +260,28 @@ function migrate(db: StrakerDB): void {
 
 /**
  * Fail loud when the stored CHECK constraints no longer cover the vocabulary this build
- * uses. `CREATE TABLE IF NOT EXISTS` leaves an older table exactly as it was, so without
- * this check a newly added outcome or skip reason would pass every test on a fresh
- * database and then be rejected by the one database that matters.
+ * uses — for **every** table whose CHECKs come from one. `CREATE TABLE IF NOT EXISTS`
+ * leaves an older table exactly as it was, so without this check a newly added outcome,
+ * skip reason, channel or status would pass every test on a fresh database and then be
+ * rejected by the one database that matters. Checking only some of the tables is the same
+ * defect with a smaller blast radius, which is why this reads the whole table above.
  */
 function assertVocabularyCovered(db: StrakerDB): void {
-  const row = db
-    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'offer_events'")
-    .get() as { sql: string } | undefined;
-  if (!row) throw new StrakerSchemaError('offer_events table missing after migration');
+  const storedSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?");
 
-  const missing = [...CLAIM_OUTCOMES, ...SKIP_REASONS, ...OFFER_EVENT_TYPES].filter(
-    (value) => !row.sql.includes(`'${value}'`),
-  );
-  if (missing.length > 0) {
-    throw new StrakerSchemaError(
-      `offer_events was created before the vocabulary gained ${missing.join(', ')} — ` +
-        'the stored CHECK constraints would reject those values. Rebuild the table ' +
-        '(SQLite cannot alter a CHECK in place) before deploying.',
-    );
+  for (const [table, columns] of Object.entries(VOCABULARY_CHECKS)) {
+    const row = storedSql.get(table) as { sql: string } | undefined;
+    if (!row) throw new StrakerSchemaError(`${table} table missing after migration`);
+
+    const vocabulary: readonly string[] = Object.values(columns).flat();
+    const missing = vocabulary.filter((value) => !row.sql.includes(`'${value}'`));
+    if (missing.length > 0) {
+      throw new StrakerSchemaError(
+        `${table} was created before the vocabulary gained ${missing.join(', ')} — ` +
+          'the stored CHECK constraints would reject those values. Rebuild the table ' +
+          '(SQLite cannot alter a CHECK in place) before deploying.',
+      );
+    }
   }
 }
 
@@ -334,16 +382,26 @@ export class StrakerStore {
       .run(objId, offer.sighting, offer.firstSeenAtMs, offer.lastSeenAtMs);
   }
 
-  /** Close a sighting: the offer was no longer listed at `notFoundAtMs`. */
-  endSighting(offer: EndedOfferSighting): void {
+  /**
+   * Close a sighting: the offer was no longer listed at `notFoundAtMs`.
+   *
+   * Returns whether an appearance was actually closed, as `release` does — but read the
+   * false differently. For `release`, false means "nothing left to release", the ordinary
+   * result of a second reconciliation pass. Here it means the tracker is ending an
+   * appearance the store never recorded: the two have diverged, and the caller is the only
+   * thing in a position to alert on that. Updating no rows and returning nothing would
+   * leave the divergence with no way at all to be noticed.
+   */
+  endSighting(offer: EndedOfferSighting): boolean {
     const objId = requireIdentity(offer.objId, 'an ended sighting');
-    this.db
+    const res = this.db
       .prepare(
         `UPDATE offer_sightings
             SET not_found_at_ms = ?, last_seen_at_ms = MAX(last_seen_at_ms, ?)
           WHERE obj_id = ? AND sighting = ?`,
       )
       .run(offer.notFoundAtMs, offer.lastSeenAtMs, objId, offer.sighting);
+    return res.changes > 0;
   }
 
   /** Sightings still open — the offers believed to be listed right now. */
@@ -361,45 +419,67 @@ export class StrakerStore {
   sightingsOf(objId: string): StoredSighting[] {
     const rows = this.db
       .prepare('SELECT * FROM offer_sightings WHERE obj_id = ? ORDER BY sighting')
-      .all(objId) as SightingRow[];
+      .all(requireIdentity(objId, 'a sighting lookup')) as SightingRow[];
     return rows.map(toSighting);
   }
 
   // --- outcome rows (FR-014, data-model §3/§4) ------------------------------
 
-  /** Upsert one event. Re-running a cycle updates the row in place rather than adding a
-   *  second one (Constitution VII), while a different event type for the same offer is a
-   *  row of its own. */
+  /**
+   * Upsert one event. Re-running a cycle updates the row in place rather than adding a
+   * second one (Constitution VII), while a different event type for the same offer is a
+   * row of its own.
+   *
+   * The upsert stops short of one thing: replacing a **settled** claim outcome with a
+   * different one throws `OutcomeOverwriteError` rather than writing it. Everything a
+   * re-run legitimately revises still goes through — effort, deadline, timing, a skip
+   * reason that changed with the hour, and the resolution of an outcome left `unknown`,
+   * which is precisely what reconciliation is for (FR-016a/b). What is refused is the one
+   * write that destroys the record of an irreversible act.
+   */
   recordEvent(event: OfferEvent): void {
     const objId = requireIdentity(event.objId, `a ${event.eventType} event`);
-    this.db
-      .prepare(
-        `INSERT INTO offer_events
-           (obj_id, event_type, outcome, skip_reason, effort_words, deadline_ms, occurred_at_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (obj_id, event_type) DO UPDATE SET
-           outcome = excluded.outcome,
-           skip_reason = excluded.skip_reason,
-           effort_words = excluded.effort_words,
-           deadline_ms = excluded.deadline_ms,
-           occurred_at_ms = excluded.occurred_at_ms`,
-      )
-      .run(
-        objId,
-        event.eventType,
-        event.outcome,
-        event.skipReason,
-        event.effortWords,
-        event.deadlineMs,
-        event.occurredAtMs,
-      );
+    // Read and write in one transaction so the guard cannot be stepped over by a write
+    // landing between the two. Nested inside a caller's transaction this becomes a
+    // savepoint, so a cycle-wide rollback still takes it with it.
+    this.db.transaction(() => {
+      const stored = this.db
+        .prepare('SELECT outcome FROM offer_events WHERE obj_id = ? AND event_type = ?')
+        .get(objId, event.eventType) as { outcome: ClaimOutcome | null } | undefined;
+
+      if (stored !== undefined && isSettled(stored.outcome) && stored.outcome !== event.outcome) {
+        throw new OutcomeOverwriteError(objId, event.eventType, stored.outcome, event.outcome);
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO offer_events
+             (obj_id, event_type, outcome, skip_reason, effort_words, deadline_ms, occurred_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (obj_id, event_type) DO UPDATE SET
+             outcome = excluded.outcome,
+             skip_reason = excluded.skip_reason,
+             effort_words = excluded.effort_words,
+             deadline_ms = excluded.deadline_ms,
+             occurred_at_ms = excluded.occurred_at_ms`,
+        )
+        .run(
+          objId,
+          event.eventType,
+          event.outcome,
+          event.skipReason,
+          event.effortWords,
+          event.deadlineMs,
+          event.occurredAtMs,
+        );
+    })();
   }
 
   /** Every event recorded about one offer. */
   eventsOf(objId: string): OfferEvent[] {
     const rows = this.db
       .prepare('SELECT * FROM offer_events WHERE obj_id = ? ORDER BY occurred_at_ms, event_type')
-      .all(objId) as EventRow[];
+      .all(requireIdentity(objId, 'an event lookup')) as EventRow[];
     return rows.map(toEvent);
   }
 
@@ -444,7 +524,7 @@ export class StrakerStore {
       .prepare(
         'UPDATE held_work SET released_at_ms = ? WHERE obj_id = ? AND released_at_ms IS NULL',
       )
-      .run(atMs, objId);
+      .run(atMs, requireIdentity(objId, 'a release'));
     return res.changes > 0;
   }
 
@@ -465,11 +545,42 @@ export class StrakerStore {
   }
 }
 
-/** The portal's identifier is the only identity there is; a blank one is a hard failure. */
+/**
+ * The one place an offer identity becomes a storage key — for reads exactly as much as for
+ * writes.
+ *
+ * That "exactly as much" is the point. A key normalised on the way in and taken raw on the
+ * way out is a mismatch that nothing reports: `hold(' abc ')` would store `abc`,
+ * `release(' abc ')` would match no row and answer false — which its own docstring defines
+ * as "nothing to release, which is normal" — and the work would stay held forever,
+ * consuming that deadline day's ceiling with no signal anywhere.
+ *
+ * Normalising rather than rejecting an untrimmed identifier is deliberate. `hold` and
+ * `recordEvent` run **after** the portal has committed the work to the team (FR-003,
+ * FR-016d), so a boundary that refused padded input would throw on the one path that
+ * cannot afford to fail: the team would own work that appears in no record and counts
+ * against no ceiling — the exact failure FR-016a exists to repair, caused by the code
+ * meant to prevent it. Whitespace around an opaque identifier carries no meaning worth
+ * that price, and two portal identifiers differing only in padding are the same offer by
+ * any reading.
+ *
+ * A **blank** identity is a different matter and stays a hard failure on every path: there
+ * is no identity there to normalise, and an offer we cannot name is one we cannot
+ * deduplicate, reconcile, or hold against a ceiling.
+ */
 function requireIdentity(objId: string, what: string): string {
   const trimmed = objId.trim();
   if (trimmed === '') throw new MissingOfferIdentityError(what);
   return trimmed;
+}
+
+/**
+ * Whether a stored outcome is an answer rather than an open question. `unknown` is the one
+ * that is not: the request produced no answer and reconciliation is expected to supply one
+ * later (data-model §3), so replacing it loses nothing. Everything else has been decided.
+ */
+function isSettled(outcome: ClaimOutcome | null): outcome is ClaimOutcome {
+  return outcome !== null && outcome !== 'unknown';
 }
 
 function toSighting(r: SightingRow): StoredSighting {

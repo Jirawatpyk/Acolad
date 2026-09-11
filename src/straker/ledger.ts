@@ -37,7 +37,8 @@
 import { decideGroupCapacity } from '../schedule/acceptCapacity.js';
 import { effectiveDeadlineDay } from '../schedule/deadlineDay.js';
 import { holidaysForEffectiveDay } from '../schedule/thaiHolidays.js';
-import { STRAKER_EFFORT_UNIT, type SkipReason } from './types.js';
+import { STRAKER_EFFORT_UNIT } from './outcomePolicy.js';
+import type { SkipReason } from './types.js';
 import type { HeldWork, StrakerStore } from './strakerStore.js';
 
 /** Exactly what the ledger touches on the store — declared so the dependency is visible
@@ -94,16 +95,36 @@ export type CapacityVerdict =
       readonly deadlineDay: string;
     };
 
-export interface HoldResult {
-  /** Null when the deadline could not be read; such work is held but bucketed nowhere,
-   *  and is named by `heldWorkMissingDeadline` so the caller alerts instead of guessing. */
-  readonly deadlineDay: string | null;
-  /** The day's total **after** this hold. */
-  readonly committedEffort: number;
-  readonly ceiling: number;
-  /** True when this hold took the day past its ceiling — the FR-016d warning. */
-  readonly ceilingExceeded: boolean;
-}
+/**
+ * What a hold did to the day it landed on — or, in the second shape, the admission that it
+ * landed on no day at all.
+ *
+ * Two shapes rather than one with nullable fields, because a single shape has to answer
+ * "what is the day's total?" for work that has no day, and the only available answers are
+ * wrong: 0 reads as "that day has nothing committed" for a hold that may be thousands of
+ * words. The union lets the type say what is actually known, and makes the caller look at
+ * `deadlineDay` before it can read a total.
+ */
+export type HoldResult =
+  | {
+      /** The effective deadline day this hold was charged to. */
+      readonly deadlineDay: string;
+      /** The day's total **after** this hold. */
+      readonly committedEffort: number;
+      readonly ceiling: number;
+      /** True when this hold took the day past its ceiling — the FR-016d warning. */
+      readonly ceilingExceeded: boolean;
+    }
+  | {
+      /** The deadline could not be read; the work is held but bucketed nowhere, and is
+       *  named by `heldWorkMissingDeadline` so the caller alerts instead of guessing. */
+      readonly deadlineDay: null;
+      /** No day, so no day total. Not zero — zero would be a claim about a day. */
+      readonly committedEffort: null;
+      readonly ceiling: number;
+      /** No day, so no ceiling of a day to have breached. */
+      readonly ceilingExceeded: false;
+    };
 
 export class StrakerLedger {
   constructor(
@@ -253,10 +274,10 @@ export class StrakerLedger {
     if (day === null) {
       return {
         deadlineDay: null,
-        committedEffort: 0,
-        ceiling: this.dailyCeiling,
-        // No day, no day to have breached. The row is surfaced by
+        // No day means no day total and no day to have breached. The row is surfaced by
         // heldWorkMissingDeadline instead, which is the honest signal here.
+        committedEffort: null,
+        ceiling: this.dailyCeiling,
         ceilingExceeded: false,
       };
     }
@@ -271,7 +292,9 @@ export class StrakerLedger {
   }
 
   /** The work is finished or is no longer ours — its budget returns by leaving the held
-   *  set. False when there was nothing open to release, so a repeat pass is a no-op. */
+   *  set. False when there was nothing open to release, so a repeat pass is a no-op. The
+   *  identity is resolved to a key by the store, by the same rule it stored it under, so
+   *  this forwarding cannot introduce a spelling the held row will not answer to. */
   release(objId: string, atMs: number): boolean {
     return this.store.release(objId, atMs);
   }

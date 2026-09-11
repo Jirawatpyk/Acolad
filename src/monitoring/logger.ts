@@ -1,8 +1,6 @@
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
-import pino from 'pino';
 import type { AppConfig } from '../config/index.js';
 import { secretValues } from '../config/index.js';
+import { LOG_FLUSH_CAP_MS, createRollingLogger } from '../shared/rollingLogger.js';
 
 export interface Logger {
   info(fields: LogFields, msg?: string): void;
@@ -25,42 +23,32 @@ export interface LogFields {
   [k: string]: unknown;
 }
 
+/** This bot's log-file stem. The two bots share one log directory, so it must be its own
+ *  name or they would write into each other's rotated files. */
+const LOG_NAME = 'acolad';
+
 /**
  * Structured JSON logger (Constitution V) with daily rotation kept 14 days.
  * Secret config values are redacted from rendered output (FR-012) by matching
  * concrete values, in addition to pino's key-based censor.
+ *
+ * The rotation, retention and key-censoring policy lives in `shared/rollingLogger.ts` —
+ * the same one the Straker bot writes under, so a leak fixed here cannot stay open there.
+ * What remains this bot's own is which concrete values count as secret, which it knows
+ * from `AppConfig` and Straker deliberately does not have.
  */
 export function createLogger(cfg: AppConfig): Logger {
-  mkdirSync(cfg.LOG_DIR, { recursive: true });
   const secrets = secretValues(cfg);
 
-  const transport = pino.transport({
-    target: 'pino-roll',
-    options: {
-      file: join(cfg.LOG_DIR, 'acolad'),
-      frequency: 'daily',
-      mkdir: true,
-      limit: { count: 14 },
-      extension: '.log',
-      dateFormat: 'yyyy-MM-dd',
+  const logger = createRollingLogger({
+    logDir: cfg.LOG_DIR,
+    fileName: LOG_NAME,
+    formatters: {
+      log(obj) {
+        return redactSecrets(obj, secrets);
+      },
     },
   });
-
-  const logger = pino(
-    {
-      level: 'info',
-      redact: {
-        paths: ['password', 'cookie', 'token', '*.password', '*.cookie'],
-        censor: '[REDACTED]',
-      },
-      formatters: {
-        log(obj) {
-          return redactSecrets(obj, secrets);
-        },
-      },
-    },
-    transport,
-  );
 
   // pino's `formatters.log` scrubs the object FIELDS, but the message string (2nd
   // arg) bypasses it — and that is exactly where a Playwright error echoes a
@@ -72,7 +60,7 @@ export function createLogger(cfg: AppConfig): Logger {
     info: (fields, msg) => logger.info(fields, mask(msg)),
     warn: (fields, msg) => logger.warn(fields, mask(msg)),
     error: (fields, msg) => logger.error(fields, mask(msg)),
-    flush: () => flushWithCap(logger, 500),
+    flush: () => flushWithCap(logger, LOG_FLUSH_CAP_MS),
   };
 }
 

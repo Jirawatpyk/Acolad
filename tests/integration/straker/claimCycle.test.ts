@@ -4,16 +4,23 @@
  * rather than a wasted request (FR-005, R7). A claim whose outcome is unknown is left
  * unknown and settled by reconciliation (FR-016a).
  *
- * ## Why this asserts against the transport rather than against `claim.ts`
+ * ## Exactly what this file locks, and what it does not
  *
- * `src/straker/claim.ts` is Phase 3 (T035) and does not exist yet. The guarantee is
- * therefore written against the **transport-level claim dispatch** the claim path will
- * use — `postJson`, the one door a POST can go through — so it holds *now* and the Phase 3
- * implementation inherits it instead of having to re-earn it. That is also where the
- * guarantee belongs: FR-030 (DC-4) puts every request-issuing concern in the transport,
- * so "a claim is never retried" is a property of the transport, not of its caller's
- * discipline. A later `claim.ts` that reached for a retry would have to add a new method
- * to the transport to get one — which is exactly the change this file is here to block.
+ * `src/straker/claim.ts` is Phase 3 (T035) and does not exist yet, so what stands here is
+ * the **transport half** of the guarantee, asserted against `postJson` — the one door a
+ * POST can go through:
+ *
+ * - **`postJson`'s arity**, held by a compile-time lock below: it takes a path and a body
+ *   and nothing else, so the transport offers the claim path no retry option to reach for.
+ * - **`postJson`'s behaviour**: one attempt, no second attempt at any interval, no
+ *   exhaustion alert — including from a client whose read path is retrying eagerly.
+ *
+ * **It does not stop a caller from writing its own loop.** Nothing here prevents a future
+ * `claim.ts` from calling `postJson` three times with a backoff of its own; that code would
+ * compile and this file would stay green. The caller-level guarantee is **T025's**, which
+ * extends this file to drive the claim through `claim.ts` once T035 has built it. Until
+ * then, "a claim is attempted once" is enforced for the transport and left to review for
+ * its caller — which is worth having, and is less than it sounds like.
  */
 
 import { describe, expect, it, vi } from 'vitest';

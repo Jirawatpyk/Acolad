@@ -234,13 +234,36 @@ function normalizeDir(dir: string): string {
   return dir.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 }
 
+/**
+ * A blank line in a `.env` file means "not set", and every schema here has to see it that
+ * way.
+ *
+ * dotenv turns `KEY=` into `''`, never `undefined` — while zod's `.optional()` and
+ * `.default()` only treat `undefined` as absent, and `z.coerce.number()` turns `''` into 0.
+ * So `.env.example`'s own bare lines ("empty = derived", "leave blank until 2FA is on")
+ * produced a config error, and a first deploy would have been a PM2 crash loop with the
+ * operator having followed the file exactly.
+ *
+ * Stripping blanks once, here, rather than wrapping eighteen fields individually: the cause
+ * is a property of how `.env` files are read, not of any one variable, and a per-field fix
+ * is one the next variable added would silently miss. A required variable left blank still
+ * fails — it now fails as "Required", naming itself, instead of as a confusing type error.
+ */
+function stripBlanks(raw: NodeJS.ProcessEnv): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (value !== '') out[key] = value;
+  }
+  return out;
+}
+
 /** One error shape for both loaders: the failing variable is always named. */
 function parseOrThrow<T extends z.ZodTypeAny>(
   schema: T,
   env: NodeJS.ProcessEnv,
   prefix: string,
 ): z.infer<T> {
-  const parsed = schema.safeParse(env);
+  const parsed = schema.safeParse(stripBlanks(env));
   if (!parsed.success) {
     const detail = parsed.error.issues
       .map((issue) => `${issue.path.join('.')}: ${issue.message}`)

@@ -8,18 +8,20 @@
  * against a REAL XTM database opened alongside, with real SQLite on a real temp directory.
  * A mocked store would prove nothing about which file got written.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDatabase } from '../../../src/state/db.js';
-import { CLAIM_OUTCOMES, SKIP_REASONS } from '../../../src/straker/types.js';
+import { CLAIM_OUTCOMES, SKIP_REASONS } from '../../../src/straker/outcomePolicy.js';
 import type { EndedOfferSighting, OfferSighting } from '../../../src/straker/types.js';
 import {
   MissingOfferIdentityError,
+  OutcomeOverwriteError,
   STRAKER_DB_FILENAME,
+  StrakerSchemaError,
   StrakerStore,
   openStrakerDatabase,
   type NewHold,
@@ -193,12 +195,18 @@ describe('isolation from the XTM store', () => {
     expect(() =>
       store.transaction(() => {
         store.recordSighting(sighting());
+        // recordEvent opens a transaction of its own to guard the outcome it is about to
+        // overwrite. Nested, that must become a savepoint the outer rollback still takes
+        // with it — otherwise the guard would either refuse to run inside a cycle or
+        // commit a row the cycle abandoned.
+        store.recordEvent(event({ eventType: 'claim', outcome: 'won' }));
         store.hold(hold());
         throw new Error('cycle aborted');
       }),
     ).toThrow('cycle aborted');
 
     expect(store.liveSightings()).toEqual([]);
+    expect(store.listEvents()).toEqual([]);
     expect(store.heldWork()).toEqual([]);
     expect(xtm.prepare("SELECT value FROM meta WHERE key = 'straker-txn-marker'").get()).toEqual({
       value: '1',
@@ -216,8 +224,12 @@ describe('isolation from the XTM store', () => {
       fileURLToPath(new URL('../../../src/straker/strakerStore.ts', import.meta.url)),
       'utf8',
     );
-    expect(source).not.toMatch(/from '\.\.\/state\//);
-    expect(source).not.toMatch(/from '\.\.\/config\//);
+    // Any specifier that reaches into the XTM state or config layer, however it is
+    // spelled: '../state/db.js' and '../../src/state/db.js' are the same import, and a
+    // guard that only knows the first reports green while checking nothing. (The ledger
+    // test resolves specifiers properly; that is the form to hoist when these three
+    // bulkhead guards get a shared home.)
+    expect(source).not.toMatch(/(?:from|import)\s*\(?\s*['"][^'"]*(?:^|\/)(?:state|config)\//);
     expect(source).not.toMatch(/['"]acolad\.db['"]/);
   });
 });
@@ -257,6 +269,41 @@ describe('offer identity', () => {
     expect(store.liveSightings()).toEqual([]);
     expect(store.listEvents()).toEqual([]);
     expect(store.heldWork()).toEqual([]);
+  });
+
+  it('finds the offer again under the identity it was handed, padding and all', () => {
+    const { store } = freshStore();
+    // The write paths normalise the identity before storing it. Every read path must
+    // normalise by the same rule or the asymmetry is silent: `release` matches nothing and
+    // answers false — which its own docstring defines as "nothing to release, which is
+    // normal" — while the work stays held forever, consuming that deadline day's ceiling
+    // with no signal anywhere.
+    const padded = '  offer-1  ';
+    store.recordSighting(sighting({ objId: padded }));
+    store.recordEvent(event({ objId: padded, eventType: 'claim', outcome: 'won' }));
+    store.hold(hold({ objId: padded }));
+
+    expect(store.sightingsOf(padded)).toHaveLength(1);
+    expect(store.eventsOf(padded)).toHaveLength(1);
+    expect(store.release(padded, NOW_MS + 1_000)).toBe(true);
+    expect(store.heldWork()).toEqual([]);
+  });
+
+  it('answers to the trimmed spelling too, so one offer never becomes two', () => {
+    const { store } = freshStore();
+    store.recordSighting(sighting({ objId: ' offer-1 ' }));
+    store.hold(hold({ objId: ' offer-1 ' }));
+
+    expect(store.sightingsOf('offer-1')).toHaveLength(1);
+    expect(store.release('offer-1', NOW_MS + 1_000)).toBe(true);
+  });
+
+  it('treats a blank identity as a hard failure on the read paths as well as the write ones', () => {
+    const { store } = freshStore();
+
+    expect(() => store.release('   ', NOW_MS)).toThrow(MissingOfferIdentityError);
+    expect(() => store.sightingsOf('')).toThrow(MissingOfferIdentityError);
+    expect(() => store.eventsOf(' ')).toThrow(MissingOfferIdentityError);
   });
 });
 
@@ -313,6 +360,16 @@ describe('sightings', () => {
     expect((stored?.notFoundAtMs ?? 0) - (stored?.firstSeenAtMs ?? 0)).toBe(90_000);
     expect(store.liveSightings()).toEqual([]);
   });
+
+  it('says whether it actually closed a sighting, instead of updating nothing in silence', () => {
+    const { store } = freshStore();
+    store.recordSighting(sighting());
+
+    expect(store.endSighting(ended())).toBe(true);
+    // No such appearance: the tracker and the store have diverged, and the caller can only
+    // alert on that if it is told. `release` returns a boolean for exactly this reason.
+    expect(store.endSighting(ended({ sighting: 7 }))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -344,6 +401,61 @@ describe('outcome rows', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.outcome).toBe('won');
     expect(rows[0]?.occurredAtMs).toBe(NOW_MS + 5_000);
+  });
+
+  it('refuses to overwrite a settled claim outcome with a different one', () => {
+    const { store } = freshStore();
+    store.recordEvent(event({ eventType: 'claim', outcome: 'won' }));
+
+    // The claim is the one irreversible act in this feature: the portal has committed the
+    // work to the team. A later 'failed' silently replacing 'won' would leave no trace
+    // that the work is ours — not in the row, not in a log, nowhere.
+    expect(() =>
+      store.recordEvent(
+        event({ eventType: 'claim', outcome: 'failed', occurredAtMs: NOW_MS + 5_000 }),
+      ),
+    ).toThrow(OutcomeOverwriteError);
+
+    // and it says which two answers it could not reconcile, because a human has to
+    expect(() => store.recordEvent(event({ eventType: 'claim', outcome: 'failed' }))).toThrow(
+      /won.*failed|failed.*won/s,
+    );
+
+    const [row] = store.listEvents();
+    expect(row?.outcome).toBe('won');
+    expect(row?.occurredAtMs).toBe(NOW_MS);
+  });
+
+  it('still settles a claim that was left unresolved, which is what reconciliation does', () => {
+    // 'unknown' is an open question rather than an answer (data-model §3), so resolving it
+    // loses nothing. Refusing the resolution would strand every claim whose answer never
+    // arrived — the exact case FR-016a exists to close.
+    const { store } = freshStore();
+    store.recordEvent(event({ eventType: 'claim', outcome: 'unknown' }));
+    store.recordEvent(event({ eventType: 'claim', outcome: 'lost', occurredAtMs: NOW_MS + 5_000 }));
+
+    expect(store.listEvents()[0]?.outcome).toBe('lost');
+  });
+
+  it('records the same outcome twice without complaint, so a re-run still converges', () => {
+    const { store } = freshStore();
+    store.recordEvent(event({ eventType: 'claim', outcome: 'won' }));
+    store.recordEvent(event({ eventType: 'claim', outcome: 'won', occurredAtMs: NOW_MS + 5_000 }));
+
+    const rows = store.listEvents();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.occurredAtMs).toBe(NOW_MS + 5_000);
+  });
+
+  it('lets a skip be re-evaluated, because a skip reason legitimately changes between cycles', () => {
+    // Nothing irreversible happened, and a skip carries the reason that applied this
+    // cycle: a day that fills up turns 'outside_schedule' into 'ceiling_reached' with no
+    // information lost.
+    const { store } = freshStore();
+    store.recordEvent(event({ eventType: 'skip', skipReason: 'outside_schedule' }));
+    store.recordEvent(event({ eventType: 'skip', skipReason: 'ceiling_reached' }));
+
+    expect(store.listEvents()[0]?.skipReason).toBe('ceiling_reached');
   });
 
   it('records a skip with the reason that blocked it, and no outcome', () => {
@@ -394,6 +506,77 @@ describe('outcome rows', () => {
     stale.close();
 
     expect(() => openStrakerDatabase(strakerDir, NOW_MS)).toThrow(/vocabulary|recovered/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Every CHECK generated from the shared vocabulary, and every one of them covered
+// ---------------------------------------------------------------------------
+
+describe('CHECK constraints generated from the shared vocabulary', () => {
+  it('fails loud when a stale outbox table no longer covers every channel and status', () => {
+    const { strakerDir } = tempRoot();
+    // A database created before a channel and a status were added. `CREATE TABLE IF NOT
+    // EXISTS` leaves it exactly as it was, so an uncovered table throws on first use — and
+    // an enqueue throws inside the transaction it shares with the state change that
+    // produced it, rolling that back too: a cycle that neither records nor announces.
+    const stale = new Database(join(strakerDir, STRAKER_DB_FILENAME));
+    stale.exec(`CREATE TABLE straker_outbox (
+      outbox_id INTEGER PRIMARY KEY,
+      event_id TEXT NOT NULL,
+      channel TEXT NOT NULL CHECK (channel IN ('offers', 'tracking')),
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at_ms INTEGER NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      sent_at_ms INTEGER
+    )`);
+    stale.close();
+
+    let error: unknown;
+    try {
+      const opened = openStrakerDatabase(strakerDir, NOW_MS);
+      openDbs.push(opened.db); // only reached while the table is uncovered
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(StrakerSchemaError);
+    const message = error instanceof Error ? error.message : '';
+    expect(message).toMatch(/straker_outbox/);
+    expect(message).toMatch(/alerts/); // the channel the stored CHECK would reject
+    expect(message).toMatch(/dead/); // and the status
+  });
+
+  it('puts a channel added to the shared vocabulary into a fresh database schema', async () => {
+    // `ddl()` says its CHECK constraints are generated from the shared vocabulary "so a
+    // value added cannot silently disagree with the schema". This executes that sentence:
+    // the vocabulary gains a channel, and the schema a fresh database is created with must
+    // accept it. A hand-typed list fails here — which is how a channel would otherwise
+    // reach production missing from the CHECK and throw at the first enqueue.
+    const { strakerDir } = tempRoot();
+    const outboxModule = '../../../src/straker/outbox.js';
+    vi.resetModules();
+    vi.doMock(outboxModule, async () => {
+      const actual = await vi.importActual<typeof import('../../../src/straker/outbox.js')>(
+        '../../../src/straker/outbox.js',
+      );
+      return { ...actual, STRAKER_OUTBOX_CHANNELS: [...actual.STRAKER_OUTBOX_CHANNELS, 'digest'] };
+    });
+    try {
+      const store = await import('../../../src/straker/strakerStore.js');
+      const { StrakerOutbox } = await import('../../../src/straker/outbox.js');
+      const opened = store.openStrakerDatabase(strakerDir, NOW_MS);
+      openDbs.push(opened.db);
+
+      expect(() =>
+        new StrakerOutbox(opened.db).enqueue('offer-1:claim', 'digest' as 'offers', '{}', NOW_MS),
+      ).not.toThrow();
+    } finally {
+      vi.doUnmock(outboxModule);
+      vi.resetModules();
+    }
   });
 });
 
