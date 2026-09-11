@@ -1,6 +1,6 @@
 # Implementation Plan: JobCatch 003 — Straker Offer Race
 
-**Branch**: `feat/003-straker-phase0-probe` (capture probe landed here; implementation branch to be cut from `main`) | **Date**: 2026-09-11 | **Spec**: [spec.md](./spec.md)
+**Branch**: `feat/003-straker-phase0-probe` — the capture probe and these documents both landed here, and the implementation continues on it (decided 2026-09-11). An earlier draft said the implementation branch would be cut from `main`; that is not possible, because `main` does not carry the probe's `src/straker/` modules and T017 reuses all four of them. Cutting from `main` would have meant rewriting the very code the probe proved against the live portal. | **Date**: 2026-09-11 | **Spec**: [spec.md](./spec.md)
 
 **Input**: Feature specification from `/specs/003-straker-offer-race/spec.md`
 

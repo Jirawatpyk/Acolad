@@ -1,0 +1,201 @@
+/**
+ * Durable outcome delivery for Straker (FR-016, FR-016b).
+ *
+ * Every outcome — a win, a loss, a skip, a recovery, an operational alert — is written
+ * into this queue in the **same transaction as the state change that produced it**, and a
+ * dispatcher drains it afterwards. That ordering is the whole design: a destination being
+ * unavailable can then delay an outcome but cannot lose one, because the outcome was
+ * durable before anyone tried to send it.
+ *
+ * It is Straker's own queue in Straker's own database (table `straker_outbox`, declared in
+ * `strakerStore.ts` alongside the rest of Straker's schema). It shares nothing with the
+ * XTM bot's `outbox` — R11 — and this file imports neither `src/state/` nor `src/config/`.
+ *
+ * The discipline is copied from the XTM outbox, which has run in production since
+ * 2026-06: idempotent enqueue, attempt counting, exponential backoff, and a `dead` state
+ * once the retries are spent. **Dead is visible, not lost**: a dead row still holds its
+ * payload and `requeueDead` brings it back, which is what an operator does after fixing a
+ * webhook. Delivery is at-least-once — a row is marked sent immediately after the
+ * destination accepts it, and the resulting window is the one the XTM plan already
+ * recorded in its Complexity Tracking.
+ */
+
+import type { StrakerDB } from './strakerStore.js';
+
+/**
+ * Straker's three destinations (contract §1–§3). `offers` and `tracking` are Straker's
+ * own — job news is separated per portal. `alerts` is the single existing operations
+ * channel, shared with the XTM bot on purpose: on-call watches one place, and an alert
+ * delivered where nobody looks is the same as no alert.
+ */
+export const STRAKER_OUTBOX_CHANNELS = ['offers', 'tracking', 'alerts'] as const;
+export type StrakerOutboxChannel = (typeof STRAKER_OUTBOX_CHANNELS)[number];
+
+export type StrakerOutboxStatus = 'pending' | 'sent' | 'dead';
+
+export interface StrakerOutboxRow {
+  readonly outboxId: number;
+  /** Identifies the event, not the offer: an offer's claim and its later recovery are
+   *  separate events and must both be delivered (FR-016b). */
+  readonly eventId: string;
+  readonly channel: StrakerOutboxChannel;
+  readonly payloadJson: string;
+  readonly status: StrakerOutboxStatus;
+  readonly attempts: number;
+  readonly nextAttemptAtMs: number;
+  readonly createdAtMs: number;
+  readonly sentAtMs: number | null;
+}
+
+export interface StrakerOutboxOptions {
+  /** Failures after which a row is given up on and marked dead. */
+  readonly retryCap?: number;
+  /** Age after which a row is given up on even with attempts to spare. */
+  readonly deadAfterHours?: number;
+}
+
+/** The same figures the XTM bot runs on, so the two queues behave alike under an outage.
+ *  They are constructor options rather than settings because `StrakerBotConfig` carries
+ *  no outbox variables yet; adding `STRAKER_OUTBOX_*` there is a config change, not a
+ *  change here. */
+const DEFAULT_RETRY_CAP = 10;
+const DEFAULT_DEAD_AFTER_HOURS = 6;
+
+const BASE_BACKOFF_MS = 30_000;
+const MAX_BACKOFF_MS = 5 * 60_000;
+
+interface OutboxRowShape {
+  outbox_id: number;
+  event_id: string;
+  channel: StrakerOutboxChannel;
+  payload_json: string;
+  status: StrakerOutboxStatus;
+  attempts: number;
+  next_attempt_at_ms: number;
+  created_at_ms: number;
+  sent_at_ms: number | null;
+}
+
+export class StrakerOutbox {
+  private readonly retryCap: number;
+  private readonly deadAfterHours: number;
+
+  constructor(
+    private readonly db: StrakerDB,
+    options: StrakerOutboxOptions = {},
+  ) {
+    this.retryCap = options.retryCap ?? DEFAULT_RETRY_CAP;
+    this.deadAfterHours = options.deadAfterHours ?? DEFAULT_DEAD_AFTER_HOURS;
+  }
+
+  /**
+   * Queue one outcome for one destination. Idempotent on event id **together with**
+   * channel: re-running a cycle after a crash re-queues nothing, while the same outcome
+   * still reaches every destination it must. Returns false when the row was already
+   * queued.
+   *
+   * An unknown channel is refused by the schema, not merely by the type — a channel the
+   * dispatcher cannot route would be an outcome queued into silence.
+   */
+  enqueue(
+    eventId: string,
+    channel: StrakerOutboxChannel,
+    payloadJson: string,
+    nowMs: number,
+  ): boolean {
+    // `ON CONFLICT (event_id, channel) DO NOTHING` rather than `INSERT OR IGNORE`: the
+    // latter ignores EVERY constraint violation, so a channel the dispatcher cannot route
+    // would be dropped silently instead of raising. Only the dedup conflict is meant to
+    // be ignored here, and naming it is what limits the ignoring to it.
+    const res = this.db
+      .prepare(
+        `INSERT INTO straker_outbox
+           (event_id, channel, payload_json, status, attempts, next_attempt_at_ms, created_at_ms)
+         VALUES (?, ?, ?, 'pending', 0, ?, ?)
+         ON CONFLICT (event_id, channel) DO NOTHING`,
+      )
+      .run(eventId, channel, payloadJson, nowMs, nowMs);
+    return res.changes > 0;
+  }
+
+  /** Rows ready to be sent, oldest first, so outcomes leave in the order they happened. */
+  due(nowMs: number): StrakerOutboxRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM straker_outbox
+          WHERE status = 'pending' AND next_attempt_at_ms <= ?
+          ORDER BY outbox_id`,
+      )
+      .all(nowMs) as OutboxRowShape[];
+    return rows.map(toRow);
+  }
+
+  /** The destination accepted it. Marked sent immediately after, which is where the
+   *  at-least-once window lives. */
+  markSent(outboxId: number, nowMs: number): void {
+    this.db
+      .prepare(`UPDATE straker_outbox SET status = 'sent', sent_at_ms = ? WHERE outbox_id = ?`)
+      .run(nowMs, outboxId);
+  }
+
+  /**
+   * The destination refused or could not be reached. Counts the attempt and pushes the
+   * next one out exponentially — retrying a destination already in trouble at the normal
+   * rhythm is how a bad minute becomes a bad hour.
+   *
+   * Returns `'dead'` once the retry cap is spent or the row has aged past
+   * `deadAfterHours`. A dead row keeps its payload and is brought back by `requeueDead`.
+   */
+  recordFailure(row: StrakerOutboxRow, nowMs: number): 'pending' | 'dead' {
+    const attempts = row.attempts + 1;
+    const agedOut = nowMs - row.createdAtMs >= this.deadAfterHours * 3_600_000;
+    if (attempts >= this.retryCap || agedOut) {
+      this.db
+        .prepare(`UPDATE straker_outbox SET status = 'dead', attempts = ? WHERE outbox_id = ?`)
+        .run(attempts, row.outboxId);
+      return 'dead';
+    }
+    const backoff = Math.min(BASE_BACKOFF_MS * 2 ** (attempts - 1), MAX_BACKOFF_MS);
+    this.db
+      .prepare('UPDATE straker_outbox SET attempts = ?, next_attempt_at_ms = ? WHERE outbox_id = ?')
+      .run(attempts, nowMs + backoff, row.outboxId);
+    return 'pending';
+  }
+
+  /**
+   * Ops lever: put every dead row back in the queue with a fresh retry budget, after the
+   * thing that was broken has been fixed. This is what makes `dead` a visible pause rather
+   * than a lost outcome.
+   */
+  requeueDead(nowMs: number): number {
+    const res = this.db
+      .prepare(
+        `UPDATE straker_outbox
+            SET status = 'pending', attempts = 0, next_attempt_at_ms = ?, created_at_ms = ?
+          WHERE status = 'dead'`,
+      )
+      .run(nowMs, nowMs);
+    return res.changes;
+  }
+
+  countByStatus(status: StrakerOutboxStatus): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS n FROM straker_outbox WHERE status = ?')
+      .get(status) as { n: number };
+    return row.n;
+  }
+}
+
+function toRow(r: OutboxRowShape): StrakerOutboxRow {
+  return {
+    outboxId: r.outbox_id,
+    eventId: r.event_id,
+    channel: r.channel,
+    payloadJson: r.payload_json,
+    status: r.status,
+    attempts: r.attempts,
+    nextAttemptAtMs: r.next_attempt_at_ms,
+    createdAtMs: r.created_at_ms,
+    sentAtMs: r.sent_at_ms,
+  };
+}

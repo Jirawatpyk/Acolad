@@ -5,6 +5,8 @@ import type { StrakerHttpClient } from '../../../src/straker/httpClient.js';
 function client(overrides: Partial<StrakerHttpClient> = {}): StrakerHttpClient {
   return {
     getJson: vi.fn().mockResolvedValue({ member_obj_id: 'vendor-from-me' }),
+    // Present because the transport has it; signing in never retries a read.
+    getJsonWithBackoff: vi.fn(),
     postJson: vi.fn().mockResolvedValue({}),
     lastRateLimit: () => null,
     ...overrides,

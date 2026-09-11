@@ -32,12 +32,12 @@ Single project. Straker code extends `src/straker/`, started by the capture prob
 
 **Purpose**: make the new bot configurable and governable before any of its logic exists
 
-- [ ] T001 [P] (FR-001, FR-009, FR-024) Write failing tests for the extended Straker config — own daily ceiling, own throughput, `SINGLE_INSTANCE_PORT` 47812, own `STATE_DIR`, own tracking-file id, own announcement channel, and the eligibility exclusion list defaulting to empty — in `tests/unit/straker/config.test.ts`
-- [ ] T002 Extend the config schema to pass T001 in `src/straker/config.ts` (FR-009, FR-024), keeping it wholly separate from `src/config/index.ts` (adding required vars there would fail-fast the live XTM bot on start)
-- [ ] T003 [P] Add `src/straker/**` to the coverage gate include list in `vitest.config.ts` (FR-013a, V18) — without this the constitution's coverage requirement silently does not apply to any new code
-- [ ] T004 [P] Add the Straker bot as its own PM2 application named `jobcatch-straker` in `straker.config.cjs`, separate from `ecosystem.config.cjs` (FR-024, FR-032) — the filename must end in `.config.cjs` or PM2 runs it as a plain script instead of reading it as an app definition
-- [ ] T005 Extend `scripts/deploy.ps1` so either bot can be released or restarted **without touching the other** (FR-026, V12), and verify the existing XTM path is byte-for-byte unchanged
-- [ ] T006 [P] (FR-024) Add the new `STRAKER_*` variables with placeholder values and explanatory comments to `.env.example`
+- [x] T001 [P] (FR-001, FR-009, FR-024) Write failing tests for the extended Straker config — own daily ceiling, own throughput, `SINGLE_INSTANCE_PORT` 47812, own `STATE_DIR`, own tracking-file id, own announcement channel, and the eligibility exclusion list defaulting to empty — in `tests/unit/straker/config.test.ts`
+- [x] T002 Extend the config schema to pass T001 in `src/straker/config.ts` (FR-009, FR-024), keeping it wholly separate from `src/config/index.ts` (adding required vars there would fail-fast the live XTM bot on start)
+- [x] T003 [P] Add `src/straker/**` to the coverage gate include list in `vitest.config.ts` (FR-013a, V18) — without this the constitution's coverage requirement silently does not apply to any new code
+- [x] T004 [P] Add the Straker bot as its own PM2 application named `jobcatch-straker` in `straker.config.cjs`, separate from `ecosystem.config.cjs` (FR-024, FR-032) — the filename must end in `.config.cjs` or PM2 runs it as a plain script instead of reading it as an app definition
+- [x] T005 Extend `scripts/deploy.ps1` so either bot can be released or restarted **without touching the other** (FR-026, V12), and verify the existing XTM path is byte-for-byte unchanged
+- [x] T006 [P] (FR-024) Add the new `STRAKER_*` variables with placeholder values and explanatory comments to `.env.example`
 
 ---
 
@@ -47,23 +47,23 @@ Single project. Straker code extends `src/straker/`, started by the capture prob
 
 **⚠️ No user-story work may begin until this phase is complete**
 
-- [ ] T007 [P] (FR-024, R11) Write failing tests for the Straker store schema — sightings, outcomes and ledger, in its **own** database file under its own state directory — in `tests/unit/straker/strakerStore.test.ts`
-- [ ] T008 Implement the store to pass T007 in `src/straker/strakerStore.ts`, sharing no table, file or transaction with the XTM store (R11)
-- [ ] T009 [P] (FR-009) Write failing tests for the per-portal ledger: keyed by **effective deadline day**, effort in **raw word count**, derived from held work rather than a running counter, in `tests/unit/straker/ledger.test.ts`
-- [ ] T010 Implement the ledger to pass T009 in `src/straker/ledger.ts` (FR-009) — derived-from-held is what makes finishing a job return its budget, the correction the XTM bot needed after shipping a counter
-- [ ] T011 [P] (FR-024) Write a failing test that a second instance refuses to start when port 47812 is held, in `tests/integration/straker/singleInstance.test.ts`
-- [ ] T012 Bind the single-instance lock on port 47812 in `src/straker/main.ts` (FR-024)
-- [ ] T013 [P] Write failing tests that the Straker liveness signal is emitted independently of the XTM bot's, in `tests/integration/straker/liveness.test.ts` (FR-026a, FR-025, SC-010)
-- [ ] T014 Emit the Straker liveness signal in `src/straker/main.ts` (FR-026a, FR-025), monitored separately so neither bot can hide the other's death
-- [ ] T015 [P] Write failing tests that an outcome survives a reporting destination being unavailable and is delivered on recovery, in `tests/unit/straker/outbox.test.ts` (FR-016, FR-016b, V11)
-- [ ] T016 Implement durable outcome queuing in `src/straker/outbox.ts` (FR-016)
-- [ ] T017 Wire the capture probe's proven modules into the bot — `httpClient.ts` (transport, cookie jar, Origin/Referer, budget headers), `session.ts` (sign-in, vendor identity read from the portal every time and never pinned — FR-022), `offersApi.ts` (open-offer read with its shape guards — FR-023) and `offerTracker.ts` (the pure sighting transition) — consumed by `src/straker/main.ts` and `src/straker/pollCycle.ts` rather than rewritten. These already exist and are tested; nothing else in the plan picks them up
-- [ ] T018 [P] (FR-032) Add a `jobcatch-straker` logger in `src/straker/logger.ts` with the credential values redacted, independent of the XTM bot's logger (which is bound to `AppConfig`)
+- [x] T007 [P] (FR-024, R11) Write failing tests for the Straker store schema — sightings, outcomes and ledger, in its **own** database file under its own state directory — in `tests/unit/straker/strakerStore.test.ts`
+- [x] T008 Implement the store to pass T007 in `src/straker/strakerStore.ts`, sharing no table, file or transaction with the XTM store (R11)
+- [x] T009 [P] (FR-009) Write failing tests for the per-portal ledger: keyed by **effective deadline day**, effort in **raw word count**, derived from held work rather than a running counter, in `tests/unit/straker/ledger.test.ts`
+- [x] T010 Implement the ledger to pass T009 in `src/straker/ledger.ts` (FR-009) — derived-from-held is what makes finishing a job return its budget, the correction the XTM bot needed after shipping a counter
+- [x] T011 [P] (FR-024) Write a failing test that a second instance refuses to start when port 47812 is held, in `tests/integration/straker/singleInstance.test.ts`
+- [x] T012 Bind the single-instance lock on port 47812 in `src/straker/main.ts` (FR-024)
+- [x] T013 [P] Write failing tests that the Straker liveness signal is emitted independently of the XTM bot's, in `tests/integration/straker/liveness.test.ts` (FR-026a, FR-025, SC-010)
+- [x] T014 Emit the Straker liveness signal in `src/straker/main.ts` (FR-026a, FR-025), monitored separately so neither bot can hide the other's death
+- [x] T015 [P] Write failing tests that an outcome survives a reporting destination being unavailable and is delivered on recovery, in `tests/unit/straker/outbox.test.ts` (FR-016, FR-016b, V11)
+- [x] T016 Implement durable outcome queuing in `src/straker/outbox.ts` (FR-016)
+- [x] T017 Wire the capture probe's proven modules into the bot — `httpClient.ts` (transport, cookie jar, Origin/Referer, budget headers), `session.ts` (sign-in, vendor identity read from the portal every time and never pinned — FR-022), `offersApi.ts` (open-offer read with its shape guards — FR-023) and `offerTracker.ts` (the pure sighting transition) — consumed by `src/straker/main.ts` and `src/straker/pollCycle.ts` rather than rewritten. These already exist and are tested; nothing else in the plan picks them up
+- [x] T018 [P] (FR-032) Add a `jobcatch-straker` logger in `src/straker/logger.ts` with the credential values redacted, independent of the XTM bot's logger (which is bound to `AppConfig`)
 
-- [ ] T019 [P] Write failing tests for **exponential backoff with jitter and a defined cap** on the reading path, and that exhausting the cap **raises an alert** rather than retrying forever, in `tests/unit/straker/httpClient.test.ts` (FR-019b, V30, Constitution IV)
-- [ ] T020 Implement that backoff **inside `src/straker/httpClient.ts`** (FR-019b, FR-030). Without it a one-second rhythm would send sixty requests a minute at a portal that is already failing — and the budget headers cannot restrain it, because a failing portal may not send them at all
-- [ ] T021 [P] Write a failing test that the backoff is **never** applied to the claim path, in `tests/integration/straker/claimCycle.test.ts` (FR-019c, V31) — an unknown claim outcome is not retried at any interval, since the risk there is a duplicate irreversible commitment rather than a wasted request
-- [ ] T022 [P] Define the shared vocabulary in `src/straker/types.ts` — sighting, claim outcome, effort unit, gate decision — using **the same names and meanings as the XTM bot** (FR-028, DC-2, V33), and record the mapping in a comment so drift between the two is visible rather than discovered during a later extraction
+- [x] T019 [P] Write failing tests for **exponential backoff with jitter and a defined cap** on the reading path, and that exhausting the cap **raises an alert** rather than retrying forever, in `tests/unit/straker/httpClient.test.ts` (FR-019b, V30, Constitution IV)
+- [x] T020 Implement that backoff **inside `src/straker/httpClient.ts`** (FR-019b, FR-030). Without it a one-second rhythm would send sixty requests a minute at a portal that is already failing — and the budget headers cannot restrain it, because a failing portal may not send them at all
+- [x] T021 [P] Write a failing test that the backoff is **never** applied to the claim path, in `tests/integration/straker/claimCycle.test.ts` (FR-019c, V31) — an unknown claim outcome is not retried at any interval, since the risk there is a duplicate irreversible commitment rather than a wasted request
+- [x] T022 [P] Define the shared vocabulary in `src/straker/types.ts` — sighting, claim outcome, effort unit, gate decision — using **the same names and meanings as the XTM bot** (FR-028, DC-2, V33), and record the mapping in a comment so drift between the two is visible rather than discovered during a later extraction. **Note**: the `SkipReason` values (`SKIP_REASONS` now live here too) came with it — the store and ledger needed them in Phase 2; T040 therefore retains only its second half, recording a reason for every offer not claimed in `pollCycle.ts`
 
 **Checkpoint**: the bot can start, hold its own lock, keep its own state, and be seen to be alive — with the XTM bot demonstrably untouched
 
@@ -123,7 +123,7 @@ Single project. Straker code extends `src/straker/`, started by the capture prob
 - [ ] T048 [P] [US2] Write a failing test that **three consecutive reconciliation failures raise an alert**, in `tests/integration/straker/reconcile.test.ts` (FR-016c, V24)
 - [ ] T049 [P] [US2] Write a failing test that recovered work is counted **even when it pushes the day past its ceiling**, and warns, in `tests/integration/straker/reconcile.test.ts` (FR-016d, V25)
 - [ ] T050 [P] [US2] Write failing tests for the win rate — **won ÷ genuinely winnable** — and for the companion count of offers our own rules turned away, in `tests/unit/straker/winRate.test.ts` (FR-017, FR-017a, SC-004, V22)
-- [ ] T051 [P] [US2] Write a failing test that alerts de-duplicate **once per offer identity per outcome**, in `tests/unit/straker/alerts.test.ts` (FR-019a, V28)
+- [ ] T051 [P] [US2] Write a failing test that alerts de-duplicate **once per offer identity per outcome**, in `tests/unit/straker/alerts.test.ts` (FR-019a, V28). **Carried forward from T019/T020 (2026-09-11)**: transport-level alerts (`onAlert`, read retries exhausted) carry **no offer identity**, so FR-019a's key cannot apply to them and the transport does not de-duplicate them itself. At a one-second rhythm a ten-minute outage fires hundreds. Whatever wires the alert sink must throttle or collapse them, and this test is where that belongs
 
 ### Implementation for User Story 2
 
@@ -159,13 +159,13 @@ Single project. Straker code extends `src/straker/`, started by the capture prob
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T061 [P] (FR-021, FR-023, Constitution IV/VI) Write the failure-mode suite the constitution mandates, in `tests/integration/straker/failureModes.test.ts`: sign-in failure, session expiry, request timeout, malformed payload, reporting-destination outage, and **restart mid-cycle**
+- [ ] T061 [P] (FR-021, FR-023, Constitution IV/VI) Write the failure-mode suite the constitution mandates, in `tests/integration/straker/failureModes.test.ts`: sign-in failure, session expiry, request timeout, malformed payload, reporting-destination outage, and **restart mid-cycle**. **Carried forward from T019/T020 (2026-09-11)**: the transport has **no request timeout at all** today — Constitution VI requires an explicit timeout on every network operation, and FR-019b's "slow" branch cannot work without one, because a hung socket blocks the retry loop forever rather than backing off. It was deliberately not added in T020: a default timeout would change the behaviour of the capture probe while it is collecting the SC-000 evidence. Add it here as an **opt-in `timeoutMs` on the single `attempt()` function** every request already passes through, so the bot gets it and the probe keeps today's behaviour
 - [ ] T062 [P] Write a failing test that a missing effort or deadline **alerts as well as skips**, in `tests/integration/straker/failureModes.test.ts` (FR-023a, V26) — it means a contract assumption failed, not merely that one offer was skipped
 - [ ] T063 [P] Write a failing test that an account-blocked rejection **alerts immediately and stops claiming**, without a sign-in retry loop, in `tests/integration/straker/failureModes.test.ts` (contract §4a, V27)
 - [ ] T064 [P] Write failing tests for the graduated budget response — deferrable work stops below 120 remaining, reading pauses below 60 — in `tests/unit/straker/httpClient.test.ts` (FR-019, SC-003, V15, V29)
 - [ ] T065 Implement per-minute pacing **inside `src/straker/httpClient.ts`**, adapting to the reported remainder and holding a hard ceiling when the headers are missing or nonsensical (R4, FR-019). It does **not** get its own module: FR-030 (DC-4) puts every request-issuing and request-pacing concern in the one transport file, and a separate limiter would be the first thing to break that rule
 - [ ] T066 [P] Write a failing isolation test that killing, blocking or breaking the sign-in of the Straker side leaves the XTM side unchanged in uptime, restart count, cadence and alert count, in `tests/integration/straker/isolation.test.ts` (SC-008, V13)
-- [ ] T067 Confirm `npm run test:coverage` reports the `src/straker/**` modules added to `vitest.config.ts` in T003 and meets the gate (V18) — a gate reporting green while not covering the code it governs is worse than none
+- [ ] T067 Confirm `npm run test:coverage` reports the `src/straker/**` modules added to `vitest.config.ts` in T003 and meets the gate (V18) — a gate reporting green while not covering the code it governs is worse than none. **Measured at the Phase 2 checkpoint (2026-09-11)**: the whole-repo gate PASSES at 89.45% lines, but `src/straker/` on its own sits at **79.93%**, and the shortfall is entirely three structurally untestable pieces — `reconMain.ts` (0%, a probe entry point, deleted by T072), the `main()` function in `main.ts`, and the pino transport wiring in `createStrakerLogger`. The XTM gate never had this problem because it does not include `src/runtime/**` at all. **The resolution here is to exclude genuine process entry points, never to lower a threshold** — an entry point that only wires collaborators and starts a loop has nothing to assert about, and the testable parts of both files were deliberately split out (`startStrakerBot`, `withRedaction`) precisely so the logic that matters IS covered. Decide it explicitly here rather than rediscovering it
 - [ ] T068 [P] (FR-031) Write `docs/add-a-portal.md` — the runbook ADR-001 delivers **instead of** an abstraction, including the port register (XTM 47811, Straker 47812) and the state-directory convention
 - [ ] T069 [P] (Constitution: live-portal tests behind a flag) Add a live-portal smoke path in `tests/live/straker/smoke.test.ts` behind the existing live flag, never running in CI
 - [ ] T070 Capture the **seven-day XTM baseline** that SC-005 compares against and store it at `specs/003-straker-offer-race/xtm-baseline.md` (RP-3, SC-005a) — without it SC-005 cannot be evaluated after release

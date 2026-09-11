@@ -5,6 +5,9 @@ import type { StrakerHttpClient } from '../../../src/straker/httpClient.js';
 function client(reply: unknown): StrakerHttpClient {
   return {
     getJson: vi.fn().mockResolvedValue(reply),
+    // Answers the same reply through either read door, so these stay tests of the shape
+    // guards rather than of which entry point the caller happens to use.
+    getJsonWithBackoff: vi.fn().mockResolvedValue(reply),
     postJson: vi.fn(),
     lastRateLimit: () => null,
   };
