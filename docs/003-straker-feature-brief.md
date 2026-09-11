@@ -1,4 +1,4 @@
-# Feature Brief — 003 Straker Offer Race
+# Feature Brief — JobCatch 003: Straker Offer Race
 
 > **วิธีใช้**: วางเนื้อหาตั้งแต่ "## Feature description" ลงไปเป็น input ของ
 > `/speckit-specify` ใน Claude Code (รันในโฟลเดอร์รีโป Acolad)
@@ -10,6 +10,81 @@
 >
 > อัปเดต 2026-09-11: ผู้ใช้ยืนยันว่ามี offer เข้ามาแล้ว (ข้อกังวลเรื่อง VAT /
 > disengaged ตกไป) แต่ยังจับ payload จริงไม่ได้ → จึงต้องมี Phase 0
+
+---
+
+## ภาพรวมโปรแกรม (อ่านก่อน ถ้าเพิ่งเข้ามาอ่าน)
+
+### ของที่มีอยู่แล้ววันนี้
+
+บอทตัวหนึ่งเฝ้า XTM Cloud ตลอด 24 ชั่วโมง ทุก 20 วินาทีเปิดดูว่ามีงานแปลใหม่โผล่ไหม
+ถ้าเจองานคู่ภาษามาเลย์ **และ** อยู่ในเวลาทำงาน ไม่ใช่วันหยุดไทย ยังไม่เกินโควต้าคำต่อวัน
+→ กดรับให้เลย แล้วบันทึกลง Google Sheets + แจ้ง Google Chat
+**live มาตั้งแต่ 2026-06-22**
+
+### ของที่จะเพิ่ม
+
+บอทตัวที่สองเฝ้า **Straker** ทำงานหลักการเดียวกัน แต่ต่างสองเรื่องใหญ่:
+Straker มี **REST API** ให้เรียกตรง (ไม่ต้องอ่าน DOM) และงานเป็นแบบ
+**ใครกดก่อนได้** ต้องเร็ว
+
+### จัดระเบียบยังไง — 3 ชั้น
+
+```
+ชั้นกลาง (ใช้ร่วมกัน)      กฎเวลาทำงาน · วันหยุดไทย · โควต้า · ระบบส่งแจ้งเตือน
+  @jobcatch/core            · ตรรกะกันแจ้งซ้ำ  —  ไม่รู้จักพอร์ทัลไหนเลย
+
+ชั้นพอร์ทัล (ตัวละชุด)     portal-xtm รู้เรื่อง Playwright/iframe
+  @jobcatch/portal-*        portal-straker รู้เรื่อง HTTP/cookie
+                            แต่ละตัวรู้แค่พอร์ทัลของตัวเอง
+
+ชั้นรัน                     คนละ process · คนละไฟล์ SQLite · คนละโควต้า
+  PM2 app ละตัว             ตัวหนึ่งล่ม อีกตัวไม่รู้เรื่องเลย (bulkhead)
+```
+
+**กฎข้อเดียวที่สำคัญที่สุด (Open/Closed)**
+เพิ่มพอร์ทัลใหม่ **ต้องไม่ต้องแก้พอร์ทัลเดิมหรือชั้นกลาง** — แค่เพิ่มโฟลเดอร์ใหม่
++ process ใหม่ (ดู `docs/add-a-portal.md` ที่ 003 จะส่งมอบ)
+
+### ลำดับงาน
+
+| | ทำอะไร | เวลา |
+|---|---|---|
+| **Phase 0** | สคริปต์ read-only ดักเก็บ offer payload จริง + วัด offer lifetime | รันทิ้งไว้ 1–2 สัปดาห์ |
+| **003** | ย้ายชั้นกลางออกมา + เขียนบอท Straker | หลัง Phase 0 |
+| **004** | ยังไม่ทำ — รอพอร์ทัล*ชนิดเดียวกัน* 2 ตัว (ADR-001) | ตาม trigger |
+
+---
+
+## ADR-002 — ชื่อโปรแกรม: **JobCatch**
+
+**บริบท**: ชื่อ `Acolad` ไม่ตรงกับของจริงแล้ว — เริ่มจาก `partner.acolad.com`
+(ถอดออกแล้วใน 002) → ย้ายไป XTM Cloud → กำลังเพิ่ม Straker ซึ่งเป็นบริษัทคนละราย
+และจะมีพอร์ทัลอื่นตามมาอีก. ชื่อปัจจุบันบอกชื่อ*ลูกค้ารายหนึ่ง* ไม่ได้บอกว่าระบบทำอะไร
+
+**ตัดสินใจ**: ชื่อโปรแกรมคือ **JobCatch**
+
+- มาจาก **คำที่ทีมใช้อยู่แล้ว** — `CLAUDE.md` เขียน "snatch window" และมี
+  `npm run report:catch-rate` อยู่แล้ว
+- บอก**พฤติกรรม** ไม่ใช่ชื่อ vendor → ไม่พังเมื่อมีพอร์ทัลที่ 3, 4
+- ⚠️ **หลีกเลี่ยง** `vendor-bot` / `vendr-bot` — `vendr` เป็นชื่อผลิตภัณฑ์ของ Straker เอง
+
+**Naming convention**
+
+| สิ่ง | ชื่อ |
+|---|---|
+| npm package | `@jobcatch/core` · `@jobcatch/portal-xtm` · `@jobcatch/portal-straker` |
+| PM2 app | `jobcatch-xtm` · `jobcatch-straker` · `jobcatch-straker-recon` (Phase 0) |
+| ไฟล์ SQLite | `jobcatch-xtm.db` · `jobcatch-straker.db` (ของเดิม `acolad.db` คงไว้จนถึงขั้น 3) |
+
+**ยังไม่เปลี่ยนชื่อ GitHub repo ตอนนี้** — จะลาก PM2 app name, `deploy.ps1`,
+ชื่อไฟล์ DB, คอมเมนต์เรื่อง port, CI ไปด้วย = churn จริงบนระบบ live เพื่อความสวยงามล้วนๆ
+ทำเป็น 3 ขั้นแทน:
+
+1. **ตอนนี้** — ใช้ JobCatch เป็นชื่อเรียกในเอกสารและเวลาคุยกับทีม
+2. **ใน 003** — package ใหม่ตั้งชื่อ `@jobcatch/*` ตั้งแต่แรก (ยังไม่มีอะไรอ้างถึง = ฟรี)
+3. **ทีหลัง** — เปลี่ยนชื่อ repo + PM2 + ไฟล์ DB เป็นงานเล็กของตัวเอง ตอนไม่มีอะไรค้าง
+   (GitHub redirect ให้อัตโนมัติ clone เดิมไม่พัง)
 
 ---
 
@@ -29,8 +104,8 @@
 | Feature | ทำอะไร | ความเสี่ยงต่อ XTM live |
 |---|---|---|
 | **Phase 0 (ทำก่อนทุกอย่าง)** | capture probe read-only — ดักเก็บ offer payload จริง + วัด offer lifetime | **ศูนย์** — แยกสคริปต์ ไม่แตะโค้ด XTM เลย |
-| **003** | ย้าย module ที่ *พิสูจน์แล้วว่า generic* เข้า `packages/core` แบบ mechanical + สร้าง Straker bot ที่ import จาก core นั้น | ต่ำ — XTM แค่เปลี่ยน import path |
-| **004 (ทีหลัง)** | ออกแบบ `PortalAdapter` SPI จริง โดยมีของจริง 2 ตัวให้ generalize | ทำเมื่อเห็นว่าคุ้ม (อาจไม่ต้องทำเลย) |
+| **003** | ย้าย module ที่ *พิสูจน์แล้วว่า generic* เข้า `packages/core` (`@jobcatch/core`) แบบ mechanical + สร้าง Straker bot ที่ import จาก core นั้น | ต่ำ — XTM แค่เปลี่ยน import path |
+| **004** | ~~ออกแบบ `PortalAdapter` SPI~~ → **ไม่มีกำหนด เป็น trigger-based** (ดู ADR-001 ด้านล่าง) | — |
 
 module ที่ย้ายได้ทันทีใน 003 (ตรวจแล้ว **XTM reference = 0** ยกเว้นที่ระบุ):
 `schedule/*` (มี 2 ที่ใน `effort.ts` ต้อง clean) · `monitoring/*` ·
@@ -40,6 +115,71 @@ module ที่ย้ายได้ทันทีใน 003 (ตรวจแ�
 
 **ยังไม่ย้ายใน 003**: `portal/*` (ทั้งหมดอยู่กับ XTM), `detection/types.ts`,
 `state/xtmJobStore.ts`, `reporting/sheets.ts|xtmNotifier.ts`, `runtime/xtmPoll*`
+
+---
+
+## ADR-001 — ไม่ทำ `PortalAdapter` SPI (microkernel) ใน 003 หรือ 004
+
+**บริบท**: จะมีบอทพอร์ทัลอื่นเพิ่มอีก แต่ **ยังไม่ทราบว่าพอร์ทัลไหน กี่ตัว หรือเมื่อไหร่**
+— จะทำเพิ่มตามงานที่เข้ามาจริง (2026-09-11)
+
+**ตัดสินใจ**: ไม่สร้าง SPI กลาง ไม่ทำ plug-in registry ไม่ทำ runtime plug-in loading
+
+**เหตุผล**:
+- ตอนนี้มี **HTTP-based 1 ตัว (Straker) + browser-based 1 ตัว (XTM)** —
+  ยังไม่มีสองตัวที่เป็น *ชนิดเดียวกัน* ให้ generalize. Rule of Three นับตัวอย่างที่
+  เทียบกันได้ ไม่ใช่นับหัว
+- SPI ที่ครอบทั้ง Playwright และ HTTP จะเป็น lowest-common-denominator +
+  escape hatch → แย่กว่าไม่มี (Speculative Generality, *Refactoring*/Fowler)
+- ความไม่สมมาตรของจริง: XTM ต้องมี `readClosedKeys` · `acceptAvailable` ·
+  evidence capture · session-collision yield · bulk all-or-nothing;
+  Straker ต้องมี rate-limit header adaptive · cookie jar · proactive re-login ·
+  409 semantics — **แต่ละฝั่งไม่ต้องการของอีกฝั่งเลยสักอย่าง**
+
+**คาดการณ์**: พอร์ทัลใหม่ส่วนใหญ่มี API → SPI (ถ้าเกิด) จะโตมาจาก**ฝั่ง HTTP**
+และ **XTM จะเป็น special case ถาวร** — อย่าพยายามลาก XTM เข้ามา
+special case 1 ตัวถูกกว่า universal abstraction ที่ผิด
+
+**Trigger ที่จะกลับมาพิจารณา** (ข้อใดข้อหนึ่ง):
+1. มีพอร์ทัล **ชนิดเดียวกัน** ครบ 2 ตัว (เช่น HTTP-based ตัวที่ 2 นอกจาก Straker)
+2. ต้องแก้บั๊กตัวเดียวกันซ้ำใน poll loop สองตัว
+3. โค้ดที่ duplicate จริง > ~500 บรรทัด
+
+**สิ่งที่ *ไม่* ต้องใช้ SPI แก้** (คนมักสับสน):
+- ~~capacity ที่แชร์กันระหว่างพอร์ทัล → shared ledger~~ → **ไม่ต้องทำเลย**
+  (ยืนยัน 2026-09-11: **capacity แยกต่อพอร์ทัล ไม่ใช้ร่วม**) → bulkhead สมบูรณ์
+- **รายงานรวมทุกพอร์ทัล** → Sheet schema ร่วม + card builder ร่วม (อยู่ใน core หลัง 003)
+  เป็น **read-only aggregation ตอนทำรายงาน** ไม่ใช่ shared state ตอน accept
+
+---
+
+## Design Constraints — เตรียมรับพอร์ทัลอนาคต (ราคาเกือบศูนย์)
+
+เนื่องจากจะมีพอร์ทัลเพิ่มแบบทยอยมา **เป้าหมายคือ "เพิ่มพอร์ทัลใหม่ต้องไม่ต้องแก้
+พอร์ทัลเดิมหรือ core"** (Open/Closed) — ซึ่งดีไซน์ process-per-portal ให้คุณสมบัตินี้อยู่แล้ว
+สิ่งที่เพิ่มคือวินัย 4 ข้อ ให้ Straker เป็น **reference implementation ของตระกูล HTTP**:
+
+| # | กฎ | ทำไม |
+|---|---|---|
+| **DC-1** | **แปลเป็นภาษาโดเมนที่ขอบของ adapter — ห้ามรั่วขึ้นไป** เช่น orchestration ต้องไม่มี `status === 409` โผล่; adapter แปลเป็น `AcceptOutcome.LostRace` ที่ขอบตัวเอง | ★ ข้อสำคัญที่สุด — ถ้าทำข้อนี้ SPI ทีหลังเหลือแค่ "เขียน interface ที่ทั้งสองทำได้อยู่แล้ว" |
+| **DC-2** | **vocabulary เดียวกันทั้งสองบอท** — `OfferSeen` / `AcceptOutcome` / `EffortUnits` / `GateDecision` ชื่อเดียวกัน ความหมายเดียวกัน ถึงจะยังไม่มี interface กลาง | ทำให้ generalize ทีหลังเป็นงานกลไก |
+| **DC-3** | **ลำดับขั้นใน poll loop เหมือนกัน** — `fetch → diff → gate → act → persist → notify` ชื่อ function เหมือนกัน | diff ระหว่างสองบอทอ่านออกด้วยตา → เห็น duplication จริงเมื่อไหร่ก็รู้ (trigger #3) |
+| **DC-4** | **transport detail อยู่ในไฟล์เดียว** — cookie jar / rate-limit header / retry รวมใน `httpClient.ts` ไฟล์เดียว ไม่กระจาย | พอร์ทัลที่ 3 copy ไฟล์นี้ไปแก้ base URL ก็เกือบเสร็จ |
+
+### Deliverable เพิ่มของ 003: runbook "เพิ่มพอร์ทัลใหม่"
+
+เพราะยังไม่รู้ว่าพอร์ทัลถัดไปคืออะไร **เอกสารมีค่ามากกว่า abstraction**
+003 ต้องส่งมอบ `docs/add-a-portal.md` ที่เป็น checklist ใช้ได้จริง:
+
+1. recon ก่อน (มี API ไหม → ถ้ามี copy ตระกูล Straker, ถ้าไม่มี copy ตระกูล XTM)
+2. สร้าง `packages/portal-<ชื่อ>` (`@jobcatch/portal-<ชื่อ>`) + config schema ของตัวเอง
+3. จอง `SINGLE_INSTANCE_PORT` ใหม่ (ตารางพอร์ตที่ใช้แล้ว: XTM 47811, Straker 47812)
+4. `STATE_DIR` ใหม่ (คนละไฟล์ SQLite)
+5. Sheet tab ใหม่ + Chat webhook
+6. ลงทะเบียนใน `ecosystem.config.cjs` + `deploy.ps1`
+7. รัน `ACCEPT_ENABLED=0` อย่างน้อย 1 สัปดาห์ก่อนเปิดกดรับ
+8. ตั้งค่า capacity/throughput **ชุดของพอร์ทัลนั้นเอง** (ไม่แชร์กับพอร์ทัลอื่น —
+   ดู ADR-001) + เพิ่มเข้า daily report รวมเพื่อให้คนเห็นยอดรวมทุกพอร์ทัล
 
 ---
 
@@ -82,7 +222,9 @@ loop ทุก 10 วินาที:            ← 6 req/นาที = 2% ข
 **ข้อห้ามเด็ดขาด**: ไม่มีการเรียก `POST .../accept` หรือ `POST .../decline` ในสคริปต์นี้
 ต้องไม่มี string `accept` / `decline` ในโค้ด Phase 0 เลย (ตรวจด้วย grep ใน review)
 
-รันบน PM2 เครื่อง Windows เดิม เป็น app ที่สาม (ชั่วคราว) ทิ้งไว้ 1–2 สัปดาห์
+รันบน PM2 เครื่อง Windows เดิม เป็น app ที่สาม (ชั่วคราว) ชื่อ **`jobcatch-straker-recon`**
+เรียกด้วย **`npm run straker:recon`** (ให้เข้าคู่กับ `xtm:recon` ที่มีอยู่แล้ว — คนอ่านรีโป
+จะรู้ทันทีว่าไม่ใช่ production path) ทิ้งไว้ 1–2 สัปดาห์
 
 ### สิ่งที่จะได้ออกมา
 
@@ -137,7 +279,8 @@ loop ทุก 10 วินาที:            ← 6 req/นาที = 2% ข
 
 ### Non-goals (ชัดเจนว่าไม่ทำใน 003)
 
-- ไม่ออกแบบ `PortalAdapter` SPI (ยกไป 004)
+- **ไม่ออกแบบ `PortalAdapter` SPI / microkernel / plug-in registry** (ดู ADR-001) —
+  แต่ **ต้องทำตาม DC-1..DC-4** เพื่อให้ทำทีหลังได้ถูกเมื่อ trigger ยิง
 - ไม่ทำ auto-decline (ปล่อยให้ offer หมดอายุเอง)
 - ไม่ทำ upload/deliver ไฟล์งาน ไม่ทำ timer/time-tracking (`/assigned-jobs/{id}/time`)
 - ไม่ทำ invoice / PO / rates
@@ -254,10 +397,18 @@ services: `translation` `edit` `review` `proofread`
 4. **eligibility rule ของ Straker คืออะไร** — มาเลย์อย่างเดียวเหมือน XTM?
    หรือรับทุกคู่ภาษาใน 44 คู่ที่ลงทะเบียนไว้? กรอง `service` (translation เท่านั้น?)
    กรองราคาขั้นต่ำ (`budget` / `unit_cost`)?
-5. **capacity ใช้ร่วมกับ XTM หรือแยก** — ทีมแปลคือทีมเดียวกัน ถ้ารับงาน Straker
-   ต้องหักโควต้าเดียวกับ XTM ไหม (`ACCEPT_MAX_WORDS_PER_DAY=3500` ปัจจุบัน)
-   **ถ้าใช้ร่วม = สองบอทต้องแชร์ state → กระทบดีไซน์ bulkhead อย่างแรง**
-   (ตอนนี้ตั้งใจให้ SQLite คนละไฟล์)
+5. ~~**capacity ใช้ร่วมกับ XTM หรือแยก**~~ → ✅ **ตอบแล้ว 2026-09-11: แยก ไม่ใช้ร่วม**
+   - แต่ละบอทมี **SQLite ไฟล์ของตัวเอง + daily cap ของตัวเอง** — ไม่มี shared ledger
+     ไม่มี cross-process transaction → **bulkhead สมบูรณ์ 100%** (ข้อนี้ทำให้ 003 ง่ายลง)
+   - Straker ต้องมีค่า capacity/throughput **ชุดของตัวเอง** ใน config ไม่ใช่ใช้ค่าของ XTM
+     (ตั้งเท่าไหร่เป็นการตัดสินใจของทีม — Phase 0 จะบอกว่ามี offer เข้าวันละกี่งาน
+     จึงจะตั้งค่าได้อย่างมีข้อมูล)
+   - ⚠️ **ผลข้างเคียงที่ต้องรู้ตัว**: ทีมแปลเป็นทีมเดียวกัน แต่เพดานแยกกัน →
+     ยอดรวมที่รับได้ = XTM cap + Straker cap ซึ่งอาจเกินกำลังจริงของทีม
+     **ทางแก้ที่ไม่ต้องแชร์ state**: แยก *การบังคับ* (enforcement) แต่รวม *การมองเห็น*
+     (visibility) — ให้ daily report 09:00 แสดงยอดรวมทั้งสองพอร์ทัลในการ์ดเดียว
+     (อ่านสอง DB แบบ read-only ตอนทำรายงาน ไม่ใช่ตอน accept) → คนเห็นแล้วปรับ cap เอง
+     เริ่มด้วยการตั้ง Straker cap แบบ conservative ไว้ก่อน
 6. **effort metric** — ใช้ `weighted_words` (เทียบเท่า File WWC) หรือ `words`?
    throughput ต่อชั่วโมงของทีมสำหรับงาน Straker เท่ากับ XTM ไหม
 7. **Sheet layout** — tab ใหม่ในไฟล์เดิม หรือไฟล์ใหม่? คอลัมน์อะไรบ้าง

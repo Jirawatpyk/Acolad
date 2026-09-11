@@ -1,5 +1,8 @@
 # Research Note — Straker Vendor Portal (vendr.straker.ai)
 
+> โปรแกรมนี้เรียกว่า **JobCatch** (ดู ADR-002 ใน `003-straker-feature-brief.md`)
+> — ชื่อ `Acolad` เดิมไม่ตรงกับของจริงแล้วเพราะจะมีหลายพอร์ทัลจากหลายบริษัท
+
 **วันที่ recon**: 2026-08-25 · **วิธี**: Playwright MCP บนเครื่อง eqst-jirawat (IP ผู้ใช้จริง)
 **บัญชี**: nztc@eqho.com — Shane Thompson / EQHO (`vendor_type: agency`, `vendor_pool: straker_pool`)
 **ขอบเขต**: อ่านอย่างเดียว — **ไม่มีการกด accept / decline ใดๆ**
@@ -48,6 +51,14 @@ GET  /api/vendor/auth/2fa/status
 - **`vendorId` = `member_obj_id` จาก `/auth/me`** = `4a249411-d3a9-4057-8e95-9a5d59f8e804`
   → อย่า hardcode, อ่านจาก `/auth/me` ทุกครั้งหลัง login (เผื่อ impersonation/เปลี่ยนบัญชี)
 - 401 signature error เมื่อ token ไม่ผ่าน → ใช้เป็นสัญญาณ re-login (แทน `isXtmLoggedOut`)
+- **★ API บังคับ header `Origin` (ยืนยันจาก Phase 0 probe จริง 2026-09-11)** — ยิงจาก
+  Node client โดยไม่ใส่ `Origin` → **`403 {"detail":"Invalid or missing Origin"}`**
+  ตั้งแต่ `POST /auth/login`. **recon รอบแรกไม่เจอข้อนี้เพราะทำผ่านเบราว์เซอร์ ซึ่งใส่
+  `Origin`/`Referer` ให้เองอัตโนมัติ** → adapter ต้องส่ง `Origin: <baseUrl>` +
+  `Referer: <baseUrl>/` เองทุก request (ทำแล้วใน `src/straker/httpClient.ts`)
+- **ยืนยันจากการรันจริง 2026-09-11**: login + cookie jar ทำงาน · `member_obj_id` ที่อ่านจาก
+  `/auth/me` = `4a249411-…` ตรงกับที่ recon เห็น · RTT **256–650 ms** จากกรุงเทพ ·
+  `x-ratelimit-limit: 300` มีจริงและ `-remaining` ลดจริง
 
 ---
 
@@ -213,7 +224,8 @@ Straker บอกตรงๆ ผ่าน status code → **ไม่ต้อ�
    → **Phase 0 เก็บค่าจริงทุกค่าที่เจอ**
 4. **`/job-offers?status=` รับค่าอะไรได้บ้าง** — `open` ใช้ได้, ค่ามั่ว → **500** (ไม่ใช่ 400)
 5. `job-offers` ไม่มี pagination envelope — ถ้าวันไหน offer เยอะจะตัดที่เท่าไหร่?
-6. rate limit / IP throttle ของ API — ยังไม่ทดสอบ
+6. ~~rate limit / IP throttle ของ API — ยังไม่ทดสอบ~~ **ตอบแล้วบางส่วน (Phase 0)**:
+   header `x-ratelimit-*` ทำงานจริงที่ 300/นาที; ยังไม่ทดสอบว่าเกิน limit แล้วเกิดอะไร
 7. `POST /api/vendor/auth/exchange` คือ refresh token ใช่ไหม, session อายุเท่าไหร่
 
 ---
