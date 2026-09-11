@@ -125,12 +125,26 @@ src/
 │   ├── config.ts             # EXTEND · add ceiling, throughput, schedule, ports
 │   ├── probe.ts              # built · probe cycle (read-only)
 │   ├── reconMain.ts          # built · probe entry; deleted when the probe ends
+│   ├── types.ts              # NEW  · shared vocabulary (DC-2): sighting, outcome,
+│   │                         #   effort unit, gate decision — same names as the XTM bot
 │   ├── eligibility.ts        # NEW  · pure — is this offer one we want? (Track B)
-│   ├── claim.ts              # NEW  · the irreversible action; won / lost / failed
+│   ├── offerParse.ts         # NEW  · payload → domain, from fixtures (Track B)
+│   ├── claimOutcome.ts       # NEW  · pure — won / lost / failed / unknown
+│   ├── claim.ts              # NEW  · the irreversible action itself
 │   ├── reconcile.ts          # NEW  · portal's assigned work vs our record (FR-016a)
-│   ├── strakerStore.ts       # NEW  · own SQLite: offers, outcomes, ledger
+│   ├── strakerStore.ts       # NEW  · own SQLite: offers, outcomes
+│   ├── ledger.ts             # NEW  · per-portal ceiling, keyed by deadline day
+│   ├── outbox.ts             # NEW  · durable outcome delivery (FR-016)
+│   ├── trackingSink.ts       # NEW  · Straker's own tracking file
+│   ├── notifier.ts           # NEW  · own announcement channel + shared alert channel
+│   ├── combinedSummary.ts    # NEW  · reads BOTH portals at reporting time only
+│   ├── winRateReport.ts      # NEW  · ops script
+│   ├── logger.ts             # NEW  · own logger (the XTM one is bound to AppConfig)
 │   ├── pollCycle.ts          # NEW  · fetch → diff → gate → act → persist → notify (DC-3)
 │   └── main.ts               # NEW  · long-running entry, supervised
+
+   NOTE: rate limiting, backoff and session renewal are NOT separate modules —
+   DC-4 puts every request-issuing and request-pacing concern inside httpClient.ts.
 ├── schedule/                 # REUSED UNCHANGED — input is primitives only, no portal types
 ├── monitoring/               # REUSED — liveness signal, logger
 ├── reporting/                # EXTENDED — a Straker sink + card builder; XTM paths untouched
@@ -142,7 +156,7 @@ tests/
 └── live/straker/             # behind the live flag, never in CI
 ```
 
-**Structure Decision**: extend the existing `src/straker/` package that the capture probe already created, rather than introducing `packages/`. This keeps the diff additive, keeps the live XTM bot untouched, and leaves the monorepo move as a clean, separate, mechanical change later. DC-4 is already satisfied — all transport lives in `httpClient.ts` — and DC-3 is expressed by naming `pollCycle.ts`'s steps to match the XTM loop exactly.
+**Structure Decision**: extend the existing `src/straker/` package that the capture probe already created — its transport, sign-in, offer reader and sighting tracker are carried into the bot rather than rewritten, rather than introducing `packages/`. This keeps the diff additive, keeps the live XTM bot untouched, and leaves the monorepo move as a clean, separate, mechanical change later. DC-4 is already satisfied — all transport lives in `httpClient.ts` — and DC-3 is expressed by naming `pollCycle.ts`'s steps to match the XTM loop exactly.
 
 ---
 
