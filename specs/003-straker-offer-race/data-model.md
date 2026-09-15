@@ -2,30 +2,49 @@
 
 **Date**: 2026-09-11 | **Plan**: [plan.md](./plan.md) | **Research**: [research.md](./research.md)
 
-> ## 🚧 SC-000 boundary — read this first
+> ## SC-000 boundary — resolved 2026-09-15
 >
-> **The portal-native shape of an offer is NOT fixed in this document and must not be fixed until the capture probe reaches its exit — 10 distinct real payloads, or 14 days elapsed, whichever comes first.** That region is marked **BLOCKED** below. If exit comes on the time branch, the model is built from the smaller sample and the limitation is recorded with it.
+> This document once withheld §1 until the capture probe reached exit, so that the offer's
+> shape could not be fixed on assumption. **§1 is now modelled from three real captured
+> payloads** — the owner chose to proceed at 3 of 10, on day 4.2 of 14, and the limitation is
+> recorded in §1 and in spec.md §Clarifications rather than left implicit.
 >
-> Everything else here — how a sighting behaves, what a claim outcome is, how the ledger works, what gets reported — is derived from the specification rather than from the portal, and is settled. Track A can be built against it today.
+> Everything else here — how a sighting behaves, what a claim outcome is, how the ledger
+> works, what gets reported — was always derived from the specification rather than from the
+> portal, and was never blocked.
 
 ---
 
-## 1. BLOCKED — `StrakerOffer` (portal-native)
+## 1. `StrakerOffer` (portal-native) — modelled 2026-09-15, from captured payloads
 
-**Status: not modelled. Do not define these fields from the recon note.**
+**No longer blocked.** The owner decided on 2026-09-15 to proceed without waiting for
+SC-000's exit, and the premise that justified the block had partly lapsed: the capture probe
+had produced real payloads, so the shape below is read off files rather than assumed. The
+decision, with its sample size and the measured lifetimes, is in spec.md §Clarifications.
 
-The recon note lists candidate fields read out of the portal's own front-end code, with **zero real payloads ever observed**. Two of them feed the scheduling gate directly:
+**Sample: 3 captured offers, of which only TWO are independent** — two of the files are one
+job (`job_ref: aj-265`) split across two target languages. Every statement here rests on
+that, and the parser is built to fail loud on anything it has not seen rather than to absorb
+it (FR-023).
 
-| Needed by | What it needs | Why guessing is unacceptable |
+| Field | Type | What the decision uses it for |
 |---|---|---|
-| Gate — capacity and feasibility | the offer's **effort** | Feeding the wrong field mis-measures every ceiling and deadline decision the bot makes, in a way that looks like it is working |
-| Gate — deadline reachability | the offer's **deadline** | Same |
-| Eligibility | the **language direction**, in the portal's own identifiers | A wrong field silently claims work in the wrong languages |
-| Eligibility | the **listing category** | Its values are unknown and its meanings need Straker (Q3/U3) |
+| `obj_id` | string | The stable identity. Opaque, never composed (R8). |
+| `source_lang`, `target_lang` | string | The language direction (FR-011, FR-011a), lower-case and hyphenated: `en-us`, `ms-my`, `th`. **Granularity is inconsistent** — `th` carries no region while `ms-my` and `zh-tw` do. |
+| `words` | number | **Effort**, raw word count (FR-009). Confirmed against the pricing fields rather than assumed: `budget = unit_cost × total_unit` holds on every offer, `total_unit` is one project under `rate_type: total_project` and **hours** under `per_hour`, and the third offer pairs 4 words with 0.010 hours — 36 seconds at $18/hour, a coherent pair. |
+| `due_at` | string | **Deadline** — and it carries **no timezone** (`2026-09-15T23:20:00`). Which zone the portal means is unknown and cannot be derived from two samples. Read as Bangkok, following the same precedent the XTM bot set for its zone-less Due cell, through one named constant so changing it is one line. |
+| `listing_type` | string | Only ever `direct_po`. Any other value **fails loud** — Q3's meanings are still Straker's to supply. |
+| `status` | string | Only ever `open`; the list is already queried for it, so anything else means the portal contradicts itself. |
+| `job_ref`, `title`, `budget`, `currency`, `rate_type`, `total_unit`, `unit_cost`, `service` | — | Present, and no decision reads them. Recorded so the next reader knows they were seen and deliberately unused. |
 
-**How this gets unblocked**: the capture probe writes each newly-seen payload verbatim to `fixtures/straker/offers/`. When ten distinct offers have accumulated, this section is replaced with a model derived from those files, and the parser is written test-first against them.
+**Observed sizes**: the three offers were worth **$1.00, $1.00 and $0.19**, at 2, 2 and 4
+words. If that is representative the daily ceiling (U4) would never bind and the feasibility
+check would pass trivially — see spec.md §Clarifications. Three offers from one day is far
+too thin to conclude it.
 
-**Until then**: no code may reference a portal field name. Track A depends on none of them.
+**Missing is not malformed.** An offer without `words` or `due_at` is a *skip* that also
+alerts (FR-023a), carried as `null`; a field of the wrong type, an unknown `listing_type`, or
+a missing identity is a hard failure that rejects the whole read.
 
 ---
 

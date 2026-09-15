@@ -80,9 +80,17 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
 
       // --- fetch -----------------------------------------------------------------
       let raw: readonly RawOffer[];
+      let offers: readonly OfferForDecision[];
       try {
         session ??= await deps.portal.signIn();
         raw = await deps.portal.listOpenOffers(session.vendorId);
+        // Parsed HERE, inside the read's own guard and before the tracker sees anything.
+        // A payload that breaks the contract is the same class of event as a read that
+        // failed, and FR-023 says a failed read drives no transition. Parsing after the
+        // diff would let a shape violation advance the tracker in memory while the store
+        // recorded nothing — the two would then disagree about which offers are known, and
+        // nothing would say so.
+        offers = deps.extractOffers(raw);
       } catch (err) {
         // Only a 401 means the session expired. Dropping it on every error would turn a
         // barred account into a sign-in storm against a portal that has already said no.
@@ -111,7 +119,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       // every subsequent one must see the same set, or two offers in one read can each be
       // told there is room for them alone.
       const held = deps.store.heldWork();
-      const decisions = decideClaims(deps.extractOffers(raw), {
+      const decisions = decideClaims(offers, {
         nowMs: atMs,
         settings: deps.settings,
         ledger: deps.ledger,

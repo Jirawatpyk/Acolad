@@ -23,6 +23,13 @@ const portalShape = {
   STRAKER_TOTP_CODE: z.string().min(1).optional(),
   // 10s = 6 req/min = 2% of the 300 req/min budget recon measured. The floor keeps a
   // fat-fingered value from turning a read-only probe into accidental load.
+  //
+  // Kept at 10s for the BOT too, and now on evidence rather than on the probe-era guess
+  // (decided 2026-09-15, spec.md §Clarifications): the shortest observed window between an
+  // offer appearing and a competitor taking it was 204 seconds, so a ten-second rhythm sees
+  // it with ~194 seconds to spare. A one-second rhythm would buy nine of those seconds and
+  // cost ten times the request budget against an allowance the bot must never crowd
+  // (SC-003). Revisit if a materially shorter lifetime is ever measured.
   STRAKER_POLL_INTERVAL_MS: z.coerce.number().int().min(1_000).default(10_000),
 };
 

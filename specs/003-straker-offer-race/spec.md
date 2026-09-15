@@ -44,6 +44,44 @@ The competitive nature is the defining constraint: for XTM a check every 20 seco
 - Q: Where is the boundary between "short-lived" and "minutes or longer" that decides whether SC-001/SC-002 survive? → A: Strike only if the shortest sighting lifetime in the sample is >= 120 s; below a sample of 10, keep them
 - Q: What happens if the capture probe never reaches 10 offers? → A: Exit at 10 offers or 14 days, whichever comes first; a smaller sample is recorded as a limitation and the conservative defaults apply
 
+### Decision: the polling rhythm stays at 10 seconds, and SC-001/SC-002 are kept — 2026-09-15
+
+Recorded here because SC-000 requires whoever proceeds to write down the decision, the
+sample size and the measured shortest lifetime rather than leave it as something someone
+remembers deciding.
+
+**The owner decided not to wait for SC-000's exit.** Track B was unblocked on 2026-09-15 with
+**3 captured offers of the 10 the criterion asks for, on day 4.2 of 14.** What changed is
+that the premise SC-000 rested on — "planning MUST NOT commit to the shape of an offer **on
+assumption**" — no longer holds: real payloads exist, and the parser is built from the files
+rather than from a field list. What has *not* changed is the sample's thinness, and the
+answer to that is a parser that fails loud on anything it does not recognise (FR-023) rather
+than a longer wait.
+
+**Sample as recorded**: 3 offers, but only **two are independent** — two of the files are one
+job (`job_ref: aj-265`) split across two target languages. Shortest observed lifetime
+**204 s** (upper bound 215 s); the others 587 s and 1,938 s. All three were taken by other
+vendors, so these are times-until-a-competitor-claimed-it, not expiry times.
+
+**Rhythm: 10 seconds, unchanged — now on evidence rather than on the probe-era guess.** At
+10 s the bot sees an offer within ten seconds of it appearing, leaving ~194 s of the shortest
+observed window to act in. Polling at one second would buy nine of those 204 seconds and cost
+ten times the request budget, against a portal whose allowance the bot must never crowd
+(SC-003). The rhythm is a configured value, so this is a setting to revisit, not a rewrite.
+
+**SC-001 and SC-002 are KEPT, per the strike rule as written.** The rule strikes them only at
+a sample of 10 or more, and says explicitly that a smaller sample keeps them: a handful of
+long-lived offers cannot show that no short-lived ones exist, and a lifetime measured by
+polling is blind by construction to anything shorter than one interval.
+
+**Stated plainly, because it is an inconsistency rather than a tidy outcome**: the evidence
+points the other way from the rule's verdict. A race decided at 204 seconds is not decided in
+the 400 ms SC-001 bounds, so **T044 — keep-alive pooling, proactive session renewal and
+critical-path tuning — is deferred as unnecessary at the measured slack**, even though the
+criteria it serves are formally kept. Revisit both together if a materially shorter lifetime
+ever appears; that single observation, not a larger count of long ones, is what would change
+the answer.
+
 ### Decision: claiming runs 24/7, and `outside_schedule` retires — 2026-09-15
 
 Building the gate wiring surfaced a gap between two things this spec says. `SkipReason`

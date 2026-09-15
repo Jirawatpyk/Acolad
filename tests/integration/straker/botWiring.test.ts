@@ -1,4 +1,7 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { createOfferExtractor } from '../../../src/straker/offerParse.js';
 import { loadStrakerBotConfig } from '../../../src/straker/config.js';
 import {
   type StrakerHttpClient,
@@ -212,5 +215,54 @@ describe('createStrakerPortal — the wiring the transport cannot do for itself'
     await portalWith(noBudgetHeaders, seen).listOpenOffers('vendor-1');
 
     expect(seen.map((w) => w.kind)).toContain('rate_limit_unknown');
+  });
+});
+
+describe('the extractor the bot actually runs is the real parser (not a placeholder)', () => {
+  /**
+   * Assembled exactly as `main()` assembles it — `createOfferExtractor` fed the config field
+   * it is fed there — and driven with a payload read off disk rather than a literal. Two
+   * capabilities in this feature shipped fully built and completely unreachable because a
+   * call site never passed what turned them on; this is the test that makes a third one
+   * impossible for the offer parser.
+   */
+  const fixtures = join(process.cwd(), 'fixtures', 'straker', 'offers');
+  const captured = readdirSync(fixtures)
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => JSON.parse(readFileSync(join(fixtures, f), 'utf8')) as { obj_id: string });
+
+  it('is reading real captured payloads, so an empty fixture folder cannot pass as clean', () => {
+    expect(captured.length).toBeGreaterThan(0);
+  });
+
+  it('turns a captured payload into a decision input, with every value the gate needs', () => {
+    const cfg = loadStrakerBotConfig(ENV);
+    const extract = createOfferExtractor({
+      excludedLanguagePairs: cfg.excludedLanguagePairs,
+      logger: silentLogger(),
+    });
+
+    const [offer] = extract(captured.slice(0, 1) as never);
+
+    expect(offer?.objId).toBe(captured[0]?.obj_id);
+    expect(offer?.languageDirection).toMatch(/^[a-z-]+>[a-z-]+$/);
+    expect(offer?.eligible).toBe(true);
+    expect(typeof offer?.effortWords).toBe('number');
+    expect(typeof offer?.deadlineMs).toBe('number');
+  });
+
+  it('honours the exclusion list the config carries, so the lever reaches the parser', () => {
+    const direction = createOfferExtractor({
+      excludedLanguagePairs: [],
+      logger: silentLogger(),
+    })(captured.slice(0, 1) as never)[0]?.languageDirection;
+    const cfg = loadStrakerBotConfig({ ...ENV, STRAKER_EXCLUDED_LANGUAGE_PAIRS: direction ?? '' });
+
+    const [offer] = createOfferExtractor({
+      excludedLanguagePairs: cfg.excludedLanguagePairs,
+      logger: silentLogger(),
+    })(captured.slice(0, 1) as never);
+
+    expect(offer?.eligible).toBe(false);
   });
 });

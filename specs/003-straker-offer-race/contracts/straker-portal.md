@@ -30,7 +30,7 @@ The specific failure to prevent: a fault, an unexpected shape, or an empty-looki
 | The open list is addressed per vendor and filtered to open items | Confirmed |
 | The reply is a **bare list**, not an envelope with a count | Confirmed. The assigned-work reply *is* an envelope — the two differ, so the shape is checked on every read rather than assumed. If this ever becomes an envelope, the read fails loud instead of quietly reading zero offers. |
 | Every entry carries its own opaque identifier | Enforced — an entry without one is a hard failure, because an offer with no identity cannot be tracked or deduplicated |
-| Everything the eligibility and scheduling decisions need is present in the **list** reply | Claimed by recon, **not yet verified** — verification needs a real payload (U1). Until verified, no code may depend on a named field. |
+| Everything the eligibility and scheduling decisions need is present in the **list** reply | **Confirmed 2026-09-15** against three captured payloads: the language direction, the word count and the deadline all arrive in the list reply, so no detail fetch is needed before claiming (FR-002). Verified on two independent jobs only — the parser fails loud on any field it has not seen rather than absorbing it. |
 | An empty list genuinely means "no open offers" | True **only for a successful read**. This is why a failed read must never reach the tracker. |
 
 ## 3. Request budget — CONFIRMED live 2026-09-11

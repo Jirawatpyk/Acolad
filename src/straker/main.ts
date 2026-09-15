@@ -31,7 +31,8 @@ import type { OfferSnapshot } from './offerTracker.js';
 import { createStrakerLogger, STRAKER_LOG_NAME } from './logger.js';
 import { StrakerLedger } from './ledger.js';
 import { StrakerOutbox } from './outbox.js';
-import { createStrakerPollCycle, type OfferExtractor } from './pollCycle.js';
+import { createOfferExtractor } from './offerParse.js';
+import { createStrakerPollCycle } from './pollCycle.js';
 import { openStrakerDatabase, StrakerStore } from './strakerStore.js';
 import { openSession, type StrakerSession } from './session.js';
 import type { RawOffer } from './probe.js';
@@ -303,33 +304,6 @@ export function createSightingTracker(
   };
 }
 
-/**
- * The offer extractor the bot runs with until Track B lands.
- *
- * Turning a portal payload into the values a decision needs is T042 (parsing) and T041
- * (the 44-direction eligibility rule), and SC-000 blocks both until the capture probe
- * reaches exit. Returning nothing is the honest behaviour in the meantime: the bot still
- * signs in, reads, tracks sightings and reports, and claims nothing — rather than guessing
- * which field carries effort and which carries the deadline, both of which feed the
- * scheduling gate directly.
- *
- * It says so once per process rather than once per cycle, because at a ten-second rhythm
- * the latter is eight and a half thousand identical lines a day.
- */
-function pendingOfferExtractor(logger: Logger): OfferExtractor {
-  let announced = false;
-  return (raw) => {
-    if (raw.length > 0 && !announced) {
-      announced = true;
-      logger.warn(
-        { module: 'pollCycle', action: 'extract', outcome: 'pending_track_b', offers: raw.length },
-        'offers are being seen but not claimed: parsing and eligibility wait on SC-000 (T041, T042)',
-      );
-    }
-    return [];
-  };
-}
-
 /** Long-running 24/7 entry point under PM2 (`straker.config.cjs`). */
 async function main(): Promise<void> {
   // Called HERE rather than at module scope on purpose: importing this module in a test
@@ -376,7 +350,10 @@ async function main(): Promise<void> {
       hoursEndMin: cfg.hoursEndMin,
       workdays: cfg.workdays,
     },
-    extractOffers: pendingOfferExtractor(logger),
+    extractOffers: createOfferExtractor({
+      excludedLanguagePairs: cfg.excludedLanguagePairs,
+      logger,
+    }),
   });
 
   const bot = await startStrakerBot({ cfg, logger, heartbeat, cycle });

@@ -174,6 +174,42 @@ describe('re-authenticating only when the portal says the session expired', () =
   });
 });
 
+describe('a payload that breaks the contract is treated as a failed read (FR-023)', () => {
+  it('drives no transition and reports the cycle as failed', async () => {
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => {
+        throw new Error('offer field is of an unexpected type');
+      },
+    });
+
+    await expect(h.cycle.runOnce()).resolves.toBe(false);
+
+    // Parsing after the diff would advance the tracker in memory while the store recorded
+    // nothing, leaving the two disagreeing about which offers are already known — with
+    // nothing to say so. Same guarantee as a failed read: nothing moves.
+    expect(h.trace.filter((t) => t.startsWith('persist:'))).toEqual([]);
+    expect(h.claimed).toEqual([]);
+  });
+
+  it('re-emits the offer as newly appeared on the next cycle, because nothing was consumed', async () => {
+    let broken = true;
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => {
+        if (broken) throw new Error('offer field is of an unexpected type');
+        return [eligible('a')];
+      },
+    });
+
+    await h.cycle.runOnce();
+    broken = false;
+    await h.cycle.runOnce();
+
+    expect(h.trace).toContain('persist:sighting');
+  });
+});
+
 describe('T038 nothing deferrable happens between noticing an offer and claiming it (FR-003)', () => {
   it('writes nothing and announces nothing before the claim is dispatched', async () => {
     const h = harness({ offers: [raw('a')], extract: () => [eligible('a')] });
