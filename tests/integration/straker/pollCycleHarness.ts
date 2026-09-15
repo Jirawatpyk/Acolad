@@ -85,6 +85,12 @@ export function harness(opts: HarnessOptions): Harness {
       if (opts.readFails !== undefined) throw opts.readFails;
       return opts.offers ?? [];
     },
+    // Reconciliation's read. Nothing in this harness drives it — the poll cycle does not
+    // call it, the composition root does — so it is present to satisfy the portal's shape
+    // and would be a loud failure if anything here did reach for it.
+    listAssignedWork: () => {
+      throw new Error('the poll cycle must not read the assigned-work list (FR-002)');
+    },
   };
 
   const store = {

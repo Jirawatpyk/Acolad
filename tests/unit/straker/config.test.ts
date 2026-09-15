@@ -122,6 +122,26 @@ describe('loadStrakerBotConfig — its own reporting and liveness (FR-014, FR-01
     expect(cfg.alertsWebhookUrl).not.toBe(cfg.offersWebhookUrl);
   });
 
+  it('reads the service-account key from the SAME variable the XTM bot reads', () => {
+    // Same machine, same service account, one key file. Sharing the variable is what stops
+    // the two bots drifting onto different credentials — the same reasoning that keeps
+    // `GOOGLE_CHAT_WEBHOOK_SYSTEM` shared, and the opposite of the sheet ID, which must be
+    // Straker's own because the two records are separate files.
+    const cfg = loadStrakerBotConfig({
+      ...VALID_BOT,
+      GOOGLE_SERVICE_ACCOUNT_KEY_PATH: 'secrets/sa.json',
+    });
+
+    expect(cfg.serviceAccountKeyPath).toBe('secrets/sa.json');
+  });
+
+  it('defaults the key path to the repo convention, as the XTM bot does', () => {
+    // Not required: an operator who has followed the setup already has the file at the
+    // documented place, and a required variable here would refuse to start over something
+    // that has one right answer.
+    expect(loadStrakerBotConfig(VALID_BOT).serviceAccountKeyPath).toBe('google-credentials.json');
+  });
+
   it('requires its own liveness ping so either bot stopping is noticed on its own', () => {
     const { STRAKER_HEALTHCHECKS_PING_URL: _omitted, ...withoutPing } = VALID_BOT;
 

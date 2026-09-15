@@ -110,11 +110,19 @@ The result of the one irreversible action this feature performs.
 |---|---|---|---|
 | `won` | The portal committed the work to the team | No | Win rate numerator; ledger |
 | `lost` | Another vendor claimed it first | **No — this is normal** (FR-006, SC-007) | Win rate denominator only |
-| `failed` | Anything else — a genuine fault | Yes | Neither |
-| `unknown` | The request produced no answer, or the process died before recording | Yes, once | Resolved by reconciliation (R7), **never by retrying the claim** |
-| `recovered` | Found on the portal's assigned list but absent from our record | Yes, once | Ledger, and flagged so a recurring gap is visible (FR-016b) |
+| `failed` | Anything else — a genuine fault | Yes | Win rate denominator only; **not** the ledger |
+| `unknown` | The request produced no answer, or the process died before recording | Yes, once | Win rate denominator only, until reconciliation (R7) settles it — **never** by retrying the claim |
+| `recovered` | Found on the portal's assigned list but absent from our record | Yes, once | Win rate **numerator**; ledger — and flagged so a recurring gap is visible (FR-016b) |
 
 `unknown` and `recovered` are two views of the same event — before and after reconciliation. Keeping them distinct is what makes a persistent gap visible rather than smoothed away.
+
+> **The "Counts toward" column was corrected on 2026-09-15**, when T050 implemented the win rate and the two artefacts turned out to disagree. It previously read `Neither` for `failed`, and named only the ledger for `recovered`.
+>
+> **FR-017 is decisive and this table was wrong.** It defines winnable as "the language direction was eligible **and** the scheduling gate would have permitted the claim", and names exactly one exclusion: "offers the team's own rules turned away". A claim that failed for a fault was eligible, the gate permitted it, and our rules did not turn it away — so it is in the denominator by the requirement's own words. Excluding it would also make the measure go **quiet at the worst moment**: a claim path broken outright would report `n/a (0 of 0)` rather than 0%, which reads as "nothing happened" instead of "everything failed".
+>
+> `recovered` is numerator for the reason stated in the line below this table: it and `unknown` are one event seen before and after reconciliation, and the work is on the portal's assigned list — the team holds it. A win the bot only discovered afterwards is still work won; that it needed discovering is what the FR-016b flag is for, and `winRateReport.ts` prints the recovered count beside the total so the two are never conflated.
+>
+> The ledger half of the column is unchanged and is enforced separately by `countsTowardLedger()` in `outcomePolicy.ts`, which is tested against this table.
 
 ---
 

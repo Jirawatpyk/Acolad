@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadStrakerBotConfig, type StrakerBotConfig } from '../../../src/straker/config.js';
 import { assembleStrakerBot, type StrakerPortal } from '../../../src/straker/main.js';
+import type { StrakerSenders } from '../../../src/straker/dispatcher.js';
 import type { RawOffer } from '../../../src/straker/probe.js';
 import { StrakerOutbox } from '../../../src/straker/outbox.js';
 import { openStrakerDatabase, StrakerStore } from '../../../src/straker/strakerStore.js';
@@ -93,13 +94,33 @@ function portalListing(offers: readonly RawOffer[] = []): FakePortal {
     } as never,
     signIn: async () => ({ vendorId: 'vendor-1' }),
     listOpenOffers: async () => listing,
+    // Overridden by the one test that asserts reconciliation is reached; everywhere else a
+    // pass finds the portal holding nothing, which is the ordinary case.
+    listAssignedWork: async () => [],
   };
 }
 
 const open: { close(): void }[] = [];
 
+/**
+ * Senders that accept everything and go nowhere.
+ *
+ * Passed by default, because the alternative is not "no delivery" — it is the assembly
+ * building the REAL Google Chat and Sheets clients and a test reaching for the network
+ * against a made-up hostname. That was happening until T056a made delivery real: harmless
+ * only because the DNS lookup failed quickly.
+ */
+function inertSenders(): StrakerSenders {
+  const accept = async (): Promise<{ ok: true }> => ({ ok: true });
+  return { offers: accept, tracking: accept, alerts: accept };
+}
+
 function assemble(cfg: StrakerBotConfig, portal: StrakerPortal) {
-  const assembly = assembleStrakerBot(cfg, silentLogger(), { portal, now: () => NOW });
+  const assembly = assembleStrakerBot(cfg, silentLogger(), {
+    portal,
+    senders: inertSenders(),
+    now: () => NOW,
+  });
   open.push(assembly);
   return assembly;
 }
@@ -209,7 +230,12 @@ describe('assembleStrakerBot — one database, under the configured state direct
     const reopened = openStrakerDatabase(cfg.stateDir, NOW);
     try {
       expect(new StrakerStore(reopened.db).listEvents()).toHaveLength(1);
-      expect(new StrakerOutbox(reopened.db).due(NOW)).toHaveLength(1);
+      // Sent rather than due: since T056a the cycle drains the queue before it returns, so
+      // `due` is empty by design. What this test is about has not changed — both the event
+      // and its outbox row are in the one file the config named — so it asserts the rows
+      // are there rather than that they are still waiting.
+      expect(new StrakerOutbox(reopened.db).countByStatus('sent')).toBeGreaterThan(0);
+      expect(new StrakerOutbox(reopened.db).due(NOW)).toEqual([]);
     } finally {
       reopened.db.close();
     }
@@ -368,5 +394,156 @@ describe('assembleStrakerBot — the sighting tracker survives a restart', () =>
     const rows = after.store.sightingsOf(offer.obj_id);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.notFoundAtMs).toBe(clock);
+  });
+});
+
+describe('assembleStrakerBot — the outcomes actually reach a destination (T056a, FR-016)', () => {
+  /**
+   * Phase 4 built a tracking sink, a notifier, a reconciler and a dispatcher. Every one of
+   * them passed its own tests while the running bot delivered **nothing**: outcomes were
+   * queued durably into `straker_outbox` and no code read that table. The task breakdown
+   * had no owner for the drain, which is the fourth time in this feature that a capability
+   * was complete, correct and unreachable.
+   *
+   * So these tests assert delivery end to end — a captured payload goes in at the portal
+   * and a rendered card comes out at a fake Chat transport — rather than asserting that a
+   * dispatcher exists. Mutating the flush call away must fail here, or the seam is still
+   * unowned.
+   */
+  interface Delivered {
+    readonly offers: unknown[];
+    readonly tracking: unknown[];
+    readonly alerts: unknown[];
+  }
+
+  function recordingSenders(): StrakerSenders & { readonly got: Delivered } {
+    const got: Delivered = { offers: [], tracking: [], alerts: [] };
+    const make = (into: unknown[]) => async (payload: unknown) => {
+      into.push(payload);
+      return { ok: true } as const;
+    };
+    return {
+      get got() {
+        return got;
+      },
+      offers: make(got.offers),
+      tracking: make(got.tracking),
+      alerts: make(got.alerts),
+    };
+  }
+
+  it('delivers a won offer to the announcement channel and the tracking record', async () => {
+    const offer = captured()['aj-265:ms-my'] as RawOffer;
+    const cfg = loadStrakerBotConfig(env());
+    const senders = recordingSenders();
+    const bot = assembleStrakerBot(cfg, silentLogger(), {
+      portal: portalListing([offer]),
+      senders,
+      now: () => NOW,
+    });
+    open.push(bot);
+
+    await bot.cycle.runOnce();
+
+    // Queued AND drained. Before T056a the row existed and this list was empty.
+    expect(senders.got.offers).toHaveLength(1);
+    expect(senders.got.offers[0]).toMatchObject({
+      objId: offer.obj_id,
+      outcome: 'won',
+      occurredAtMs: NOW,
+    });
+    expect(bot.outbox.countByStatus('sent')).toBeGreaterThan(0);
+    expect(bot.outbox.due(NOW)).toEqual([]);
+  });
+
+  it('gives the announcement everything the card needs, not just an identity', async () => {
+    // The payload shape is a seam too: `pollCycle.ts` writes it and `notifier.ts` refuses
+    // one without a timestamp. A cycle that queued the old shape would have every row
+    // rejected by its sender, retried, and dead-lettered — delivery that looks wired and
+    // silently is not.
+    const offer = captured()['aj-265:ms-my'] as RawOffer & Record<string, unknown>;
+    const senders = recordingSenders();
+    const bot = assembleStrakerBot(loadStrakerBotConfig(env()), silentLogger(), {
+      portal: portalListing([offer]),
+      senders,
+      now: () => NOW,
+    });
+    open.push(bot);
+
+    await bot.cycle.runOnce();
+
+    expect(senders.got.offers[0]).toMatchObject({
+      languageDirection: 'en-us>ms-my',
+      effortWords: offer['words'],
+      deadlineMs: Date.parse(`${String(offer['due_at'])}+07:00`),
+    });
+  });
+
+  it('routes a skip that alerts to the operations channel, named as a condition', async () => {
+    // `effort_unknown` is FR-023a's case: a skip that also alerts, because it means the
+    // assumption that the list carries what the decision needs has failed.
+    const offer = { ...(captured()['aj-265:ms-my'] as Record<string, unknown>) };
+    delete offer['words'];
+    const senders = recordingSenders();
+    const bot = assembleStrakerBot(loadStrakerBotConfig(env()), silentLogger(), {
+      portal: portalListing([offer as RawOffer]),
+      senders,
+      now: () => NOW,
+    });
+    open.push(bot);
+
+    await bot.cycle.runOnce();
+
+    expect(senders.got.alerts).toHaveLength(1);
+    expect(senders.got.alerts[0]).toMatchObject({
+      kind: 'offer',
+      condition: 'offer_effort_unknown',
+      occurredAtMs: NOW,
+    });
+  });
+
+  it('reconciles on the very first cycle, which is FR-016a’s "on start"', async () => {
+    // The reconciler is due on its first call by design, so one call per cycle satisfies
+    // both halves of FR-016a. What this catches is the call never being made at all.
+    const assigned: unknown[] = [];
+    const portal = portalListing([]);
+    const bot = assembleStrakerBot(loadStrakerBotConfig(env()), silentLogger(), {
+      portal: {
+        ...portal,
+        listAssignedWork: async (vendorId: string) => {
+          assigned.push(vendorId);
+          return [];
+        },
+      },
+      senders: recordingSenders(),
+      now: () => NOW,
+    });
+    open.push(bot);
+
+    await bot.cycle.runOnce();
+
+    expect(assigned).toEqual(['vendor-1']);
+  });
+
+  it('keeps polling when delivery fails, because the race matters more than the telling', async () => {
+    // A destination being down must not stop the bot claiming. The outcome stays queued —
+    // that is what the outbox is for — and the cycle still reports success, because the
+    // heartbeat answers "is this bot still racing", not "did Chat accept our card".
+    const offer = captured()['aj-265:ms-my'] as RawOffer;
+    const down: StrakerSenders = {
+      offers: () => Promise.reject(new Error('chat is down')),
+      tracking: () => Promise.reject(new Error('sheets is down')),
+      alerts: () => Promise.reject(new Error('chat is down')),
+    };
+    const bot = assembleStrakerBot(loadStrakerBotConfig(env()), silentLogger(), {
+      portal: portalListing([offer]),
+      senders: down,
+      now: () => NOW,
+    });
+    open.push(bot);
+
+    await expect(bot.cycle.runOnce()).resolves.toBe(true);
+    expect(bot.outbox.countByStatus('pending')).toBeGreaterThan(0);
+    expect(bot.outbox.countByStatus('sent')).toBe(0);
   });
 });

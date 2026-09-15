@@ -16,7 +16,21 @@ import type { Logger } from '../monitoring/logger.js';
 import { acquireSingleInstanceLock } from '../runtime/singleInstance.js';
 import { loadStrakerBotConfig, type StrakerBotConfig } from './config.js';
 import type { ClaimDoor } from './claim.js';
-import { createHttpClient, type StrakerTransportWarning } from './httpClient.js';
+import { createStrakerDispatcher, type StrakerSenders } from './dispatcher.js';
+import {
+  createHttpClient,
+  type StrakerTransportAlert,
+  type StrakerTransportWarning,
+} from './httpClient.js';
+import {
+  createStrakerAlertsSender,
+  createStrakerOffersSender,
+  createTransportAlertHooks,
+  type TransportAlertHooks,
+} from './notifier.js';
+import { GoogleChatSender } from '../reporting/googleChat.js';
+import { createStrakerReconciler, readAssignedWork, type AssignedWork } from './reconcile.js';
+import { createTrackingSink, GoogleTrackingSheet } from './trackingSink.js';
 import { listOpenOffers } from './offersApi.js';
 import {
   applySnapshot,
@@ -215,6 +229,15 @@ export interface StrakerPortal {
    *  switch and a stale one would poll another vendor's work. */
   signIn(): Promise<StrakerSession>;
   listOpenOffers(vendorId: string): Promise<readonly RawOffer[]>;
+  /**
+   * The portal's assigned-work list, for reconciliation (FR-016a).
+   *
+   * A named capability rather than a wider `client`. Reconciliation needs `getJson`, and the
+   * obvious move was to undo the narrowing above — which would hand the poll cycle a read
+   * door again and lose the structural guarantee that nothing enquires before a claim
+   * (FR-002/V32). Two named reads cost one line each and keep it.
+   */
+  listAssignedWork(vendorId: string): Promise<readonly AssignedWork[]>;
 }
 
 /**
@@ -240,6 +263,9 @@ const REQUEST_TIMEOUT_MS = 2_000;
 export interface StrakerPortalDeps {
   readonly fetchImpl?: typeof fetch;
   readonly onWarning?: (warning: StrakerTransportWarning) => void;
+  /** The throttled pair from `notifier.ts`. Production passes them; a transport test does
+   *  not, and falls back to the log-only handlers below. */
+  readonly transportHooks?: TransportAlertHooks;
 }
 
 export function createStrakerPortal(
@@ -256,29 +282,32 @@ export function createStrakerPortal(
     // happened once in this feature with the retrying read door; the wiring is asserted in
     // `tests/integration/straker/botWiring.test.ts` so it cannot happen a third time.
     timeoutMs: REQUEST_TIMEOUT_MS,
-    // Kept separate from `onAlert` deliberately: that handler logs at error level with a
-    // message about the retry cap, so routing a missing budget header through it would
-    // produce an alert that is both loud and about the wrong thing.
-    onWarning:
-      deps.onWarning ??
-      ((warning) =>
+    // Both hooks come from `notifier.ts` (T055), which throttles them before they reach the
+    // queue. They have to be throttled somewhere: neither carries an offer identity, so
+    // FR-019a's "once per identity per outcome" has nothing to key on, and at a ten-second
+    // rhythm a ten-minute outage would otherwise post about sixty cards into the channel
+    // the live XTM bot also alerts on.
+    //
+    // Until this wiring landed both were log-only, with a comment saying a durable channel
+    // was T054/T055's job — so the transport's alert path reached a file nobody watches.
+    ...(deps.transportHooks ?? {
+      onWarning:
+        deps.onWarning ??
+        ((warning) =>
+          report(() =>
+            logger.warn(
+              { module: 'httpClient', action: warning.kind, outcome: warning.reason, ...warning },
+              'request budget is not readable from the portal reply',
+            ),
+          )),
+      onAlert: (alert: StrakerTransportAlert) =>
         report(() =>
-          logger.warn(
-            { module: 'httpClient', action: warning.kind, outcome: warning.reason, ...warning },
-            'request budget is not readable from the portal reply',
+          logger.error(
+            { module: 'httpClient', action: alert.kind, outcome: 'exhausted', ...alert },
+            'offer-list read gave up after exhausting its retry cap',
           ),
-        )),
-    // Without a sink the transport's own alert path is dead code: `raiseAlert` returns
-    // immediately when this is absent, so exhausting the read cap would throw into a log
-    // line and nothing else. Routing it to a durable channel is T054/T055's job; until
-    // then it must at least be loud in the place an operator already looks.
-    onAlert: (alert) =>
-      report(() =>
-        logger.error(
-          { module: 'httpClient', action: alert.kind, outcome: 'exhausted', ...alert },
-          'offer-list read gave up after exhausting its retry cap',
         ),
-      ),
+    }),
   });
   return {
     client,
@@ -291,6 +320,9 @@ export function createStrakerPortal(
     // `retry: true` is the join FR-019b depends on — see `offersApi.ts`. The probe leaves
     // it off, which is what keeps its behaviour unchanged while it finishes collecting.
     listOpenOffers: (vendorId) => listOpenOffers(client, vendorId, { retry: true }),
+    // Through the single-attempt door on purpose: FR-016c gives this read its own
+    // fifteen-minute cadence instead of FR-019b's backoff. See `readAssignedWork`.
+    listAssignedWork: (vendorId) => readAssignedWork(client, vendorId),
   };
 }
 
@@ -325,6 +357,9 @@ export function createSightingTracker(
 /** Seams the assembly tests use. Production passes none of them. */
 export interface StrakerAssemblyDeps {
   readonly portal?: StrakerPortal;
+  /** Injected by tests so delivery is asserted without a network. Production builds the
+   *  real three from `cfg` below. */
+  readonly senders?: StrakerSenders;
   readonly openDatabase?: typeof openStrakerDatabase;
   readonly now?: () => number;
 }
@@ -375,8 +410,48 @@ export function assembleStrakerBot(
   // it is called unconditionally. `main()` still logs it; this is what a human sees.
   enqueueQuarantineAlert(outbox, opened, now());
 
+  // Built before the portal, because the transport's own alerts have to reach the same
+  // queue as everything else and the portal is what carries them.
+  const senders =
+    deps.senders ??
+    ({
+      offers: createStrakerOffersSender(new GoogleChatSender(cfg.offersWebhookUrl)),
+      alerts: createStrakerAlertsSender(new GoogleChatSender(cfg.alertsWebhookUrl)),
+      tracking: createTrackingSink(
+        new GoogleTrackingSheet(
+          cfg.trackingSheetId,
+          cfg.trackingTabName,
+          cfg.serviceAccountKeyPath,
+        ),
+      ),
+    } satisfies StrakerSenders);
+
+  const portal =
+    deps.portal ??
+    createStrakerPortal(cfg, logger, {
+      transportHooks: createTransportAlertHooks({
+        logger,
+        now,
+        raise: (eventId, alert) =>
+          outbox.enqueue(eventId, 'alerts', JSON.stringify(alert), alert.occurredAtMs),
+      }),
+    });
+
+  const dispatcher = createStrakerDispatcher(outbox, senders, logger);
+  const reconciler = createStrakerReconciler({
+    portal,
+    store,
+    ledger: new StrakerLedger(store, cfg.maxWordsPerDay, {
+      hoursStartMin: cfg.hoursStartMin,
+      workdays: cfg.workdays,
+    }),
+    outbox,
+    logger,
+    now,
+  });
+
   const cycle = createStrakerPollCycle({
-    portal: deps.portal ?? createStrakerPortal(cfg, logger),
+    portal,
     // Resumed from the store, not started empty. The tracker's sighting count is what keys
     // every `offer_sightings` row, so a tracker that boots at zero writes back into
     // appearances a previous run already closed — see `StrakerStore.trackerState`.
@@ -402,11 +477,66 @@ export function assembleStrakerBot(
   });
 
   return {
-    cycle,
+    cycle: withDelivery({ cycle, dispatcher, reconciler, logger, now }),
     store,
     outbox,
     quarantinedCopyPath: opened.recoveredFromCorruption ? opened.corruptCopyPath : null,
     close: () => opened.db.close(),
+  };
+}
+
+/**
+ * The poll cycle, plus the two things that have to happen around it every turn: reconcile
+ * if due, then drain the queue.
+ *
+ * **Here rather than inside `createStrakerPollCycle`** because the cycle's named steps are
+ * the XTM loop's — fetch, diff, gate, act, persist, notify — and `notify` means *queued*,
+ * not *delivered*. The XTM bot flushes at the loop level for the same reason (DC-3), and
+ * keeping the two loops the same shape is what makes the later extraction mechanical.
+ *
+ * Reconciling **before** flushing, so a recovery found this pass is announced this pass
+ * rather than waiting for the next one.
+ *
+ * Neither can fail the cycle. The boolean `runOnce` returns drives the liveness signal, and
+ * that signal answers "is this bot still racing" — a Chat webhook being down is not an
+ * answer to that question, and failing the heartbeat over it would page someone about the
+ * wrong thing while the bot kept winning work. Nothing is lost by carrying on: the outcome
+ * is already durable in the outbox, which is the entire point of queueing it first (FR-016).
+ */
+function withDelivery(deps: {
+  readonly cycle: StrakerCycle;
+  readonly dispatcher: {
+    flush(nowMs: number): Promise<{ sent: number; failed: number; dead: number; dropped: number }>;
+  };
+  readonly reconciler: { runIfDue(): Promise<unknown> };
+  readonly logger: Logger;
+  readonly now: () => number;
+}): StrakerCycle {
+  return {
+    async runOnce(): Promise<boolean> {
+      const ok = await deps.cycle.runOnce();
+
+      // `runIfDue` promises never to throw and costs one clock read when it is not due;
+      // the guard is here because that promise belongs to another module and this one
+      // cannot afford to find out it was broken.
+      await reportAsync(async () => {
+        await deps.reconciler.runIfDue();
+      });
+
+      await reportAsync(async () => {
+        const summary = await deps.dispatcher.flush(deps.now());
+        // Only when something happened: at a ten-second rhythm a line per quiet cycle is
+        // eight and a half thousand a day saying nothing.
+        if (summary.sent + summary.failed + summary.dead + summary.dropped > 0) {
+          deps.logger.info(
+            { module: 'main', action: 'flush', outcome: 'ok', ...summary },
+            'delivered queued outcomes',
+          );
+        }
+      });
+
+      return ok;
+    },
   };
 }
 

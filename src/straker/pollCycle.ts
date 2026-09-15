@@ -33,10 +33,18 @@ import {
 import { isSessionExpired, StrakerHttpError } from './httpClient.js';
 import type { StrakerLedger } from './ledger.js';
 import type { SightingTracker, StrakerCycle, StrakerPortal } from './main.js';
-import { alertsOn, alertsOnSkip, countsTowardLedger } from './outcomePolicy.js';
+import {
+  CLAIM_ALERT_CONDITION,
+  SKIP_ALERT_CONDITION,
+  type StrakerOfferAlert,
+  type StrakerOfferAnnouncement,
+} from './notifier.js';
+import { countsTowardLedger } from './outcomePolicy.js';
+import { trackingRowKey, type TrackingRecord } from './trackingSink.js';
 import type { StrakerOutbox } from './outbox.js';
 import type { RawOffer } from './probe.js';
 import type { StrakerStore } from './strakerStore.js';
+import type { SkipReason } from './types.js';
 import type { StrakerSession } from './session.js';
 
 /**
@@ -239,22 +247,43 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
                 atMs,
               );
             }
-            const alerts = alertsOn(outcome);
-            if (alerts || outcome === 'won') {
-              enqueue(
-                deps,
-                alerts ? 'alerts' : 'offers',
-                `claim:${decision.objId}:${outcome}`,
-                atMs,
-                {
-                  objId: decision.objId,
-                  languageDirection: decision.languageDirection,
-                  effortWords: decision.effortWords,
-                  deadlineMs: decision.deadlineMs,
-                  outcome,
-                  detail,
-                },
-              );
+            // Contract §1: EVERY offer produces a tracking row, won and lost alike —
+            // without the losses the win rate has no denominator and "Straker sends us
+            // nothing" cannot be told from "we keep arriving second".
+            enqueue(deps, 'tracking', `row:${trackingRowKey(decision.objId, 'claim')}`, atMs, {
+              objId: decision.objId,
+              eventType: 'claim',
+              outcome,
+              languageDirection: decision.languageDirection,
+              effortWords: decision.effortWords,
+              deadlineMs: decision.deadlineMs,
+              firstSeenAtMs: atMs,
+              claimedAtMs: atMs,
+              note: detail,
+            } satisfies TrackingRecord);
+            // Announced or alerted — never both, and never neither by accident. The
+            // condition comes from `notifier.ts`'s table rather than a literal, so an
+            // outcome added without deciding how it alerts fails the typecheck there.
+            const condition = CLAIM_ALERT_CONDITION[outcome];
+            if (condition !== null) {
+              enqueue(deps, 'alerts', `claim:${decision.objId}:${outcome}`, atMs, {
+                kind: 'offer',
+                condition,
+                objId: decision.objId,
+                detail,
+                occurredAtMs: atMs,
+                ...optionalOffer(decision),
+              } satisfies StrakerOfferAlert);
+            } else if (outcome === 'won') {
+              enqueue(deps, 'offers', `claim:${decision.objId}:${outcome}`, atMs, {
+                objId: decision.objId,
+                outcome: 'won',
+                languageDirection: decision.languageDirection,
+                effortWords: decision.effortWords,
+                deadlineMs: decision.deadlineMs,
+                occurredAtMs: atMs,
+                detail,
+              } satisfies StrakerOfferAnnouncement);
             }
           });
         } catch (err) {
@@ -295,6 +324,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
               skipReason: 'claiming_halted',
               occurredAtMs: atMs,
             });
+            enqueueSkipRow(deps, decision, 'claiming_halted', atMs, null);
           }
           for (const decision of decisions) {
             if (decision.action !== 'skip') continue;
@@ -304,12 +334,16 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
               skipReason: decision.reason,
               occurredAtMs: atMs,
             });
-            if (alertsOnSkip(decision.reason)) {
+            enqueueSkipRow(deps, decision, decision.reason, atMs, decision.detail);
+            const condition = SKIP_ALERT_CONDITION[decision.reason];
+            if (condition !== null) {
               enqueue(deps, 'alerts', `skip:${decision.objId}:${decision.reason}`, atMs, {
+                kind: 'offer',
+                condition,
                 objId: decision.objId,
-                reason: decision.reason,
                 detail: decision.detail,
-              });
+                occurredAtMs: atMs,
+              } satisfies StrakerOfferAlert);
             }
           }
         });
@@ -340,6 +374,53 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       return true;
     },
   };
+}
+
+/**
+ * The optional half of an offer alert. Spread rather than assigned, because
+ * `exactOptionalPropertyTypes` makes `languageDirection: undefined` a different thing from
+ * the key being absent, and the notifier's shape says absent.
+ */
+function optionalOffer(decision: Extract<ClaimDecision, { action: 'claim' }>): {
+  languageDirection?: string;
+  effortWords?: number;
+  deadlineMs?: number;
+} {
+  return {
+    languageDirection: decision.languageDirection,
+    effortWords: decision.effortWords,
+    deadlineMs: decision.deadlineMs,
+  };
+}
+
+/**
+ * The tracking row for an offer that was passed over.
+ *
+ * Effort and deadline are null: the gate refused before they mattered, or refused precisely
+ * because they were missing. The **language direction is not** — the sink requires it and
+ * is right to (FR-011a), and every decision carries it, skips included, because eligibility
+ * is decided on it.
+ */
+function enqueueSkipRow(
+  deps: StrakerPollCycleDeps,
+  decision:
+    | Extract<ClaimDecision, { action: 'skip' }>
+    | { objId: string; languageDirection: string },
+  skipReason: SkipReason,
+  atMs: number,
+  note: string | null,
+): void {
+  const { objId } = decision;
+  enqueue(deps, 'tracking', `row:${trackingRowKey(objId, 'skip')}`, atMs, {
+    objId,
+    eventType: 'skip',
+    skipReason,
+    languageDirection: decision.languageDirection,
+    effortWords: null,
+    deadlineMs: null,
+    firstSeenAtMs: atMs,
+    note,
+  } satisfies TrackingRecord);
 }
 
 /**

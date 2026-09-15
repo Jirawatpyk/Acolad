@@ -25,7 +25,9 @@ A **separate spreadsheet file** from the XTM record, not a tab within it.
 | Skip reason, when skipped | Named in plain language, not a code |
 | Timestamps for first sighting and claim | Feed win rate and, if the race is real, the latency measure |
 
-**Column layout is deferred** with the offer model (SC-000). Writes are upserts on the offer identifier so a re-run never duplicates a row. The layout is checked before writing, and a shifted layout fails loud rather than writing into the wrong columns — the XTM bot needed that guard after a real incident.
+**Column layout was deferred** with the offer model (SC-000) and is no longer: SC-000 was resolved on 2026-09-15, and `trackingSink.ts` fixes the layout with its header guard enforcing it.
+
+Writes are upserts on the offer identifier **together with the event type** so a re-run never duplicates a row. That agrees with the table above, with FR-014 and with Constitution VII; an earlier draft of this sentence said "on the offer identifier" alone, which contradicted its own table two lines up and would have collapsed an offer's sighting, claim and recovery into one row. The layout is checked before writing, and a shifted layout fails loud rather than writing into the wrong columns — the XTM bot needed that guard after a real incident.
 
 ## 2. Job announcements — Straker's own channel
 

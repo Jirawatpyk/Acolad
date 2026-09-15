@@ -82,6 +82,11 @@ const botSchema = z
     // --- Reporting: its own file and its own channel (FR-014, FR-015) --------------
     STRAKER_SHEETS_ID: z.string().min(1),
     STRAKER_SHEETS_TAB_NAME: z.string().min(1).default('Straker_Tracking'),
+    // The SAME variable the XTM bot reads, for the same reason `GOOGLE_CHAT_WEBHOOK_SYSTEM`
+    // is shared: one machine, one service account, one key file. Two bots able to point at
+    // different credentials is a way to fail, not a capability. The sheet ID above is the
+    // opposite case and must be Straker's own — the two records are separate files (FR-014).
+    GOOGLE_SERVICE_ACCOUNT_KEY_PATH: z.string().min(1).default('google-credentials.json'),
     STRAKER_CHAT_WEBHOOK_OFFERS: z.string().url(),
     // Alerts stay unified (FR-026b): this is the SAME variable the XTM bot reads, on
     // purpose. On-call watches one place, so the two bots must not be able to drift onto
@@ -153,6 +158,8 @@ export interface StrakerBotConfig {
    *  measured offer lifetime once the capture probe reaches its exit (SC-000). */
   readonly pollIntervalMs: number;
 
+  /** Where the Google service-account key lives. Shared with the XTM bot by design. */
+  readonly serviceAccountKeyPath: string;
   readonly maxWordsPerDay: number;
   readonly throughputWordsPerHour: number;
 
@@ -187,6 +194,7 @@ export function loadStrakerBotConfig(env: NodeJS.ProcessEnv): StrakerBotConfig {
     ...(c.STRAKER_TOTP_CODE === undefined ? {} : { totpCode: c.STRAKER_TOTP_CODE }),
     pollIntervalMs: c.STRAKER_POLL_INTERVAL_MS,
 
+    serviceAccountKeyPath: c.GOOGLE_SERVICE_ACCOUNT_KEY_PATH,
     maxWordsPerDay: c.STRAKER_MAX_WORDS_PER_DAY,
     // Same derivation the XTM bot uses (`resolveThroughput`), fed Straker's OWN ceiling:
     // one knob to turn, with an explicit override for the slowest direction the crew

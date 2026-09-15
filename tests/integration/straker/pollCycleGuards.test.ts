@@ -309,7 +309,15 @@ describe('what the cycle writes and announces, not merely that it did (F)', () =
     await h.cycle.runOnce();
 
     const alert = h.queued.find((q) => q.channel === 'alerts');
-    expect(alert?.payload).toMatchObject({ objId: 'a', reason: 'effort_unknown' });
+    // The shape is the notifier's, and `condition` rather than a raw `reason`: the sender
+    // refuses a payload whose condition has no card, so a body it cannot render is a row
+    // that dead-letters rather than an alert nobody reads.
+    expect(alert?.payload).toMatchObject({
+      kind: 'offer',
+      condition: 'offer_effort_unknown',
+      objId: 'a',
+    });
+    expect(alert?.payload.occurredAtMs).toEqual(expect.any(Number));
   });
 
   it('keys each queued row on the offer and its outcome, which is what de-duplicates alerts', async () => {
@@ -319,7 +327,15 @@ describe('what the cycle writes and announces, not merely that it did (F)', () =
 
     await h.cycle.runOnce();
 
-    expect(h.queued[0]?.eventId).toBe('claim:a:won');
+    // Two rows per claim now: the tracking record contract §1 asks for on every offer, and
+    // the announcement. They are keyed differently on purpose — the tracking row is keyed
+    // on identity plus event type so a later recovery updates it rather than duplicating,
+    // while the announcement is keyed on the outcome because a different outcome is a
+    // different thing to say.
+    expect(h.queued.map((q) => `${q.channel}:${q.eventId}`)).toEqual([
+      'tracking:row:a|claim',
+      'offers:claim:a:won',
+    ]);
   });
 });
 

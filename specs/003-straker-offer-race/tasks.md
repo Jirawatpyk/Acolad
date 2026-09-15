@@ -179,9 +179,11 @@ that later tasks must not assume around:
 
 ---
 
-## Phase 4: User Story 2 — See every offer and every outcome (Priority: P2) — **NOT STARTED**
+## Phase 4: User Story 2 — See every offer and every outcome (Priority: P2) — **COMPLETE 2026-09-16**
 
-> None of `trackingSink.ts`, `reconcile.ts`, `notifier.ts` or `winRateReport.ts` exists yet. **This is the phase that makes the bot's output reach a human**: outcomes are being written durably to the outbox today, and nothing drains it — a claim announcement, and a quarantine alert, are queued and then sit there. Do not read the green Phase 3 checkpoint as "the team would see a win".
+> **Done.** `trackingSink.ts`, `reconcile.ts`, `notifier.ts`, `dispatcher.ts`, `winRate.ts` and `winRateReport.ts` all exist, and — the part this phase was really about — the queue is now drained and the delivery is asserted end to end in `tests/integration/straker/botAssembly.test.ts`. Before T056a every piece passed its own tests while the running bot delivered nothing.
+>
+> **Two holes found during the phase are NOT closed and need tasks of their own** — see "Carried out of Phase 4" below. Neither blocks the checkpoint; both block release.
 
 **Goal**: a truthful record of wins, losses and skips — so "Straker sends us nothing" can be told from "we keep arriving second"
 
@@ -189,23 +191,39 @@ that later tasks must not assume around:
 
 ### Tests for User Story 2 (MANDATORY — Constitution II) ⚠️
 
-- [ ] T045 [P] [US2] Write failing tests that **every** offer seen produces a row — won, lost and skipped alike — deduplicated on **offer identity together with event type**, so a sighting, a claim and a recovery of the same offer are not collapsed into one row, in `tests/unit/straker/trackingSink.test.ts` (FR-014, V10)
-- [ ] T046 [P] [US2] (FR-014, FR-023) Write a failing test that a shifted column layout **fails loud** rather than writing into the wrong columns, in `tests/unit/straker/trackingSink.test.ts`
-- [ ] T047 [P] [US2] Write failing tests for reconciliation: it runs on start and at least every 15 minutes, adds what the record is missing, and marks it **recovered** rather than as a normal claim, in `tests/integration/straker/reconcile.test.ts` (FR-016a, FR-016b, SC-009, V9)
-- [ ] T048 [P] [US2] Write a failing test that **three consecutive reconciliation failures raise an alert**, in `tests/integration/straker/reconcile.test.ts` (FR-016c, V24)
-- [ ] T049 [P] [US2] Write a failing test that recovered work is counted **even when it pushes the day past its ceiling**, and warns, in `tests/integration/straker/reconcile.test.ts` (FR-016d, V25)
-- [ ] T050 [P] [US2] Write failing tests for the win rate — **won ÷ genuinely winnable** — and for the companion count of offers our own rules turned away, in `tests/unit/straker/winRate.test.ts` (FR-017, FR-017a, SC-004, V22)
-- [ ] T051 [P] [US2] Write a failing test that alerts de-duplicate **once per offer identity per outcome**, in `tests/unit/straker/alerts.test.ts` (FR-019a, V28). **Carried forward from T019/T020 (2026-09-11)**: transport-level alerts (`onAlert`, read retries exhausted) carry **no offer identity**, so FR-019a's key cannot apply to them and the transport does not de-duplicate them itself. At a one-second rhythm a ten-minute outage fires hundreds. Whatever wires the alert sink must throttle or collapse them, and this test is where that belongs
+- [x] T045 [P] [US2] Write failing tests that **every** offer seen produces a row — won, lost and skipped alike — deduplicated on **offer identity together with event type**, so a sighting, a claim and a recovery of the same offer are not collapsed into one row, in `tests/unit/straker/trackingSink.test.ts` (FR-014, V10)
+- [x] T046 [P] [US2] (FR-014, FR-023) Write a failing test that a shifted column layout **fails loud** rather than writing into the wrong columns, in `tests/unit/straker/trackingSink.test.ts`
+- [x] T047 [P] [US2] Write failing tests for reconciliation: it runs on start and at least every 15 minutes, adds what the record is missing, and marks it **recovered** rather than as a normal claim, in `tests/integration/straker/reconcile.test.ts` (FR-016a, FR-016b, SC-009, V9)
+- [x] T048 [P] [US2] Write a failing test that **three consecutive reconciliation failures raise an alert**, in `tests/integration/straker/reconcile.test.ts` (FR-016c, V24)
+- [x] T049 [P] [US2] Write a failing test that recovered work is counted **even when it pushes the day past its ceiling**, and warns, in `tests/integration/straker/reconcile.test.ts` (FR-016d, V25)
+- [x] T050 [P] [US2] Write failing tests for the win rate — **won ÷ genuinely winnable** — and for the companion count of offers our own rules turned away, in `tests/unit/straker/winRate.test.ts` (FR-017, FR-017a, SC-004, V22)
+- [x] T051 [P] [US2] Write a failing test that alerts de-duplicate **once per offer identity per outcome**, in `tests/unit/straker/alerts.test.ts` (FR-019a, V28). **Carried forward from T019/T020 (2026-09-11)**: transport-level alerts (`onAlert`, read retries exhausted) carry **no offer identity**, so FR-019a's key cannot apply to them and the transport does not de-duplicate them itself. At a one-second rhythm a ten-minute outage fires hundreds. Whatever wires the alert sink must throttle or collapse them, and this test is where that belongs
 
 ### Implementation for User Story 2
 
-- [ ] T052 [US2] Implement the tracking sink in `src/straker/trackingSink.ts` writing to Straker's **own file**, carrying at minimum the offer identity, **language direction** (FR-011a), effort, deadline, outcome, skip reason and the timestamps win rate needs
-- [ ] T053 [US2] Implement reconciliation in `src/straker/reconcile.ts` — the portal is the authority, our record is a copy (FR-016a)
-- [ ] T054 [US2] Implement announcement cards in `src/straker/notifier.ts` for Straker's **own channel**, each **naming the portal in its heading** (FR-015), announcing wins and recovered work but **not** every loss or skip
-- [ ] T055 [US2] Route operational alerts from `src/straker/notifier.ts` to the **single existing operations channel**, each naming its portal (FR-026b) — and add a comment marking the news-separated / alerts-unified asymmetry as deliberate, so it is not later "made consistent"
-- [ ] T056 [US2] Implement win-rate reporting to pass T050 as an ops script in `src/straker/winRateReport.ts` (FR-017, FR-017a, SC-004), plus its `package.json` entry
+> **Two tasks added 2026-09-15, because the breakdown had no owner for the drain.** T052–T056
+> build senders and card builders; nothing built the loop that reads `straker_outbox` and sends
+> what is in it, and nothing called that loop from the cycle. The phase note above had already
+> observed the symptom — "outcomes are being written durably to the outbox today, and nothing
+> drains it" — without a task to fix it. This feature has now shipped three capabilities built,
+> tested and unreachable because a **call site between two files belonged to nobody**; a whole
+> delivery path was about to be the fourth. T052a owns the drain, T056a owns the call sites, and
+> both are the coordinator's rather than any file-scoped agent's.
 
-**Checkpoint**: the team can see exactly what the bot saw and what it did about it
+- [x] T052a [US2] Implement the dispatcher in `src/straker/dispatcher.ts` — drain `outbox.due()`, route each row by channel to its sender, `markSent` on success and `recordFailure` otherwise, honouring the retry-and-dead policy already shared with the XTM bot in `src/shared/outboxRetry.ts`. A malformed row must be dropped loudly rather than wedging the queue (the XTM dispatcher's own lesson). **Its `StrakerSenders` interface is the contract T052, T054 and T055 build to, so it is written first.**
+- [x] T056a [US2] Wire the drain and the reconciliation cadence into the running bot, in `src/straker/main.ts` / `src/straker/pollCycle.ts`, and **assert the wiring** — that a completed cycle actually flushes, and that reconciliation is reached on start and on its interval. A dispatcher nothing calls is the same defect as no dispatcher, and this feature has already produced three of those (see the note above)
+- [x] T052 [US2] Implement the tracking sink in `src/straker/trackingSink.ts` writing to Straker's **own file**, carrying at minimum the offer identity, **language direction** (FR-011a), effort, deadline, outcome, skip reason and the timestamps win rate needs
+- [x] T053 [US2] Implement reconciliation in `src/straker/reconcile.ts` — the portal is the authority, our record is a copy (FR-016a)
+- [x] T054 [US2] Implement announcement cards in `src/straker/notifier.ts` for Straker's **own channel**, each **naming the portal in its heading** (FR-015), announcing wins and recovered work but **not** every loss or skip
+- [x] T055 [US2] Route operational alerts from `src/straker/notifier.ts` to the **single existing operations channel**, each naming its portal (FR-026b) — and add a comment marking the news-separated / alerts-unified asymmetry as deliberate, so it is not later "made consistent"
+- [x] T056 [US2] Implement win-rate reporting to pass T050 as an ops script in `src/straker/winRateReport.ts` (FR-017, FR-017a, SC-004), plus its `package.json` entry
+
+**Checkpoint**: the team can see exactly what the bot saw and what it did about it — **met**, with the two carried items below outstanding.
+
+### Carried out of Phase 4 (found 2026-09-16, not fixed)
+
+- [ ] T056b **Nothing ever releases held work, so the ledger's budget never returns.** Both `StrakerStore.release` and `StrakerLedger.release` were written anticipating a reconciliation caller, and reconciliation — the only thing that reads the portal's assigned list — is the only thing that *could* notice work the team no longer holds. It was deliberately not built in T053: FR-016a mandates only the additive direction, and the subtractive one is unsafe on the same evidence, because a partial read would free capacity for work the team genuinely holds and over-committing an irreversible claim is the one error this feature cannot take back. The consequence is that FR-016d's "further claims for that day are then blocked as normal" becomes permanent: **held work accumulates forever and the bot eventually stops claiming while looking perfectly healthy.** Needs a safe rule — most likely "release only what a complete, unpaginated read positively shows as finished" — and its own failure-mode test.
+- [ ] T056c **FR-019's "below 120 remaining, suspend deferrable work" has no owner.** Nothing marks the reconciliation read as deferrable, and `readAssignedWork` goes through `getJson` unconditionally, so a budget running low cannot shed it. This belongs with T064/T065's pacing inside `httpClient.ts`, but the transport currently cannot tell a deferrable path from a hot one — which is the actual gap: the capability needs a way to be asked for.
 
 ---
 
