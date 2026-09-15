@@ -102,26 +102,26 @@ repo-wide and executable code must not hide behind a name the gate skips.
 
 ### Tests for User Story 1 (MANDATORY — Constitution II) ⚠️
 
-- [ ] T023 [P] [US1] Write failing tests for claim-outcome classification — `won`, `lost`, `failed`, `unknown` — including that an **unrecognised rejection is `failed`, never `lost`**, in `tests/unit/straker/claimOutcome.test.ts` (FR-005, FR-005a)
-- [ ] T024 [P] [US1] Write a failing test that a lost race raises **no alert** and does not interrupt the loop, in `tests/integration/straker/claimCycle.test.ts` (FR-006, SC-007, V2)
-- [ ] T025 [P] [US1] Write a failing test that a claim whose outcome is unknown is **never retried**, in `tests/integration/straker/claimCycle.test.ts` (R7, V9)
-- [ ] T026 [P] [US1] Write failing tests that the scheduling gate's verdict is honoured — outside hours, deadline on a non-working day, deadline unreachable, ceiling reached, and **uncurated holiday year refuses rather than assumes** — in `tests/integration/straker/gateWiring.test.ts` (FR-008, FR-012, FR-013, V4, V5)
-- [ ] T027 [P] [US1] Write a failing test that reaching the ceiling does **not** stop reading, and that skips keep being recorded, in `tests/integration/straker/gateWiring.test.ts` (FR-007a, V23)
-- [ ] T028 [P] [US1] Write a failing test that several offers in one read are evaluated in **portal order**, stopping when the ceiling is exhausted, in `tests/integration/straker/gateWiring.test.ts` (FR-007b)
-- [ ] T029 [P] [US1] Write a failing test that a claim is **never** attempted for an offer the gate rejected, under any path including retries, in `tests/integration/straker/gateWiring.test.ts` (FR-013, SC-006, V16)
-- [ ] T030 [P] [US1] Write a failing test that **no further enquiry about an offer is made between noticing it and claiming it** — no detail fetch, no file listing — in `tests/integration/straker/claimCycle.test.ts` (FR-002, V32). This is the kind of regression that hides: it costs a round trip on the one path where a round trip decides the outcome, and nothing else about the system looks wrong
-- [ ] T031 [P] [US1] Add a static check that the strings `decline` and the decline endpoint appear nowhere in `src/straker/`, wired into the test suite (FR-007) — the same grep discipline the capture probe used, which is what kept it provably read-only
+- [x] T023 [P] [US1] Write failing tests for claim-outcome classification — `won`, `lost`, `failed`, `unknown` — including that an **unrecognised rejection is `failed`, never `lost`**, in `tests/unit/straker/claimOutcome.test.ts` (FR-005, FR-005a)
+- [x] T024 [P] [US1] Write a failing test that a lost race raises **no alert** and does not interrupt the loop, in `tests/integration/straker/claimCycle.test.ts` (FR-006, SC-007, V2)
+- [x] T025 [P] [US1] Write a failing test that a claim whose outcome is unknown is **never retried**, in `tests/integration/straker/claimCycle.test.ts` (R7, V9)
+- [x] T026 [P] [US1] Write failing tests that the scheduling gate's verdict is honoured — outside hours, deadline on a non-working day, deadline unreachable, ceiling reached, and **uncurated holiday year refuses rather than assumes** — in `tests/integration/straker/gateWiring.test.ts` (FR-008, FR-012, FR-013, V4, V5)
+- [x] T027 [P] [US1] Write a failing test that reaching the ceiling does **not** stop reading, and that skips keep being recorded, in `tests/integration/straker/gateWiring.test.ts` (FR-007a, V23)
+- [x] T028 [P] [US1] Write a failing test that several offers in one read are evaluated in **portal order**, stopping when the ceiling is exhausted, in `tests/integration/straker/gateWiring.test.ts` (FR-007b)
+- [x] T029 [P] [US1] Write a failing test that a claim is **never** attempted for an offer the gate rejected, under any path including retries, in `tests/integration/straker/gateWiring.test.ts` (FR-013, SC-006, V16)
+- [x] T030 [P] [US1] Write a failing test that **no further enquiry about an offer is made between noticing it and claiming it** — no detail fetch, no file listing — in `tests/integration/straker/claimCycle.test.ts` (FR-002, V32). This is the kind of regression that hides: it costs a round trip on the one path where a round trip decides the outcome, and nothing else about the system looks wrong
+- [x] T031 [P] [US1] Add a static check that the strings `decline` and the decline endpoint appear nowhere in `src/straker/`, wired into the test suite (FR-007) — the same grep discipline the capture probe used, which is what kept it provably read-only
 - [ ] T032 [P] [US1] 🚧 **Track B** Write failing tests for eligibility against the **44 registered language directions**, using the portal's own language identifiers, honouring the exclusion list, in `tests/unit/straker/eligibility.test.ts` (FR-011, V3)
 - [ ] T033 [P] [US1] 🚧 **Track B** Write failing tests for parsing a real offer payload — built **from the captured fixtures**, not from the recon note's field list — in `tests/unit/straker/offerParse.test.ts` (U1)
 
 ### Implementation for User Story 1
 
-- [ ] T034 [US1] Implement claim-outcome classification to pass T023 in `src/straker/claimOutcome.ts` (FR-005, FR-005a), keeping it **pure** so it is unit-testable without a transport
-- [ ] T035 [US1] Implement the claim action in `src/straker/claim.ts` — one offer at a time, no group action (FR-004), and **no blind retry ever** (R7)
-- [ ] T036 [US1] Translate the portal's rejection codes into `AcceptOutcome` values **at the edge of `claim.ts`** (FR-027, DC-1) so no portal-specific code reaches the orchestration
+- [x] T034 [US1] Implement claim-outcome classification to pass T023 in `src/straker/claimOutcome.ts` (FR-005, FR-005a), keeping it **pure** so it is unit-testable without a transport
+- [x] T035 [US1] Implement the claim action in `src/straker/claim.ts` — one offer at a time, no group action (FR-004), and **no blind retry ever** (R7)
+- [x] T036 [US1] Translate the portal's rejection codes into `AcceptOutcome` values **at the edge of `claim.ts`** (FR-027, DC-1) so no portal-specific code reaches the orchestration
 - [ ] T037 [US1] Implement the poll cycle in `src/straker/pollCycle.ts` with the step names **matching the XTM loop exactly** — fetch → diff → gate → act → persist → notify (FR-029, DC-3)
 - [ ] T038 [US1] In `src/straker/pollCycle.ts`, keep the path between noticing an eligible offer and dispatching the claim free of recording, announcing and every other deferrable operation (FR-003) — and add a comment naming reconciliation as what closes the window this opens
-- [ ] T039 [US1] Wire `evaluateAcceptSchedule` from `src/schedule/` **unchanged**, supplying only effort, deadline, throughput and the calendar (R6) — write no Straker-specific scheduling logic
+- [x] T039 [US1] Wire `evaluateAcceptSchedule` from `src/schedule/` **unchanged**, supplying only effort, deadline, throughput and the calendar (R6) — write no Straker-specific scheduling logic
 - [ ] T040 [US1] Define the skip reasons in `src/straker/types.ts` and record one for every offer not claimed in `src/straker/pollCycle.ts`, including `exceeds_daily_ceiling_entirely` as distinct from an ordinary ceiling skip (FR-010, data-model §4)
 - [ ] T041 [US1] 🚧 **Track B** Implement eligibility to pass T032 in `src/straker/eligibility.ts` (FR-011)
 - [ ] T042 [US1] 🚧 **Track B** Implement payload parsing to pass T033 in `src/straker/offerParse.ts`, failing loud on any field that is absent or of an unexpected type (FR-023)

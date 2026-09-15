@@ -1,0 +1,17 @@
+{
+  "obj_id": "94fd32c1-d02b-4442-bc20-24c07b04fd50",
+  "job_ref": "aj-267",
+  "title": "NBA - MISC Sept 14.xlsx",
+  "source_lang": "en-us",
+  "target_lang": "zh-tw",
+  "service": "translation",
+  "words": 4,
+  "rate_type": "per_hour",
+  "unit_cost": "18.0000",
+  "total_unit": "0.010",
+  "budget": "0.19",
+  "currency": "USD",
+  "due_at": "2026-09-16T04:00:00",
+  "listing_type": "direct_po",
+  "status": "open"
+}

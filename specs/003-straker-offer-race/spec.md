@@ -44,6 +44,39 @@ The competitive nature is the defining constraint: for XTM a check every 20 seco
 - Q: Where is the boundary between "short-lived" and "minutes or longer" that decides whether SC-001/SC-002 survive? → A: Strike only if the shortest sighting lifetime in the sample is >= 120 s; below a sample of 10, keep them
 - Q: What happens if the capture probe never reaches 10 offers? → A: Exit at 10 offers or 14 days, whichever comes first; a smaller sample is recorded as a limitation and the conservative defaults apply
 
+### Decision: claiming runs 24/7, and `outside_schedule` retires — 2026-09-15
+
+Building the gate wiring surfaced a gap between two things this spec says. `SkipReason`
+lists `outside_schedule` — "Gate — working hours or working day" (data-model §4) — and
+FR-008 names working hours among the rules to apply. But **`evaluateAcceptSchedule`, the
+gate being reused, never asks whether the team is at work at this instant.** It asks only
+whether the work *fits* in working time before its deadline. The XTM bot has never gated on
+the current moment, so nothing had exposed the difference.
+
+**Decided: no current-moment refusal. The Straker bot claims at any hour.**
+
+- The Assumptions section says the scheduling rules are **"reused unchanged"**. The reused
+  gate has no such check; adding one would be changing the rules, not reusing them.
+- The purpose of the working-hours rule is that the **work** can be done, and the
+  feasibility check already enforces exactly that. Claiming takes a moment and commits
+  nobody to working at that moment.
+- The measurement decides it: **two of the three offers the capture probe has captured
+  arrived at 06:38 Bangkok and were gone within 204 seconds.** A current-moment refusal
+  would turn away two thirds of the observed volume and gain nothing — by 09:00 the offer
+  no longer exists.
+- A bot built to race but asleep for fifteen hours a day contradicts FR-001, which requires
+  a rhythm far faster than the XTM bot's.
+
+**Consequence, recorded rather than left to be discovered**: `outside_schedule` is now a
+`SkipReason` that nothing produces. It stays in the vocabulary — data-model §4 settled it,
+the store's CHECK constraint is generated from it, and a future decision could reinstate the
+refusal — but a test in `gateWiring.test.ts` asserts it is never emitted, so reinstating it
+without revisiting this entry will fail loudly rather than quietly.
+
+**What is still enforced, and by the gate where it belongs**: the deadline must fall on a
+working day, its year's holiday calendar must be curated, and the work must fit in working
+minutes before the deadline at the configured throughput.
+
 ### Capture-probe evidence — interim record, 2026-09-15
 
 **This is not an SC-000 decision.** SC-000 is **not satisfied** and Track B stays blocked:
@@ -333,7 +366,7 @@ These gate the release itself. None is technical, and none can be satisfied by t
 | **RP-1** | The account password has been **rotated**. | It was shared over a chat channel, so it must be treated as exposed. |
 | **RP-2** | The portal’s terms on automated claiming have been **read, and the conclusion recorded** — a named person, a date, and the finding, written into this feature’s documents. | Claiming is live from the first release with no observation period, so there is no later checkpoint at which this could be caught. The risk is the account being suspended. Absent that written record, the precondition is unmet — "someone looked at it" is not a record. |
 | **RP-3** | The **seven-day XTM baseline** required by SC-005a has been captured and stored. | SC-005 is unevaluable without it. |
-| **RP-4** | The **lost-race signal has been confirmed against one real offer** under supervision (FR-005a). | Until then the system cannot tell a normal loss from a broken claim path, and the outcome that never alerts is the dangerous one to get wrong. |
+| **RP-4** | The **lost-race signal has been confirmed against one real offer** under supervision (FR-005a). | Until then the system cannot tell a normal loss from a broken claim path, and the outcome that never alerts is the dangerous one to get wrong. **Four things the claim path had to guess, all settled by that one supervised claim (added 2026-09-15):** (a) which rejection means a lost race — until one is confirmed, `CONFIRMED_LOST_RACE_SIGNALS` is empty and every rejection is a fault; (b) **403 is currently read as "account barred → stop claiming"**, chosen because guessing that way costs a loud halt while guessing the other way means claiming at a portal that has already barred us — but if this portal answers a lost race with 403, the bot stops at the most ordinary moment there is; (c) **any 2xx is read as won**, so if the portal reports a refusal inside a 200 body we would record a win we never had, and reconciliation could not catch it (it looks for work on the portal missing from our record, not the reverse); (d) the claim endpoint and body are modelled on the confirmed read endpoint and have never been exercised. |
 | **RP-5** | The **capture probe has been stopped** before the bot starts. | They would otherwise share one request budget and produce two views of the same offers. |
 
 ---
