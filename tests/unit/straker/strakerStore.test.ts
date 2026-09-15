@@ -635,3 +635,79 @@ describe('recovery from an unusable database file', () => {
     expect(new StrakerStore(opened.db).listEvents()).toEqual([]);
   });
 });
+
+describe('claimedObjIds — what the cycle must not claim a second time (R7, FR-019c)', () => {
+  it('names an offer once a claim has been attempted against it, whatever the outcome', () => {
+    // R7 forbids retrying a claim "at all, at any interval" — and a poll interval is an
+    // interval. The cycle needs one cheap question per pass to honour that across cycles,
+    // because `claim.ts` can only refuse to retry within the single call it is given.
+    const { store, db } = freshStore();
+
+    for (const [objId, outcome] of [
+      ['won', 'won'],
+      ['lost', 'lost'],
+      ['failed', 'failed'],
+      ['unknown', 'unknown'],
+    ] as const) {
+      store.recordEvent({
+        objId,
+        eventType: 'claim',
+        outcome,
+        skipReason: null,
+        effortWords: 4,
+        deadlineMs: NOW_MS,
+        occurredAtMs: NOW_MS,
+      });
+    }
+
+    expect([...store.claimedObjIds()].sort()).toEqual(['failed', 'lost', 'unknown', 'won']);
+    db.close();
+  });
+
+  it('names an offer whose claim outcome is unknown, which is the case R7 exists for', () => {
+    // `unknown` means the request may or may not have landed. A second attempt is the one
+    // thing that turns "we do not know" into "we may have committed twice".
+    const { store, db } = freshStore();
+    store.recordEvent({
+      objId: 'maybe',
+      eventType: 'claim',
+      outcome: 'unknown',
+      skipReason: null,
+      effortWords: 4,
+      deadlineMs: NOW_MS,
+      occurredAtMs: NOW_MS,
+    });
+
+    expect(store.claimedObjIds().has('maybe')).toBe(true);
+    db.close();
+  });
+
+  it('does not name an offer that was only seen or only skipped', () => {
+    const { store, db } = freshStore();
+    store.recordSighting({
+      objId: 'seen',
+      sighting: 1,
+      firstSeenAtMs: NOW_MS,
+      lastSeenAtMs: NOW_MS,
+    });
+    store.recordEvent({
+      objId: 'skipped',
+      eventType: 'skip',
+      outcome: null,
+      skipReason: 'ceiling_reached',
+      effortWords: null,
+      deadlineMs: null,
+      occurredAtMs: NOW_MS,
+    });
+
+    expect([...store.claimedObjIds()]).toEqual([]);
+    db.close();
+  });
+
+  it('is empty on a fresh database, so a cold start claims nothing it should not', () => {
+    const { store, db } = freshStore();
+
+    expect(store.claimedObjIds().size).toBe(0);
+    db.close();
+  });
+});

@@ -484,6 +484,30 @@ export class StrakerStore {
   }
 
   /** Every event, oldest first — the tracking record's source. */
+  /**
+   * Every offer identity a claim has already been attempted against, whatever it produced.
+   *
+   * This is what lets the cycle honour R7 **across** cycles. `claim.ts` refuses to retry
+   * within the one call it is given, and a compile-time lock keeps it that way — but FR-019c
+   * says a claim is never retried "at all, **at any interval**", and a poll interval is an
+   * interval. An offer whose claim came back `unknown` is still listed on the portal
+   * precisely because nobody knows whether it landed; re-claiming it is how "we do not know"
+   * becomes "we may have committed twice".
+   *
+   * Outcome is deliberately not filtered. A `failed` claim is not retried either (R7): the
+   * blind retry of an irreversible action is the thing being forbidden, not one outcome of
+   * it. Reconciliation against the portal settles what actually happened (FR-016a).
+   *
+   * Returned as a Set and read once per cycle, so the question costs one query rather than
+   * one per offer.
+   */
+  claimedObjIds(): Set<string> {
+    const rows = this.db
+      .prepare("SELECT obj_id FROM offer_events WHERE event_type = 'claim'")
+      .all() as { obj_id: string }[];
+    return new Set(rows.map((r) => r.obj_id));
+  }
+
   listEvents(): OfferEvent[] {
     const rows = this.db
       .prepare('SELECT * FROM offer_events ORDER BY occurred_at_ms, obj_id, event_type')

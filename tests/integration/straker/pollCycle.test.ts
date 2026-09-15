@@ -1,119 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
-import type { OfferForDecision } from '../../../src/straker/claimDecision.js';
+import { describe, expect, it } from 'vitest';
 import { StrakerHttpError } from '../../../src/straker/httpClient.js';
-import type { StrakerPortal } from '../../../src/straker/main.js';
-import { createSightingTracker } from '../../../src/straker/main.js';
-import { createStrakerPollCycle } from '../../../src/straker/pollCycle.js';
-import type { RawOffer } from '../../../src/straker/probe.js';
-import { silentLogger } from './testDoubles.js';
-
-/**
- * The cycle's job is ordering as much as outcome. FR-003 says nothing deferrable may happen
- * between noticing an eligible offer and dispatching its claim — so these tests record every
- * side effect in the order it happened and assert on the sequence, which is the only way a
- * "we did the right things, in the wrong order" regression can be caught.
- */
-function harness(opts: {
-  offers?: readonly RawOffer[];
-  readFails?: unknown;
-  extract?: (raw: readonly RawOffer[]) => readonly OfferForDecision[];
-  claim?: (offerId: string) => { status: number } | 'accepted' | 'no_answer';
-}) {
-  const trace: string[] = [];
-  const claimed: string[] = [];
-
-  const portal: StrakerPortal = {
-    client: {
-      getJson: vi.fn(),
-      getJsonWithBackoff: vi.fn(),
-      lastRateLimit: () => null,
-      postJson: async (path: string) => {
-        const id = /job-offers\/([^/]+)\/claim/.exec(path)?.[1] ?? '?';
-        trace.push(`claim:${id}`);
-        claimed.push(id);
-        const outcome = opts.claim?.(id) ?? 'accepted';
-        if (outcome === 'accepted') return {};
-        if (outcome === 'no_answer') throw new Error('socket closed');
-        throw new StrakerHttpError(outcome.status, path, 'refused');
-      },
-    } as never,
-    signIn: async () => {
-      trace.push('signIn');
-      return { vendorId: 'vendor-1' };
-    },
-    listOpenOffers: async () => {
-      trace.push('fetch');
-      if (opts.readFails !== undefined) throw opts.readFails;
-      return opts.offers ?? [];
-    },
-  };
-
-  const store = {
-    transaction: <T>(fn: () => T): T => fn(),
-    recordSighting: () => trace.push('persist:sighting'),
-    endSighting: () => {
-      trace.push('persist:endSighting');
-      return true;
-    },
-    recordEvent: (e: { eventType: string; skipReason: string | null; outcome: string | null }) =>
-      trace.push(`persist:event:${e.eventType}:${e.skipReason ?? e.outcome ?? '-'}`),
-    heldWork: () => {
-      trace.push('read:heldWork');
-      return [];
-    },
-  };
-
-  const ledger = {
-    checkCapacity: () => {
-      trace.push('gate:capacity');
-      return { fits: true } as const;
-    },
-    hold: () => {
-      trace.push('persist:hold');
-      return {
-        deadlineDay: '2026-09-16',
-        committedEffort: 4,
-        ceiling: 2000,
-        ceilingExceeded: false,
-      };
-    },
-  };
-
-  const outbox = {
-    enqueue: (eventId: string, channel: string) => {
-      trace.push(`notify:${channel}:${eventId}`);
-      return 'queued' as const;
-    },
-  };
-
-  const cycle = createStrakerPollCycle({
-    portal,
-    tracker: createSightingTracker(),
-    store: store as never,
-    ledger: ledger as never,
-    outbox: outbox as never,
-    logger: silentLogger(),
-    settings: {
-      throughputWordsPerHour: 100,
-      hoursStartMin: 9 * 60,
-      hoursEndMin: 18 * 60,
-      workdays: new Set([1, 2, 3, 4, 5]),
-    },
-    extractOffers: opts.extract ?? (() => []),
-    now: () => Date.parse('2026-09-16T10:00:00+07:00'),
-  });
-
-  return { cycle, trace, claimed };
-}
-
-const raw = (id: string): RawOffer => ({ obj_id: id });
-const eligible = (id: string): OfferForDecision => ({
-  objId: id,
-  languageDirection: 'en-us>ms-my',
-  eligible: true,
-  effortWords: 4,
-  deadlineMs: Date.parse('2026-09-16T17:00:00+07:00'),
-});
+import { eligible, harness, raw } from './pollCycleHarness.js';
 
 describe('T037 the cycle runs the same named steps as the XTM loop (FR-029, DC-3)', () => {
   it('fetches, diffs, gates, acts, persists and notifies — in that order', async () => {
@@ -206,7 +93,7 @@ describe('a payload that breaks the contract is treated as a failed read (FR-023
     broken = false;
     await h.cycle.runOnce();
 
-    expect(h.trace).toContain('persist:sighting');
+    expect(h.trace).toContain('persist:sighting:a');
   });
 });
 

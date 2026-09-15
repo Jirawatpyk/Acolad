@@ -119,7 +119,25 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       // every subsequent one must see the same set, or two offers in one read can each be
       // told there is room for them alone.
       const held = deps.store.heldWork();
-      const decisions = decideClaims(offers, {
+      // R7 across cycles. `claim.ts` refuses to retry inside the one call it is given, but
+      // FR-019c forbids a retry "at all, at any interval" — and the poll rhythm is an
+      // interval. An offer whose claim came back `unknown` is still listed precisely because
+      // nobody knows whether it landed, so re-deciding it is how "we do not know" becomes
+      // "we may have committed twice". One query per cycle, like the held list.
+      const alreadyClaimed = deps.store.claimedObjIds();
+      const candidates = offers.filter((o) => !alreadyClaimed.has(o.objId));
+      if (candidates.length < offers.length) {
+        deps.logger.info(
+          {
+            module: 'pollCycle',
+            action: 'skip_reclaim',
+            outcome: 'ok',
+            offers: offers.length - candidates.length,
+          },
+          'offers still listed that this bot has already attempted — not claiming them again',
+        );
+      }
+      const decisions = decideClaims(candidates, {
         nowMs: atMs,
         settings: deps.settings,
         ledger: deps.ledger,
@@ -157,71 +175,120 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
         if (attempt.followUp === 're_authenticate') session = null;
       }
 
-      // --- persist ---------------------------------------------------------------
-      deps.store.transaction(() => {
-        for (const offer of sightings.appeared) deps.store.recordSighting(offer);
-        for (const offer of sightings.vanished) deps.store.endSighting(offer);
-
-        for (const decision of decisions) {
-          if (decision.action !== 'skip') continue;
-          deps.store.recordEvent({
-            objId: decision.objId,
-            eventType: 'skip',
-            outcome: null,
-            skipReason: decision.reason,
-            effortWords: null,
-            deadlineMs: null,
-            occurredAtMs: atMs,
+      // --- persist + notify -------------------------------------------------------
+      // The claims go first, and each one alone.
+      //
+      // A claim is already committed on the portal by the time we get here, so its record is
+      // the most valuable row in the cycle — and the previous shape put it in one transaction
+      // with every sighting and every skip, where a single rejected write discarded the lot.
+      // That is the gap FR-016a then has to go and find. One transaction per claim means a
+      // bad row loses that row, not the others.
+      //
+      // The announcement is enqueued INSIDE the same transaction, which is what `outbox.ts`
+      // asks for: queued with the state change that produced it, so a destination being
+      // unavailable can delay an outcome but never lose one (FR-016).
+      for (const { decision, outcome, detail } of acted) {
+        try {
+          deps.store.transaction(() => {
+            deps.store.recordEvent({
+              objId: decision.objId,
+              eventType: 'claim',
+              outcome,
+              skipReason: null,
+              effortWords: decision.effortWords,
+              deadlineMs: decision.deadlineMs,
+              occurredAtMs: atMs,
+            });
+            // Only work the team actually holds goes on the ledger. A lost race and a fault
+            // consume no capacity — counting them would shrink tomorrow's budget for work
+            // nobody has.
+            if (countsTowardLedger(outcome)) {
+              deps.ledger.hold(
+                {
+                  objId: decision.objId,
+                  effortWords: decision.effortWords,
+                  deadlineMs: decision.deadlineMs,
+                },
+                atMs,
+              );
+            }
+            if (alertsOn(outcome) || outcome === 'won') {
+              enqueue(
+                deps,
+                alertsOn(outcome) ? 'alerts' : 'offers',
+                `claim:${decision.objId}:${outcome}`,
+                atMs,
+                {
+                  objId: decision.objId,
+                  languageDirection: decision.languageDirection,
+                  effortWords: decision.effortWords,
+                  deadlineMs: decision.deadlineMs,
+                  outcome,
+                  detail,
+                },
+              );
+            }
           });
-        }
-
-        for (const { decision, outcome } of acted) {
-          deps.store.recordEvent({
-            objId: decision.objId,
-            eventType: 'claim',
-            outcome,
-            skipReason: null,
-            effortWords: decision.effortWords,
-            deadlineMs: decision.deadlineMs,
-            occurredAtMs: atMs,
-          });
-          // Only work the team actually holds goes on the ledger. A lost race and a fault
-          // consume no capacity — counting them would shrink tomorrow's budget for work
-          // nobody has.
-          if (countsTowardLedger(outcome)) {
-            deps.ledger.hold(
-              {
-                objId: decision.objId,
-                effortWords: decision.effortWords,
-                deadlineMs: decision.deadlineMs,
-              },
-              atMs,
-            );
-          }
-        }
-      });
-
-      // --- notify ----------------------------------------------------------------
-      for (const decision of decisions) {
-        if (decision.action === 'skip' && alertsOnSkip(decision.reason)) {
-          enqueue(deps, 'alerts', `skip:${decision.objId}:${decision.reason}`, atMs, {
-            objId: decision.objId,
-            reason: decision.reason,
-            detail: decision.detail,
-          });
+        } catch (err) {
+          // The worst state this bot can reach: the portal has committed work to the team and
+          // nothing here records it. Loud, per claim, and named so it can be searched for —
+          // reconciliation (FR-016a) is what repairs it.
+          deps.logger.error(
+            {
+              module: 'pollCycle',
+              action: 'persist_claim',
+              outcome: 'failed',
+              objId: decision.objId,
+              claimOutcome: outcome,
+            },
+            err instanceof Error ? err.message : String(err),
+          );
         }
       }
-      for (const { decision, outcome, detail } of acted) {
-        const channel = alertsOn(outcome) ? 'alerts' : 'offers';
-        if (!alertsOn(outcome) && outcome !== 'won') continue;
-        enqueue(deps, channel, `claim:${decision.objId}:${outcome}`, atMs, {
-          objId: decision.objId,
-          languageDirection: decision.languageDirection,
-          effortWords: decision.effortWords,
-          deadlineMs: decision.deadlineMs,
-          outcome,
-          detail,
+
+      // Then the observational half, which is recoverable: a lost sighting costs a lifetime
+      // measurement, not a commitment.
+      const diverged: string[] = [];
+      try {
+        deps.store.transaction(() => {
+          for (const offer of sightings.appeared) deps.store.recordSighting(offer);
+          for (const offer of sightings.vanished) {
+            // `false` here is not "nothing to do" — it means the tracker is closing an
+            // appearance the store never recorded, and the store's own docstring says the
+            // caller is the only thing in a position to notice.
+            if (!deps.store.endSighting(offer)) diverged.push(offer.objId);
+          }
+          for (const decision of decisions) {
+            if (decision.action !== 'skip') continue;
+            deps.store.recordEvent({
+              objId: decision.objId,
+              eventType: 'skip',
+              outcome: null,
+              skipReason: decision.reason,
+              effortWords: null,
+              deadlineMs: null,
+              occurredAtMs: atMs,
+            });
+            if (alertsOnSkip(decision.reason)) {
+              enqueue(deps, 'alerts', `skip:${decision.objId}:${decision.reason}`, atMs, {
+                objId: decision.objId,
+                reason: decision.reason,
+                detail: decision.detail,
+              });
+            }
+          }
         });
+      } catch (err) {
+        deps.logger.error(
+          { module: 'pollCycle', action: 'persist_observations', outcome: 'failed' },
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      for (const objId of diverged) {
+        deps.logger.warn(
+          { module: 'pollCycle', action: 'sighting_divergence', outcome: 'failed', objId },
+          'ended a sighting the store never recorded — the tracker and the store have diverged',
+        );
       }
 
       deps.logger.info(
