@@ -1,18 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { loadStrakerBotConfig } from '../../../src/straker/config.js';
 import {
-  StrakerHttpError,
   type StrakerHttpClient,
   type StrakerTransportWarning,
 } from '../../../src/straker/httpClient.js';
 import { listOpenOffers } from '../../../src/straker/offersApi.js';
-import {
-  createSightingCycle,
-  createSightingTracker,
-  createStrakerPortal,
-  startStrakerBot,
-  type StrakerPortal,
-} from '../../../src/straker/main.js';
+import { createStrakerPortal, startStrakerBot } from '../../../src/straker/main.js';
 import type { RawOffer } from '../../../src/straker/probe.js';
 import { silentLogger, recordingPinger, idleCycle } from './testDoubles.js';
 
@@ -43,14 +36,6 @@ function twoDoorClient(reply: unknown = []): StrakerHttpClient & {
     postJson: vi.fn(),
     lastRateLimit: () => null,
   } as never;
-}
-
-function portalStub(read: () => Promise<readonly RawOffer[]>): StrakerPortal {
-  return {
-    client: twoDoorClient(),
-    signIn: () => Promise.resolve({ vendorId: 'vendor-1' }),
-    listOpenOffers: read,
-  };
 }
 
 const offer = (id: string): RawOffer => ({ obj_id: id });
@@ -85,157 +70,6 @@ describe('the offer-list read goes through the retrying door (FR-019b, V30)', ()
     await expect(listOpenOffers(client, 'vendor-1', { retry: true })).rejects.toThrow(
       /no longer a bare array/,
     );
-  });
-});
-
-describe('createSightingCycle — a failed read never drives a transition (FR-023, V6)', () => {
-  it('leaves the tracker state untouched when the read fails', async () => {
-    const tracker = createSightingTracker();
-    let fail = false;
-    const cycle = createSightingCycle(
-      portalStub(() =>
-        fail ? Promise.reject(new Error('portal down')) : Promise.resolve([offer('a')]),
-      ),
-      tracker,
-      silentLogger(),
-      () => 1_000,
-    );
-
-    await cycle.runOnce();
-    const afterGoodRead = JSON.stringify(tracker.state);
-    fail = true;
-    await cycle.runOnce();
-
-    // Applying an empty list after a failure would mark every live offer as vanished and
-    // stamp a fabricated lifetime on each. That is the bug that cost the XTM bot 38 minutes.
-    expect(JSON.stringify(tracker.state)).toBe(afterGoodRead);
-  });
-
-  it('reports the cycle as failed rather than as a quiet success', async () => {
-    const cycle = createSightingCycle(
-      portalStub(() => Promise.reject(new Error('portal down'))),
-      createSightingTracker(),
-      silentLogger(),
-    );
-
-    // A cycle that returns true here would ping the liveness signal "ok" while destroying
-    // the tracker state — healthy-looking and wrong at the same time.
-    await expect(cycle.runOnce()).resolves.toBe(false);
-  });
-
-  it('records the offers that a successful read did bring back', async () => {
-    const tracker = createSightingTracker();
-    const cycle = createSightingCycle(
-      portalStub(() => Promise.resolve([offer('a'), offer('b')])),
-      tracker,
-      silentLogger(),
-      () => 1_000,
-    );
-
-    await expect(cycle.runOnce()).resolves.toBe(true);
-
-    expect(tracker.state.live.map((o) => o.objId).sort()).toEqual(['a', 'b']);
-  });
-
-  it('marks an offer vanished once a SUCCESSFUL read no longer lists it', async () => {
-    const tracker = createSightingTracker();
-    let listed: RawOffer[] = [offer('a')];
-    let now = 1_000;
-    const cycle = createSightingCycle(
-      portalStub(() => Promise.resolve(listed)),
-      tracker,
-      silentLogger(),
-      () => now,
-    );
-
-    await cycle.runOnce();
-    listed = [];
-    now = 5_000;
-    await cycle.runOnce();
-
-    expect(tracker.state.live).toEqual([]);
-  });
-});
-
-describe('createSightingCycle — re-authenticating only when the portal says the session expired', () => {
-  it('signs in again after an expired-session rejection', async () => {
-    const signIn = vi.fn().mockResolvedValue({ vendorId: 'vendor-1' });
-    let attempt = 0;
-    const cycle = createSightingCycle(
-      {
-        client: twoDoorClient(),
-        signIn,
-        listOpenOffers: () =>
-          ++attempt === 1
-            ? Promise.reject(new StrakerHttpError(401, '/offers', 'expired'))
-            : Promise.resolve([]),
-      },
-      createSightingTracker(),
-      silentLogger(),
-    );
-
-    await cycle.runOnce();
-    await cycle.runOnce();
-
-    expect(signIn).toHaveBeenCalledTimes(2);
-  });
-
-  it('does NOT sign in again after an account-blocked rejection', async () => {
-    const signIn = vi.fn().mockResolvedValue({ vendorId: 'vendor-1' });
-    const cycle = createSightingCycle(
-      {
-        client: twoDoorClient(),
-        signIn,
-        listOpenOffers: () => Promise.reject(new StrakerHttpError(403, '/offers', 'blocked')),
-      },
-      createSightingTracker(),
-      silentLogger(),
-    );
-
-    await cycle.runOnce();
-    await cycle.runOnce();
-    await cycle.runOnce();
-
-    // Contract 4a: a barred account must never be retried around as though it were
-    // transient. Re-signing in every cycle turns a suspension into a sign-in storm against
-    // a portal that has already said no — at a one-second rhythm, thousands an hour.
-    expect(signIn).toHaveBeenCalledTimes(1);
-  });
-
-  it('does NOT sign in again after an ordinary server fault', async () => {
-    const signIn = vi.fn().mockResolvedValue({ vendorId: 'vendor-1' });
-    const cycle = createSightingCycle(
-      {
-        client: twoDoorClient(),
-        signIn,
-        listOpenOffers: () => Promise.reject(new StrakerHttpError(503, '/offers', 'oops')),
-      },
-      createSightingTracker(),
-      silentLogger(),
-    );
-
-    await cycle.runOnce();
-    await cycle.runOnce();
-
-    expect(signIn).toHaveBeenCalledTimes(1);
-  });
-
-  it('does NOT sign in again after a shape violation, which is a contract fault not a session one', async () => {
-    const signIn = vi.fn().mockResolvedValue({ vendorId: 'vendor-1' });
-    const cycle = createSightingCycle(
-      {
-        client: twoDoorClient(),
-        signIn,
-        listOpenOffers: () => Promise.reject(new Error('reply is no longer a bare array')),
-      },
-      createSightingTracker(),
-      silentLogger(),
-    );
-
-    await cycle.runOnce();
-    await cycle.runOnce();
-
-    expect(signIn).toHaveBeenCalledTimes(1);
   });
 });
 

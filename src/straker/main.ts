@@ -17,7 +17,6 @@ import { acquireSingleInstanceLock } from '../runtime/singleInstance.js';
 import { loadStrakerBotConfig, type StrakerBotConfig } from './config.js';
 import {
   createHttpClient,
-  StrakerHttpError,
   type StrakerHttpClient,
   type StrakerTransportWarning,
 } from './httpClient.js';
@@ -30,6 +29,10 @@ import {
 } from './offerTracker.js';
 import type { OfferSnapshot } from './offerTracker.js';
 import { createStrakerLogger, STRAKER_LOG_NAME } from './logger.js';
+import { StrakerLedger } from './ledger.js';
+import { StrakerOutbox } from './outbox.js';
+import { createStrakerPollCycle, type OfferExtractor } from './pollCycle.js';
+import { openStrakerDatabase, StrakerStore } from './strakerStore.js';
 import { openSession, type StrakerSession } from './session.js';
 import type { RawOffer } from './probe.js';
 
@@ -275,15 +278,6 @@ export function createStrakerPortal(
 }
 
 /**
- * The one rejection that means "sign in again" (contract 1, confirmed against the live
- * portal). Everything else — a barred account, a server fault, a reply that broke the
- * contract — is deliberately NOT a session problem.
- */
-function isSessionExpired(err: unknown): boolean {
-  return err instanceof StrakerHttpError && err.status === 401;
-}
-
-/**
  * The sighting tracker, wrapped around the probe's pure `applySnapshot` so the bot keeps
  * the state between cycles without owning the transition. `detection/diff.ts` plays the
  * same role for the XTM bot: the pure function decides, the caller only persists.
@@ -310,86 +304,29 @@ export function createSightingTracker(
 }
 
 /**
- * The Phase 2 cycle: sign in once, read the open list, and let the tracker decide what
- * appeared and what vanished. It claims nothing — claiming is Phase 3 (T035) and gated by
- * the schedule (T039) — but it exercises the whole wiring above, which is what T017 is for.
+ * The offer extractor the bot runs with until Track B lands.
  *
- * **This is the seam T037 replaces**, extending it to the full named sequence the XTM loop
- * uses: fetch -> diff -> gate -> act -> persist -> notify (DC-3).
+ * Turning a portal payload into the values a decision needs is T042 (parsing) and T041
+ * (the 44-direction eligibility rule), and SC-000 blocks both until the capture probe
+ * reaches exit. Returning nothing is the honest behaviour in the meantime: the bot still
+ * signs in, reads, tracks sightings and reports, and claims nothing — rather than guessing
+ * which field carries effort and which carries the deadline, both of which feed the
+ * scheduling gate directly.
  *
- * A failed read returns `false` with the tracker state UNTOUCHED. Applying an empty list
- * after a failure would mark every live offer as vanished and stamp fabricated lifetimes on
- * all of them — the one way this model can silently produce wrong answers, and the bug that
- * cost the XTM bot 38 minutes of missed work.
+ * It says so once per process rather than once per cycle, because at a ten-second rhythm
+ * the latter is eight and a half thousand identical lines a day.
  */
-export function createSightingCycle(
-  portal: StrakerPortal,
-  tracker: SightingTracker,
-  logger: Logger,
-  now: () => number = Date.now,
-): StrakerCycle {
-  let session: StrakerSession | null = null;
-
-  return {
-    async runOnce(): Promise<boolean> {
-      const atMs = now();
-      try {
-        session ??= await portal.signIn();
-        const offers = await portal.listOpenOffers(session.vendorId);
-        const result = tracker.apply({ atMs, offerIds: offers.map((o) => o.obj_id) });
-        for (const offer of result.appeared) {
-          logger.info(
-            {
-              module: 'pollCycle',
-              action: 'offer_appeared',
-              objId: offer.objId,
-              sighting: offer.sighting,
-            },
-            'open offer appeared',
-          );
-        }
-        for (const offer of result.vanished) {
-          logger.info(
-            {
-              module: 'pollCycle',
-              action: 'offer_vanished',
-              objId: offer.objId,
-              lifetimeMs: offer.lifetimeMs,
-            },
-            'open offer vanished',
-          );
-        }
-        return true;
-      } catch (err) {
-        // Drop the session ONLY for the signal that actually means the session expired.
-        //
-        // Dropping it on every error is what turns a barred account into a sign-in storm:
-        // a 403 would re-authenticate every cycle against a portal that has already said
-        // no — thousands of attempts an hour at a racing rhythm, which is how an account
-        // earns a block rather than recovers from one (contract 4a). A server fault and a
-        // shape violation are not session problems either, and re-signing in for them
-        // hides the real cause behind an extra round trip. The probe this cycle replaces
-        // got this right and it must not regress here.
-        if (isSessionExpired(err)) session = null;
-        report(() =>
-          logger.error(
-            {
-              module: 'pollCycle',
-              action: 'read',
-              outcome: 'failed',
-              // Carried as fields, not folded into the message: a contract violation
-              // (FR-023) and a passing 503 are the same log line otherwise, and only one
-              // of them means an assumption the whole feature rests on has failed.
-              errName: err instanceof Error ? err.name : typeof err,
-              ...(err instanceof StrakerHttpError ? { status: err.status } : {}),
-              reauth: isSessionExpired(err),
-            },
-            err instanceof Error ? err.message : String(err),
-          ),
-        );
-        return false;
-      }
-    },
+function pendingOfferExtractor(logger: Logger): OfferExtractor {
+  let announced = false;
+  return (raw) => {
+    if (raw.length > 0 && !announced) {
+      announced = true;
+      logger.warn(
+        { module: 'pollCycle', action: 'extract', outcome: 'pending_track_b', offers: raw.length },
+        'offers are being seen but not claimed: parsing and eligibility wait on SC-000 (T041, T042)',
+      );
+    }
+    return [];
   };
 }
 
@@ -408,7 +345,39 @@ async function main(): Promise<void> {
   );
 
   const portal = createStrakerPortal(cfg, logger);
-  const cycle = createSightingCycle(portal, createSightingTracker(), logger);
+
+  const opened = openStrakerDatabase(cfg.stateDir, Date.now());
+  if (opened.recoveredFromCorruption) {
+    logger.error(
+      {
+        module: 'main',
+        action: 'startup',
+        outcome: 'db_quarantined',
+        path: opened.corruptCopyPath,
+      },
+      'the Straker state file was unusable and was quarantined — this run starts cold, and any work held before it is known only to the portal until reconciliation runs',
+    );
+  }
+  const store = new StrakerStore(opened.db);
+
+  const cycle = createStrakerPollCycle({
+    portal,
+    tracker: createSightingTracker(),
+    store,
+    ledger: new StrakerLedger(store, cfg.maxWordsPerDay, {
+      hoursStartMin: cfg.hoursStartMin,
+      workdays: cfg.workdays,
+    }),
+    outbox: new StrakerOutbox(opened.db),
+    logger,
+    settings: {
+      throughputWordsPerHour: cfg.throughputWordsPerHour,
+      hoursStartMin: cfg.hoursStartMin,
+      hoursEndMin: cfg.hoursEndMin,
+      workdays: cfg.workdays,
+    },
+    extractOffers: pendingOfferExtractor(logger),
+  });
 
   const bot = await startStrakerBot({ cfg, logger, heartbeat, cycle });
 
