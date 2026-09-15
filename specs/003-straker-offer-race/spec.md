@@ -44,6 +44,78 @@ The competitive nature is the defining constraint: for XTM a check every 20 seco
 - Q: Where is the boundary between "short-lived" and "minutes or longer" that decides whether SC-001/SC-002 survive? → A: Strike only if the shortest sighting lifetime in the sample is >= 120 s; below a sample of 10, keep them
 - Q: What happens if the capture probe never reaches 10 offers? → A: Exit at 10 offers or 14 days, whichever comes first; a smaller sample is recorded as a limitation and the conservative defaults apply
 
+### Capture-probe evidence — interim record, 2026-09-15
+
+**This is not an SC-000 decision.** SC-000 is **not satisfied** and Track B stays blocked:
+3 distinct offers of the 10 required, on day 4.2 of the 14-day branch (exit falls
+2026-09-25 ~11:56 BKK). Recorded here because the Clarifications log is where SC-000 says
+probe evidence belongs, and because three of the findings below change what later work
+should assume. `data-model.md` §1 is deliberately **left untouched** — replacing it is the
+act SC-000 blocks, and it waits for exit.
+
+**Measured so far** (probe `jobcatch-straker-recon`, 10-second rhythm, 0 restarts):
+
+| | |
+|---|---|
+| Distinct offers | 3 |
+| Sighting lifetimes | 204 s, 587 s, 1,938 s (lower bounds; upper bounds 215 s, 598 s, 1,948 s) |
+| **Shortest lifetime** | **204 s lower / 215 s upper** |
+| Arrival pattern | all three on 2026-09-15 (two at 06:38 ten seconds apart, one at 13:56); **zero on 11–14 Sep** |
+| Observed rate | ~0.7 offers/day against the team's stated 2–3 — but over four days with one active day, far too short a window to revise the figure |
+| Failed reads | 1 in 4.2 days (2026-09-14 06:49 BKK) |
+
+**Reading of the strike rule, stated but not applied**: the shortest lifetime is already
+past the 120-second threshold, so a sample that reached 10 while holding this shape would
+strike SC-001 and SC-002. At the observed rate 10 offers arrive at roughly the 14-day mark,
+so the likely exit is the time branch with fewer than 10 — where the spec's rule says
+**keep** the criteria, because a handful of long-lived offers cannot show that no
+short-lived ones exist. A lifetime measured by polling is also blind by construction to any
+offer that lived less than one interval.
+
+**Three findings from the real payloads that later work must not assume around:**
+
+1. **`words` is genuine, and the jobs really are that small.** An earlier draft of this note
+   guessed the opposite — that a field reading 2, 2 and 4 could not be the effort the gate
+   needs. The pricing fields settle it: `budget = unit_cost × total_unit` holds on every
+   offer, `total_unit` is **1 project** when `rate_type` is `total_project` and **hours** when
+   it is `per_hour`. The third offer is the proof: **4 words against 0.010 hours — 36 seconds
+   of work at $18/hour.** Four words in thirty-six seconds is a coherent pair, so the word
+   count is real.
+
+   The consequence is not a parsing problem but a **sizing** one. These three offers are worth
+   **$1.00, $1.00 and $0.19**. If that is representative, then the daily capacity ceiling
+   (U4) will never bind, and the feasibility check — working hours × throughput ≥ words —
+   passes trivially for every offer. What the scheduling gate would still genuinely decide is
+   the working-day, holiday and deadline-reachability part, not capacity.
+
+   **Three offers from a single day is far too thin to conclude the workload is always this
+   small**, and the team's stated 2–3 per day has not been contradicted. But it is thin
+   evidence pointing somewhere the plan did not anticipate, and the numeric ceiling that U4
+   defers should be set against measured offer sizes rather than an assumed job.
+2. **`due_at` carries no timezone** (`2026-09-15T23:20:00`). Parsed bare it is read in the
+   host's zone — Bangkok on the office machine, UTC in CI, a seven-hour difference. The open
+   question is not how to parse it but **which zone the portal means**; Straker is a New
+   Zealand company. Guessing shifts every feasibility and deadline-day decision by hours,
+   which is the clock-drift edge case this spec already names.
+3. **`listing_type` is `direct_po` on all three offers, and all three were taken by other
+   vendors** (operator observation on the portal, 2026-09-15 — not read back through the API).
+   An earlier draft of this note read "direct purchase order" as work directed to this vendor
+   rather than contested; **that reading is wrong and is corrected here**. `direct_po` is
+   contested, so Q3's conservative default — every open offer is treated as contested — turns
+   out to be correct rather than merely cautious.
+
+   What this changes about the numbers above: 204–1,938 seconds is not how long an unwanted
+   offer takes to expire, it is **how long a contested offer stayed claimable before a
+   competitor took it**. That is a far more useful measurement than a lifetime, and it says
+   the detection window is generous: the probe saw each of these within ten seconds of it
+   appearing, leaving minutes of slack before the offer went. On this evidence all three were
+   winnable and were lost only because nothing was claiming — the probe is read-only by
+   construction. It is also the first real input to SC-004's win rate, and the baseline is
+   **0 of 3**.
+
+   What remains Straker's to answer: what other `listing_type` values exist and what they
+   mean. Three offers of one type cannot show that every type behaves this way.
+
 ---
 
 ## User Scenarios & Testing *(mandatory)*

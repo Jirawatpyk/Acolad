@@ -20,7 +20,7 @@
 
 **🚧 Track B** tasks need real offer payloads. They are blocked until the capture probe reports **10 distinct offers, or 14 days elapsed** — whichever comes first. Starting one early means guessing which field carries effort and which carries the deadline, and both feed the scheduling gate directly.
 
-Current probe state: **0 offers captured** (running since 2026-09-11 11:56 BKK).
+Current probe state (2026-09-15): **3 distinct offers captured**, day **4.2 of 14** (time-branch exit falls 2026-09-25 ~11:56 BKK). Shortest sighting lifetime so far **204 s**. **Track B stays blocked** — exit needs 10 offers or 14 days, and neither has arrived. Full evidence, including three findings that later work must not assume around (`words` = 2/2/4, `due_at` carries no timezone, `listing_type` is `direct_po` on all three), is in spec.md §Clarifications → *Capture-probe evidence*.
 
 ## Path conventions
 
