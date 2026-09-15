@@ -26,11 +26,13 @@
  * 2. **The scheduling gate**, unchanged. It screens a missing effort or deadline before
  *    anything else, which is what makes the FR-023a alert fire for a contract failure
  *    instead of being masked by whatever else happened to be wrong.
- * 3. **The working moment** — is the team at work *now*. The gate does not answer this
- *    (it asks whether the work FITS in working time, not whether this instant is one), so
- *    it is composed here from the same shared calendar primitives rather than invented.
- * 4. **Capacity**, last, through the ledger. Last because it is the only check whose answer
+ * 3. **Capacity**, last, through the ledger. Last because it is the only check whose answer
  *    depends on the decisions already taken in this same pass.
+ *
+ * There is deliberately **no "is the team at work right now" check**. An earlier draft
+ * composed one here from the shared calendar primitives; it was removed, and the reasoning
+ * — measured, not assumed — sits at the point in `decideOne` where it would have gone.
+ * `outside_schedule` is the SkipReason nothing now produces.
  *
  * Capacity is last for a second reason: `StrakerLedger.checkCapacity` throws on an
  * unreadable deadline. The gate screening that first is not a courtesy, it is the

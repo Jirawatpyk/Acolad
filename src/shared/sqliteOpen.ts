@@ -20,10 +20,16 @@
  *  - **Quarantine only when there is a file to quarantine.** An open that failed before
  *    creating anything has nothing to rename, and reporting a recovery that did not happen
  *    is worse than propagating the real error.
+ *  - **Let the caller narrow what "unusable" means, if it wants to.** By default any
+ *    failure that is not the caller's own logic error is treated as a broken file, which is
+ *    what the live XTM bot has always done and must keep doing. A caller that can name the
+ *    errors which really mean corruption says so through `isCorruption`, and everything
+ *    else then propagates untouched. Which default is right depends on what the file is
+ *    worth: see that field.
  *
- * What differs between the two callers is passed in, and it is only ever four things: the
- * filename, the migration, which error means "our code is wrong", and the clock reading
- * that stamps the quarantine copy.
+ * What differs between the two callers is passed in, and it is only ever five things: the
+ * filename, the migration, which error means "our code is wrong", optionally which error
+ * means "the file is broken", and the clock reading that stamps the quarantine copy.
  */
 
 import Database from 'better-sqlite3';
@@ -48,6 +54,27 @@ export interface SqliteOpenSpec {
    * loudly rather than quietly discarding history for a defect a deploy can fix.
    */
   readonly isLogicError: (err: unknown) => boolean;
+  /**
+   * True for an error that means the FILE ITSELF is unusable. Only such an error reaches
+   * the quarantine; anything else propagates with the file left exactly as it was.
+   *
+   * **Omit it and nothing changes**: every non-logic failure is treated as corruption, the
+   * behaviour `src/state/db.ts` has run on in production since 2026-06. That default is not
+   * a recommendation — it is a promise to the caller that already depends on it (SC-005).
+   *
+   * Supply one when the file is worth more than the startup. `new Database()`, the WAL
+   * pragma and a migration can all fail for reasons that say nothing about the bytes on
+   * disk: `SQLITE_BUSY`/`SQLITE_LOCKED` (a second instance, or a virus scanner, holding the
+   * file), `SQLITE_FULL` (the disk filled mid-DDL), `SQLITE_READONLY`/`EACCES`/`EPERM`
+   * (ACLs changed by a Windows update), `SQLITE_IOERR`, `SQLITE_PROTOCOL`. Quarantining on
+   * one of those renames an intact database away and hands back an empty one — and where a
+   * bot derives a limit from what that database holds, "empty" does not read as "broken",
+   * it reads as "nothing is committed yet", which is the quiet version of the failure.
+   *
+   * Asked AFTER `isLogicError`, never before: an error can satisfy both, and PR #23's
+   * lesson wins that tie.
+   */
+  readonly isCorruption?: ((err: unknown) => boolean) | undefined;
 }
 
 export interface OpenedSqlite {
@@ -65,7 +92,7 @@ export interface OpenedSqlite {
 }
 
 export function openSqliteWithQuarantine(spec: SqliteOpenSpec): OpenedSqlite {
-  const { dir, fileName, nowIso, migrate, isLogicError } = spec;
+  const { dir, fileName, nowIso, migrate, isLogicError, isCorruption } = spec;
   mkdirSync(dir, { recursive: true });
   const path = join(dir, fileName);
 
@@ -83,6 +110,9 @@ export function openSqliteWithQuarantine(spec: SqliteOpenSpec): OpenedSqlite {
       // ignore — best-effort close before quarantine
     }
     if (isLogicError(err)) throw err;
+    // Asked second, and only when the caller supplied one. Absent, every non-logic failure
+    // still quarantines — the behaviour the live XTM bot depends on (SC-005).
+    if (isCorruption !== undefined && !isCorruption(err)) throw err;
     if (!existsSync(path)) throw err;
     const stamp = nowIso.replace(/[:.]/g, '-');
     const corruptCopyPath = join(dir, `${fileName}.corrupt-${stamp}`);

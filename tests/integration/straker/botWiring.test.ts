@@ -8,7 +8,11 @@ import {
   type StrakerTransportWarning,
 } from '../../../src/straker/httpClient.js';
 import { listOpenOffers } from '../../../src/straker/offersApi.js';
-import { createStrakerPortal, startStrakerBot } from '../../../src/straker/main.js';
+import {
+  createStrakerPortal,
+  startStrakerBot,
+  type StrakerPortal,
+} from '../../../src/straker/main.js';
 import type { RawOffer } from '../../../src/straker/probe.js';
 import { silentLogger, recordingPinger, idleCycle } from './testDoubles.js';
 
@@ -264,5 +268,25 @@ describe('the extractor the bot actually runs is the real parser (not a placehol
     })(captured.slice(0, 1) as never);
 
     expect(offer?.eligible).toBe(false);
+  });
+});
+
+/**
+ * FR-002 / V32 at the ORCHESTRATOR, not only inside `claim.ts`.
+ *
+ * `claimOffer` already narrows its own parameter to a post-only door, so nothing it does can
+ * enquire first. What that narrowing could not reach was the value handed to it: the poll
+ * cycle held a whole `StrakerHttpClient` and cast it down at the call site, so a diagnostic
+ * `getJson` added anywhere in the cycle would have compiled. The cast is gone and the portal
+ * carries the narrow door instead — which is the difference between a rule to remember and a
+ * shape with nothing to break it with.
+ */
+type _PortalClientIsClaimOnly = keyof StrakerPortal['client'] extends 'postJson' ? true : never;
+
+describe('the portal hands the cycle a claim door, not a client (FR-002, V32)', () => {
+  it('keeps the compile-time lock visible in the run', () => {
+    // The type above is the assertion; `npm run typecheck` is what enforces it.
+    const lock: _PortalClientIsClaimOnly = true;
+    expect(lock).toBe(true);
   });
 });

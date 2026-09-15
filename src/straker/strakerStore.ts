@@ -28,8 +28,11 @@
  */
 
 import type Database from 'better-sqlite3';
+import { basename } from 'node:path';
 import { openSqliteWithQuarantine } from '../shared/sqliteOpen.js';
+import type { TrackedOffer, TrackerState } from './offerTracker.js';
 import { STRAKER_OUTBOX_CHANNELS, STRAKER_OUTBOX_STATUSES } from './outbox.js';
+import type { StrakerEnqueueResult, StrakerOutbox } from './outbox.js';
 import { CLAIM_OUTCOMES, SKIP_REASONS } from './outcomePolicy.js';
 import type { ClaimOutcome, EndedOfferSighting, OfferSighting, SkipReason } from './types.js';
 
@@ -249,7 +252,101 @@ export function openStrakerDatabase(stateDir: string, nowMs: number): OpenStrake
     nowIso: new Date(nowMs).toISOString(),
     migrate,
     isLogicError: (err) => err instanceof StrakerSchemaError,
+    isCorruption: isStrakerCorruption,
   });
+}
+
+/**
+ * Which failures mean this file is genuinely broken — and, the part that earns the
+ * function, which ones do not.
+ *
+ * Straker's daily ceiling is derived entirely from held work: `ledger.ts` sums
+ * `heldWork()` on every read and keeps no counter to fall back on. So a database replaced
+ * by an empty one does not announce itself as a failure; it reads as *"the team holds
+ * nothing today"*, every offer then fits under the ceiling, and the bot claims past
+ * capacity all day looking perfectly healthy. Quarantining is therefore not the safe
+ * default here that it is for the XTM bot, whose ceiling does not come from its database
+ * the same way.
+ *
+ * Only two answers survive that: the disk image is malformed, or the file is not a SQLite
+ * database at all. `SQLITE_CORRUPT` is matched as a prefix because SQLite reports the
+ * family through extended codes (`_INDEX`, `_VTAB`, `_SEQUENCE`), and a corrupt index is
+ * still corruption.
+ *
+ * **Deliberately narrower than the list in `src/state/db.ts`**, which also names
+ * `SQLITE_CANTOPEN` and the `SQLITE_IOERR` family. That list answers a different question
+ * from inside `backfillProjectQualifiedKey` — "is this my own migration bug, or anything
+ * else?" — where routing the unknown onward to the quarantine is the cautious move. Here
+ * the question is "is this file definitely broken?", and caution points the other way:
+ * `SQLITE_CANTOPEN` at open time is a path, a permission or a handle limit, and
+ * `SQLITE_IOERR` is a disk that failed a read, neither of which is evidence about the
+ * bytes. Refusing to start is recoverable in the time it takes to fix an ACL. Destroying
+ * the only record of work the team already owns is not.
+ *
+ * Reads `err.code`, the string `better-sqlite3` puts on its `SqliteError`, the same way
+ * `backfillProjectQualifiedKey` discriminates. Anything that is not an object with a string
+ * `code` — a bare throw, a string, null — is not evidence of corruption either, and total:
+ * this runs inside a catch block, where throwing would turn a recoverable failure into a
+ * crash on the error path itself.
+ */
+export function isStrakerCorruption(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const { code } = err as { code?: unknown };
+  if (typeof code !== 'string') return false;
+  return code.startsWith('SQLITE_CORRUPT') || code === 'SQLITE_NOTADB';
+}
+
+/** Just the part of the outbox this needs, so the coordinator can hand over its real one
+ *  without this file depending on the whole class — `LedgerStore` in `ledger.ts` is the
+ *  same shape for the same reason. */
+export type QuarantineAlertSink = Pick<StrakerOutbox, 'enqueue'>;
+
+/**
+ * Turn a quarantine into something a human will actually see.
+ *
+ * A quarantine is the one startup outcome that changes what the bot will *do* for the rest
+ * of the day: the held set is gone with the file, so the ledger reads zero committed work
+ * and the ceiling stops holding. Reported as a log line that is a single `error` in a file
+ * nobody watches while the bot runs over its ceiling looking healthy. Queued here instead,
+ * on the operations channel on-call already reads, in the same durable table as every other
+ * outcome.
+ *
+ * Returns `null` on a healthy open so the coordinator can call it unconditionally, and
+ * otherwise whatever the outbox made of it — `already_pending` on a repeated start, because
+ * the event is keyed on the quarantined copy's stamped name: a bot in a restart loop raises
+ * one alert about one file, while a second, genuinely new quarantine gets its own.
+ *
+ * **Durable is not yet delivered.** Straker has no dispatcher until Phase 4, so this row
+ * sits `pending` until one exists to drain it. That is still strictly better than a log
+ * line — the alert is in the queue, it is idempotent, and it will go out when the
+ * dispatcher lands rather than having to be noticed retrospectively. One caveat worth
+ * knowing: it is durable in the *fresh* database, so a subsequent quarantine would move it
+ * aside along with everything else.
+ */
+export function enqueueQuarantineAlert(
+  outbox: QuarantineAlertSink,
+  opened: Pick<OpenStrakerDbResult, 'recoveredFromCorruption' | 'corruptCopyPath'>,
+  nowMs: number,
+): StrakerEnqueueResult | null {
+  if (!opened.recoveredFromCorruption) return null;
+  // A quarantine that cannot name its copy is stranger than one that can, not quieter: the
+  // ceiling is empty either way, so the alert goes out either way.
+  const corruptCopyPath = opened.corruptCopyPath ?? 'unknown';
+  return outbox.enqueue(
+    `db_quarantined:${basename(corruptCopyPath)}`,
+    'alerts',
+    JSON.stringify({
+      kind: 'db_quarantined',
+      corruptCopyPath,
+      heldWorkLost: true,
+      detail:
+        'the Straker state file was unusable and has been moved aside; the record of work ' +
+        'the team already holds went with it, so the daily ceiling now reads as zero ' +
+        'committed capacity and every offer will fit until reconciliation restores the ' +
+        'held set. Check the quarantined copy before restarting.',
+    }),
+    nowMs,
+  );
 }
 
 function migrate(db: StrakerDB): void {
@@ -298,19 +395,75 @@ export interface StoredSighting extends OfferSighting {
   readonly notFoundAtMs: number | null;
 }
 
-/** One recorded event about one offer. Deduplicated on `objId` + `eventType` (FR-014). */
-export interface OfferEvent {
+/** Every event names its offer and when it happened. Deduplicated on `objId` + `eventType`
+ *  (FR-014): one offer legitimately produces several, and identity alone would collapse them. */
+interface OfferEventCommon {
   readonly objId: string;
-  readonly eventType: OfferEventType;
-  /** Set for `claim` and `recovery`, null otherwise. */
-  readonly outcome: ClaimOutcome | null;
-  /** Set for `skip`, null otherwise. */
-  readonly skipReason: SkipReason | null;
-  /** Raw word count (`STRAKER_EFFORT_UNIT`); null when the payload carried none — which
-   *  is itself a skip reason that alerts (FR-023a), not a value to invent. */
+  readonly occurredAtMs: number;
+}
+
+/** The two numbers the decision was made on, carried by the events that had a decision to
+ *  make. Null when the payload carried none — itself a skip reason that alerts (FR-023a),
+ *  never a value to invent. */
+interface OfferEventWork {
   readonly effortWords: number | null;
   readonly deadlineMs: number | null;
-  readonly occurredAtMs: number;
+}
+
+/** A claim, or the reconciliation that later settled one. Both say what it produced. */
+export interface ClaimEvent extends OfferEventCommon, OfferEventWork {
+  readonly eventType: 'claim' | 'recovery';
+  readonly outcome: ClaimOutcome;
+}
+
+/** An offer passed over, and the rule that passed it over (FR-010). */
+export interface SkipEvent extends OfferEventCommon {
+  readonly eventType: 'skip';
+  readonly skipReason: SkipReason;
+}
+
+/** The offer was listed. No outcome and no reason — a note that it existed. */
+export interface SightingEvent extends OfferEventCommon, OfferEventWork {
+  readonly eventType: 'sighting';
+}
+
+/**
+ * One recorded event about one offer.
+ *
+ * A union rather than one flat record, because the table has enforced exactly this since
+ * the first migration and the type did not:
+ *
+ * ```sql
+ * CHECK ((outcome IS NOT NULL)     = (event_type IN ('claim', 'recovery')))
+ * CHECK ((skip_reason IS NOT NULL) = (event_type = 'skip'))
+ * ```
+ *
+ * With `outcome` and `skipReason` nullable on every variant, a skip carrying `won` — or a
+ * claim carrying no outcome at all — compiled, and then threw `SQLITE_CONSTRAINT` at the
+ * write. That write is the one inside the per-claim transaction, *after* the portal has
+ * irreversibly committed the work: the worst possible moment to find out. The union moves
+ * the same rule to the compiler, where it costs nothing and fires before the claim.
+ */
+export type OfferEvent = ClaimEvent | SkipEvent | SightingEvent;
+
+/**
+ * The four nullable columns, derived from the variant instead of being carried by all of
+ * them. This is the only place the flat row shape is reconstructed, and it is exhaustive:
+ * a new event type added to {@link OFFER_EVENT_TYPES} without a variant here fails to
+ * compile rather than silently writing nulls.
+ */
+function eventColumns(event: OfferEvent): {
+  readonly outcome: ClaimOutcome | null;
+  readonly skipReason: SkipReason | null;
+  readonly effortWords: number | null;
+  readonly deadlineMs: number | null;
+} {
+  if (event.eventType === 'skip') {
+    return { outcome: null, skipReason: event.skipReason, effortWords: null, deadlineMs: null };
+  }
+  const work = { effortWords: event.effortWords, deadlineMs: event.deadlineMs };
+  if (event.eventType === 'sighting') return { outcome: null, skipReason: null, ...work };
+  return { outcome: event.outcome, skipReason: null, ...work };
 }
 
 /** Work the team holds on this portal — the ledger's only source (data-model §5). */
@@ -415,6 +568,41 @@ export class StrakerStore {
     return rows.map(toSighting);
   }
 
+  /**
+   * The tracker's state, rebuilt from these rows — what a restarting bot resumes from.
+   *
+   * The in-memory tracker and this table are twins: every row is keyed `(obj_id, sighting)`
+   * and the sighting number is the tracker's own count. Boot the tracker empty and the
+   * count restarts at 1 for an offer already stored at 2, so the next `recordSighting`
+   * does not open a new appearance — it reaches back into a **closed** one and pushes its
+   * `last_seen_at_ms` past the `not_found_at_ms` beside it, a row that cannot be true. The
+   * appearance that really was open is then never closed by anything, because the tracker
+   * no longer knows it exists. SC-000's whole measurement is these rows, and a restart
+   * mid-day is ordinary — a deploy is one.
+   *
+   * Two queries because the tracker needs two different things: which appearances are open
+   * *now*, and how many times each offer has ever appeared. The second must count closed
+   * appearances too, or an offer that vanished before the restart and came back after it
+   * would be numbered 1 again, straight on top of its own history.
+   */
+  trackerState(): TrackerState {
+    const live = this.liveSightings().map(
+      (s): TrackedOffer => ({
+        objId: s.objId,
+        firstSeenAtMs: s.firstSeenAtMs,
+        lastSeenAtMs: s.lastSeenAtMs,
+        sighting: s.sighting,
+      }),
+    );
+    const counts = this.db
+      .prepare('SELECT obj_id, MAX(sighting) AS n FROM offer_sightings GROUP BY obj_id')
+      .all() as { obj_id: string; n: number }[];
+    return {
+      live,
+      sightingsByObjId: counts.map((row): readonly [string, number] => [row.obj_id, row.n]),
+    };
+  }
+
   /** Every sighting of one offer, oldest first. */
   sightingsOf(objId: string): StoredSighting[] {
     const rows = this.db
@@ -439,6 +627,7 @@ export class StrakerStore {
    */
   recordEvent(event: OfferEvent): void {
     const objId = requireIdentity(event.objId, `a ${event.eventType} event`);
+    const cols = eventColumns(event);
     // Read and write in one transaction so the guard cannot be stepped over by a write
     // landing between the two. Nested inside a caller's transaction this becomes a
     // savepoint, so a cycle-wide rollback still takes it with it.
@@ -447,8 +636,8 @@ export class StrakerStore {
         .prepare('SELECT outcome FROM offer_events WHERE obj_id = ? AND event_type = ?')
         .get(objId, event.eventType) as { outcome: ClaimOutcome | null } | undefined;
 
-      if (stored !== undefined && isSettled(stored.outcome) && stored.outcome !== event.outcome) {
-        throw new OutcomeOverwriteError(objId, event.eventType, stored.outcome, event.outcome);
+      if (stored !== undefined && isSettled(stored.outcome) && stored.outcome !== cols.outcome) {
+        throw new OutcomeOverwriteError(objId, event.eventType, stored.outcome, cols.outcome);
       }
 
       this.db
@@ -466,10 +655,10 @@ export class StrakerStore {
         .run(
           objId,
           event.eventType,
-          event.outcome,
-          event.skipReason,
-          event.effortWords,
-          event.deadlineMs,
+          cols.outcome,
+          cols.skipReason,
+          cols.effortWords,
+          cols.deadlineMs,
           event.occurredAtMs,
         );
     })();
@@ -617,14 +806,33 @@ function toSighting(r: SightingRow): StoredSighting {
   };
 }
 
+/**
+ * One stored row back into the variant it belongs to.
+ *
+ * The two throws can only fire against a row the table's own CHECKs would have refused —
+ * a database written by an older build, or edited by hand. Reading such a row as a valid
+ * event of the other kind is how a claim with no recorded outcome becomes indistinguishable
+ * from an offer nobody claimed, so it fails loud instead.
+ */
 function toEvent(r: EventRow): OfferEvent {
-  return {
-    objId: r.obj_id,
-    eventType: r.event_type,
-    outcome: r.outcome,
-    skipReason: r.skip_reason,
-    effortWords: r.effort_words,
-    deadlineMs: r.deadline_ms,
-    occurredAtMs: r.occurred_at_ms,
-  };
+  const common = { objId: r.obj_id, occurredAtMs: r.occurred_at_ms };
+  if (r.event_type === 'skip') {
+    if (r.skip_reason === null) {
+      throw new StrakerSchemaError(
+        `offer ${r.obj_id}: a stored skip row names no reason — the table's CHECK would have ` +
+          'refused it, so this database was not written by this schema',
+      );
+    }
+    return { ...common, eventType: 'skip', skipReason: r.skip_reason };
+  }
+  const work = { effortWords: r.effort_words, deadlineMs: r.deadline_ms };
+  if (r.event_type === 'sighting') return { ...common, eventType: 'sighting', ...work };
+  if (r.outcome === null) {
+    throw new StrakerSchemaError(
+      `offer ${r.obj_id}: a stored ${r.event_type} row carries no outcome — the claim behind ` +
+        'it cannot be taken back, and a row that does not say what it produced cannot be read ' +
+        'as one that produced nothing',
+    );
+  }
+  return { ...common, eventType: r.event_type, outcome: r.outcome, ...work };
 }

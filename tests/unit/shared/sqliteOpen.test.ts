@@ -203,3 +203,121 @@ describe('failures that must NOT be treated as corruption', () => {
     expect(readdirSync(dir).filter((f) => f.includes('.corrupt-'))).toEqual([]);
   });
 });
+
+describe('which failures count as corruption — narrowed by the caller, never by default', () => {
+  /** A `better-sqlite3` failure as a caller actually receives one: an Error carrying a
+   *  `code` string. That string is the only thing separating "the bytes are wrong" from
+   *  "someone else has the file open", so it is what a predicate reads. */
+  const sqliteError = (code: string): Error =>
+    Object.assign(new Error(`simulated ${code}`), { code });
+
+  /** Fails the FIRST migration and succeeds after, which is the real shape: whatever was
+   *  wrong with the stored file is not wrong with the fresh one. A migration that failed
+   *  every time would make every test here pass for the wrong reason — the second
+   *  `migrate` in the quarantine path would throw and nothing would be proven. */
+  const failsFirstWith = (err: Error): ((db: Database.Database) => void) => {
+    let failed = false;
+    return (db) => {
+      if (!failed) {
+        failed = true;
+        throw err;
+      }
+      stampMigration(db);
+    };
+  };
+
+  /** An arbitrary caller's idea of corruption. Arbitrary on purpose: the shared helper
+   *  must hold no opinion of its own about which codes mean a broken file. */
+  const onlyMalformed = (err: unknown): boolean =>
+    (err as { code?: string }).code === 'SQLITE_NOTADB';
+
+  /** Call it expecting a throw, and keep any handle it returned instead so a failing
+   *  assertion reads as the assertion rather than as EBUSY in the cleanup. */
+  function errorFrom(s: SqliteOpenSpec): unknown {
+    try {
+      openDbs.push(openSqliteWithQuarantine(s).db);
+      return null;
+    } catch (err) {
+      return err;
+    }
+  }
+
+  it('quarantines every non-logic failure when the caller names no predicate', () => {
+    // SC-005: `src/state/db.ts` passes no predicate, and the live XTM bot has run on this
+    // behaviour for 18 days with 0 restarts. Narrowing by DEFAULT would change it silently,
+    // which is the one thing this opt-in must not do. Mutating the implementation to apply
+    // a strict rule unconditionally fails here.
+    const dir = tempDir();
+    seedRejectableFile(dir);
+
+    const opened = open(spec(dir, { migrate: failsFirstWith(sqliteError('SQLITE_BUSY')) }));
+
+    expect(opened.recoveredFromCorruption).toBe(true);
+    expect(existsSync(opened.corruptCopyPath ?? '')).toBe(true);
+  });
+
+  it('propagates a failure the caller does not call corruption, leaving the file untouched', () => {
+    // The Critical finding itself. A locked file, a full disk, an ACL change after a
+    // Windows update — none of them says the bytes are wrong, and renaming a good database
+    // away on one destroys the only record of what has already been done. Failing to start
+    // is recoverable; that is not. Deleting the `isCorruption` guard fails here.
+    const dir = tempDir();
+    seedRejectableFile(dir);
+
+    const err = errorFrom(
+      spec(dir, {
+        migrate: failsFirstWith(sqliteError('SQLITE_BUSY')),
+        isCorruption: onlyMalformed,
+      }),
+    );
+
+    expect(err).toMatchObject({ code: 'SQLITE_BUSY' });
+    expect(readdirSync(dir).filter((f) => f.includes('.corrupt-'))).toEqual([]);
+    const survivor = new Database(join(dir, FILE));
+    openDbs.push(survivor);
+    expect(survivor.prepare('SELECT k FROM marker').get()).toEqual({ k: 'history' });
+  });
+
+  it('still quarantines the failures the caller DOES call corruption', () => {
+    // The other half of the same switch: narrowing must not become refusing. A predicate
+    // wired so that nothing is ever corruption fails here — and the bot would then refuse
+    // to start, forever, on a file that genuinely is broken.
+    const dir = tempDir();
+    seedRejectableFile(dir);
+
+    const opened = open(
+      spec(dir, {
+        migrate: failsFirstWith(sqliteError('SQLITE_NOTADB')),
+        isCorruption: onlyMalformed,
+      }),
+    );
+
+    expect(opened.recoveredFromCorruption).toBe(true);
+    // Genuinely fresh — it carries the migration's own stamp and nothing else. The seeded
+    // history went to the quarantined copy, which is where it must still be readable.
+    expect(opened.db.prepare('SELECT k FROM marker').all()).toEqual([{ k: 'migrated' }]);
+    const quarantined = new Database(opened.corruptCopyPath ?? '');
+    openDbs.push(quarantined);
+    expect(quarantined.prepare('SELECT k FROM marker').get()).toEqual({ k: 'history' });
+  });
+
+  it('asks isLogicError first, so our own bug is never re-read as a broken file', () => {
+    // Both predicates can say yes about one error, and then the ORDER is the entire answer.
+    // PR #23's lesson outranks the new one: a logic error keeps the database whatever code
+    // rode along with it. Swapping the two guards fails here.
+    const dir = tempDir();
+    seedRejectableFile(dir);
+
+    const err = errorFrom(
+      spec(dir, {
+        migrate: failsFirstWith(
+          Object.assign(new LogicError('our migration is wrong'), { code: 'SQLITE_NOTADB' }),
+        ),
+        isCorruption: onlyMalformed,
+      }),
+    );
+
+    expect(err).toBeInstanceOf(LogicError);
+    expect(readdirSync(dir).filter((f) => f.includes('.corrupt-'))).toEqual([]);
+  });
+});

@@ -21,12 +21,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import pino from 'pino';
-import type {
-  DestinationStream,
-  Logger as PinoLogger,
-  LoggerOptions,
-  TransportSingleOptions,
-} from 'pino';
+import type { DestinationStream, LoggerOptions, TransportSingleOptions } from 'pino';
 
 /** Days of history kept on disk — Constitution V's retention minimum. */
 export const LOG_RETENTION_FILES = 14;
@@ -69,11 +64,31 @@ export interface RollingLoggerSpec {
  */
 export type RollingTransportFactory = (options: TransportSingleOptions) => DestinationStream;
 
+/**
+ * A sink writing under the policy above — deliberately narrower than the pino logger that
+ * implements it.
+ *
+ * This used to be `pino.Logger`, which handed both bots pino's whole surface and made pino a
+ * type dependency of everything downstream. The problem is not breadth for its own sake: the
+ * policy this module exists to hold is exactly what that surface lets a caller step around.
+ * `child({ redact: [] })` returns a logger outside the redaction; `level` is settable at
+ * runtime; the transport handle is reachable. Narrowing removes the means rather than
+ * adding a rule nobody would think to check, and the two bots call nothing else.
+ */
+export interface RollingSink {
+  info(fields: Record<string, unknown>, msg?: string): void;
+  warn(fields: Record<string, unknown>, msg?: string): void;
+  error(fields: Record<string, unknown>, msg?: string): void;
+  /** Drain the worker-thread transport. Always through `flushWithCap`, never bare: a stuck
+   *  worker must not be able to keep the process alive. */
+  flush(cb: (err?: Error) => void): void;
+}
+
 /** Build a pino logger writing to a daily-rotating file under the shared policy. */
 export function createRollingLogger(
   spec: RollingLoggerSpec,
   makeTransport: RollingTransportFactory = pino.transport,
-): PinoLogger {
+): RollingSink {
   mkdirSync(spec.logDir, { recursive: true });
 
   const destination = makeTransport({

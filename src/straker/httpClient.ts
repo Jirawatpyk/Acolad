@@ -296,7 +296,7 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
 
     if (!response.ok) {
       const error = new StrakerHttpError(response.status, path, await bodyExcerpt(response));
-      return { ok: false, error, retryable: isTransientStatus(response.status) };
+      return { ok: false, error, retryable: isIndeterminateStatus(response.status) };
     }
     try {
       return { ok: true, value: (await response.json()) as T };
@@ -410,16 +410,40 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
 }
 
 /**
- * Which statuses are worth asking again about. 5xx is a server fault and 408 is the portal
- * saying it was too slow — both are FR-019b's "unreachable, slow, or returning a server
- * fault". Everything else, 4xx included, is an answer rather than a failure to answer.
+ * Statuses after which we do not know whether the request took effect. 5xx is a server
+ * fault and 408 is the portal saying it was too slow — both are FR-019b's "unreachable,
+ * slow, or returning a server fault". Everything else, 4xx included, is an answer rather
+ * than a failure to answer.
  *
  * **429 is deliberately absent.** It is a budget signal, and the graduated budget response
  * (FR-019, T064/T065) owns it; retrying one here would spend more of the very allowance
  * the portal has just said is running out.
+ *
+ * Exported because the claim path needs the same question and used to carry its own copy
+ * of the answer under a second name. The two draw **opposite conclusions** from it — the
+ * read asks again, the claim never does, because a second attempt at a mutation can commit
+ * the same work twice (R7) — but the question is one question, and two copies of it are two
+ * things to keep in step.
  */
-function isTransientStatus(status: number): boolean {
+export function isIndeterminateStatus(status: number): boolean {
   return status >= 500 || status === 408;
+}
+
+/**
+ * The portal saying this session is no longer valid.
+ *
+ * Here rather than at the call site because DC-1 requires a portal's own codes to be read at
+ * the edge and named in our vocabulary before they reach anything that decides — and the
+ * transport is the edge, being where {@link StrakerHttpError} is minted. `pollCycle.ts` used
+ * to test `err.status === 401` itself, which put an HTTP number in the orchestrator.
+ *
+ * Narrow on purpose. A 403 is a barred account, and contract §4a exists because the two
+ * arrive as the same kind of refusal on the same authenticated request: reading a
+ * suspension as an expiry turns it into a sign-in storm against a portal that has already
+ * said no. Anything that never became an HTTP reply is not an expiry either.
+ */
+export function isSessionExpired(error: unknown): boolean {
+  return error instanceof StrakerHttpError && error.status === 401;
 }
 
 /**

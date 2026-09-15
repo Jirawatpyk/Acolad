@@ -15,11 +15,8 @@ import { Heartbeat, type HeartbeatPinger } from '../monitoring/heartbeat.js';
 import type { Logger } from '../monitoring/logger.js';
 import { acquireSingleInstanceLock } from '../runtime/singleInstance.js';
 import { loadStrakerBotConfig, type StrakerBotConfig } from './config.js';
-import {
-  createHttpClient,
-  type StrakerHttpClient,
-  type StrakerTransportWarning,
-} from './httpClient.js';
+import type { ClaimDoor } from './claim.js';
+import { createHttpClient, type StrakerTransportWarning } from './httpClient.js';
 import { listOpenOffers } from './offersApi.js';
 import {
   applySnapshot,
@@ -33,7 +30,7 @@ import { StrakerLedger } from './ledger.js';
 import { StrakerOutbox } from './outbox.js';
 import { createOfferExtractor } from './offerParse.js';
 import { createStrakerPollCycle } from './pollCycle.js';
-import { openStrakerDatabase, StrakerStore } from './strakerStore.js';
+import { enqueueQuarantineAlert, openStrakerDatabase, StrakerStore } from './strakerStore.js';
 import { openSession, type StrakerSession } from './session.js';
 import type { RawOffer } from './probe.js';
 
@@ -202,7 +199,17 @@ export async function startStrakerBot(deps: StrakerBotDeps): Promise<StrakerBotH
  * sighting transition. None of them is reimplemented here.
  */
 export interface StrakerPortal {
-  readonly client: StrakerHttpClient;
+  /**
+   * The claim door, and nothing else — deliberately narrower than the `StrakerHttpClient`
+   * `createStrakerPortal` builds.
+   *
+   * `claimOffer` already narrows its own parameter, so nothing *inside* it can enquire
+   * first (FR-002, V32). What that could not reach was the value handed to it: the poll
+   * cycle held a whole client and cast it down at the call site, so a diagnostic `getJson`
+   * added anywhere in the cycle would have compiled. Reads belong to `listOpenOffers`
+   * below, which is the only read the bot makes.
+   */
+  readonly client: ClaimDoor;
   /** Signs in and reads the vendor identity back from the portal every time (FR-022) —
    *  never pinned in configuration, because it changes under impersonation or an account
    *  switch and a stale one would poll another vendor's work. */
@@ -238,7 +245,7 @@ export function createStrakerPortal(
     // capture probe unchanged — and passed HERE, because a deadline the composition root
     // never hands over is a deadline the running bot does not have. That gap has already
     // happened once in this feature with the retrying read door; the wiring is asserted in
-    // `tests/integration/straker/sightingCycle.test.ts` so it cannot happen a third time.
+    // `tests/integration/straker/botWiring.test.ts` so it cannot happen a third time.
     timeoutMs: REQUEST_TIMEOUT_MS,
     // Kept separate from `onAlert` deliberately: that handler logs at error level with a
     // message about the retry cap, so routing a missing budget header through it would
@@ -304,6 +311,98 @@ export function createSightingTracker(
   };
 }
 
+// --- The composition itself, as a value rather than as statements inside main() ---------
+
+/** Seams the assembly tests use. Production passes none of them. */
+export interface StrakerAssemblyDeps {
+  readonly portal?: StrakerPortal;
+  readonly openDatabase?: typeof openStrakerDatabase;
+  readonly now?: () => number;
+}
+
+export interface StrakerAssembly {
+  readonly cycle: StrakerCycle;
+  readonly store: StrakerStore;
+  readonly outbox: StrakerOutbox;
+  /**
+   * Where the previous state file was renamed to, when it could not be opened — `null` on
+   * every ordinary start. Returned rather than reported here: what a quarantine deserves is
+   * the entry point's decision, and it is a different decision for a bot whose daily ceiling
+   * is derived entirely from held work than for one that keeps a counter.
+   */
+  readonly quarantinedCopyPath: string | null;
+  /** Releases the database handle. The long-running bot never calls it; a test does. */
+  close(): void;
+}
+
+/**
+ * Everything between the configuration and the startable bot.
+ *
+ * Extracted out of `main()` because `main()` is unreachable from a test — it runs only
+ * behind an env-guarded module-level call — and a reviewer showed twice what that costs: the
+ * offer extractor could be replaced by `() => []`, and the ledger's ceiling by a literal,
+ * with the whole suite green and `tsc` clean. Neither is logic; both are **wiring**, a value
+ * carried from configuration to the component that consumes it, and wiring is precisely what
+ * a unit test of either end cannot see. Three capabilities in this feature have now shipped
+ * built, tested and unreachable for that reason.
+ *
+ * So the composition is a function returning a value, and
+ * `tests/integration/straker/botAssembly.test.ts` drives the result against payloads read
+ * off disk: every line below is asserted by its effect on a real cycle.
+ */
+export function assembleStrakerBot(
+  cfg: StrakerBotConfig,
+  logger: Logger,
+  deps: StrakerAssemblyDeps = {},
+): StrakerAssembly {
+  const now = deps.now ?? Date.now;
+  const opened = (deps.openDatabase ?? openStrakerDatabase)(cfg.stateDir, now());
+  const store = new StrakerStore(opened.db);
+  const outbox = new StrakerOutbox(opened.db);
+  // Here rather than in `main()`, despite the decision being the entry point's: a quarantine
+  // is the one startup outcome that silently changes what the bot does all day — the held
+  // set went with the file, so the ceiling reads zero committed work and every offer fits —
+  // and `main()` is the one place a test cannot reach. Returns null on a healthy open, so
+  // it is called unconditionally. `main()` still logs it; this is what a human sees.
+  enqueueQuarantineAlert(outbox, opened, now());
+
+  const cycle = createStrakerPollCycle({
+    portal: deps.portal ?? createStrakerPortal(cfg, logger),
+    // Resumed from the store, not started empty. The tracker's sighting count is what keys
+    // every `offer_sightings` row, so a tracker that boots at zero writes back into
+    // appearances a previous run already closed — see `StrakerStore.trackerState`.
+    tracker: createSightingTracker(store.trackerState()),
+    store,
+    ledger: new StrakerLedger(store, cfg.maxWordsPerDay, {
+      hoursStartMin: cfg.hoursStartMin,
+      workdays: cfg.workdays,
+    }),
+    outbox,
+    logger,
+    settings: {
+      throughputWordsPerHour: cfg.throughputWordsPerHour,
+      hoursStartMin: cfg.hoursStartMin,
+      hoursEndMin: cfg.hoursEndMin,
+      workdays: cfg.workdays,
+    },
+    extractOffers: createOfferExtractor({
+      excludedLanguagePairs: cfg.excludedLanguagePairs,
+      logger,
+    }),
+    ...(deps.now === undefined ? {} : { now: deps.now }),
+  });
+
+  return {
+    cycle,
+    store,
+    outbox,
+    quarantinedCopyPath: opened.recoveredFromCorruption
+      ? (opened.corruptCopyPath ?? '(path unknown)')
+      : null,
+    close: () => opened.db.close(),
+  };
+}
+
 /** Long-running 24/7 entry point under PM2 (`straker.config.cjs`). */
 async function main(): Promise<void> {
   // Called HERE rather than at module scope on purpose: importing this module in a test
@@ -318,54 +417,37 @@ async function main(): Promise<void> {
     logger.warn({ module: 'heartbeat', action, outcome: 'failed' }, String(e)),
   );
 
-  const portal = createStrakerPortal(cfg, logger);
-
-  const opened = openStrakerDatabase(cfg.stateDir, Date.now());
-  if (opened.recoveredFromCorruption) {
+  const assembly = assembleStrakerBot(cfg, logger);
+  if (assembly.quarantinedCopyPath !== null) {
     logger.error(
       {
         module: 'main',
         action: 'startup',
         outcome: 'db_quarantined',
-        path: opened.corruptCopyPath,
+        path: assembly.quarantinedCopyPath,
       },
       'the Straker state file was unusable and was quarantined — this run starts cold, and any work held before it is known only to the portal until reconciliation runs',
     );
   }
-  const store = new StrakerStore(opened.db);
 
-  const cycle = createStrakerPollCycle({
-    portal,
-    tracker: createSightingTracker(),
-    store,
-    ledger: new StrakerLedger(store, cfg.maxWordsPerDay, {
-      hoursStartMin: cfg.hoursStartMin,
-      workdays: cfg.workdays,
-    }),
-    outbox: new StrakerOutbox(opened.db),
-    logger,
-    settings: {
-      throughputWordsPerHour: cfg.throughputWordsPerHour,
-      hoursStartMin: cfg.hoursStartMin,
-      hoursEndMin: cfg.hoursEndMin,
-      workdays: cfg.workdays,
-    },
-    extractOffers: createOfferExtractor({
-      excludedLanguagePairs: cfg.excludedLanguagePairs,
-      logger,
-    }),
-  });
-
-  const bot = await startStrakerBot({ cfg, logger, heartbeat, cycle });
+  const bot = await startStrakerBot({ cfg, logger, heartbeat, cycle: assembly.cycle });
 
   const shutdown = (signal: string): void => {
     logger.info({ module: 'main', action: 'shutdown', signal }, 'shutdown requested');
     void bot.stop().catch((e: unknown) => console.error('[jobcatch-straker] stop failed:', e));
   };
+  // **Neither of these fires under PM2 on this host, and that is measured, not assumed.**
+  // PM2 7 on Windows delivers no POSIX signal to a daemon-spawned process — no shutdown
+  // line has ever appeared in either bot's log — and the `--shutdown-with-message` flag
+  // that would send the IPC alternative does not exist in PM2 7 either. `pm2 stop` kills
+  // the process outright, which releases the single-instance port (the OS closes the
+  // socket) but skips `stop()`, so the last buffered log lines are lost with it.
+  //
+  // They are kept because they ARE reached the other way the bot is run: Ctrl-C in a
+  // terminal, and `poll:once`-style manual runs. Registered rather than removed so that a
+  // PM2 release which does deliver signals needs no change here.
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
-  // PM2 on Windows cannot deliver POSIX signals to a daemon-spawned process; with
-  // `--shutdown-with-message` it sends an IPC message instead. Harmless if it never comes.
   process.on('message', (msg) => {
     if (msg === 'shutdown') shutdown('shutdown-message');
   });

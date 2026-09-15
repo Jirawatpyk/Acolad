@@ -23,14 +23,14 @@
 
 import type { Logger } from '../monitoring/logger.js';
 import { classifyClaim } from './claimOutcome.js';
-import { claimOffer, type ClaimDoor } from './claim.js';
+import { claimOffer } from './claim.js';
 import {
   decideClaims,
   type ClaimDecision,
   type ClaimDecisionSettings,
   type OfferForDecision,
 } from './claimDecision.js';
-import { StrakerHttpError } from './httpClient.js';
+import { isSessionExpired, StrakerHttpError } from './httpClient.js';
 import type { StrakerLedger } from './ledger.js';
 import type { StrakerCycle, StrakerPortal } from './main.js';
 import type { SightingTracker } from './main.js';
@@ -92,9 +92,11 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
         // nothing would say so.
         offers = deps.extractOffers(raw);
       } catch (err) {
-        // Only a 401 means the session expired. Dropping it on every error would turn a
+        // Asked of the transport rather than decided here: DC-1 keeps the portal's own codes
+        // at the edge, and this line used to read `err.status === 401` in the orchestrator.
+        // The narrowness is the point — dropping the session on every error would turn a
         // barred account into a sign-in storm against a portal that has already said no.
-        if (err instanceof StrakerHttpError && err.status === 401) session = null;
+        if (isSessionExpired(err)) session = null;
         deps.logger.error(
           {
             module: 'pollCycle',
@@ -153,7 +155,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       let stopClaiming = false;
       for (const decision of decisions) {
         if (decision.action !== 'claim' || stopClaiming) continue;
-        const attempt = await claimOffer(deps.portal.client as ClaimDoor, {
+        const attempt = await claimOffer(deps.portal.client, {
           vendorId,
           offerId: decision.objId,
         });
@@ -194,7 +196,6 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
               objId: decision.objId,
               eventType: 'claim',
               outcome,
-              skipReason: null,
               effortWords: decision.effortWords,
               deadlineMs: decision.deadlineMs,
               occurredAtMs: atMs,
@@ -263,10 +264,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
             deps.store.recordEvent({
               objId: decision.objId,
               eventType: 'skip',
-              outcome: null,
               skipReason: decision.reason,
-              effortWords: null,
-              deadlineMs: null,
               occurredAtMs: atMs,
             });
             if (alertsOnSkip(decision.reason)) {

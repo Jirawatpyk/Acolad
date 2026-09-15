@@ -150,7 +150,15 @@ describe('what never reaches the file', () => {
   it('writes at info and drops anything below it', () => {
     const h = harness({ fileName: 'b' });
 
-    h.logger.debug({ module: 'm', action: 'noisy' });
+    // Reached around the narrowed `RollingSink` on purpose. `debug` is not part of what the
+    // helper hands back any more, but the pino underneath still has it, and `level: 'info'`
+    // is the policy figure that decides whether a line that reaches pino gets written. This
+    // is the only place that widening is legitimate: proving the floor holds beneath the
+    // contract, rather than using a capability the contract withholds.
+    (h.logger as unknown as { debug(fields: Record<string, unknown>): void }).debug({
+      module: 'm',
+      action: 'noisy',
+    });
     expect(h.lines()).toEqual([]);
 
     h.logger.info({ module: 'm', action: 'worth-keeping' });
@@ -197,5 +205,47 @@ describe('the shutdown flush cap', () => {
     // A stuck transport must never block shutdown, and both bots cap the drain at the same
     // figure — a figure typed twice is a figure that eventually disagrees.
     expect(LOG_FLUSH_CAP_MS).toBe(500);
+  });
+});
+
+/**
+ * The shared helper hands back a **sink under the policy**, not pino.
+ *
+ * It used to return `pino.Logger`, which put pino's whole surface — `child()`, a settable
+ * `level`, `fatal`, `silent`, the transport handle — in reach of both bots and made pino a
+ * type dependency of everything downstream. The policy this module exists to hold is
+ * exactly the part a caller must not be able to step around: a `child({ redact: [] })` or a
+ * `level` raised at runtime edits it from outside. Narrowing the return type removes the
+ * means rather than adding a rule.
+ */
+type _RollingSinkIsNarrow = keyof ReturnType<typeof createRollingLogger> extends
+  | 'info'
+  | 'warn'
+  | 'error'
+  | 'flush'
+  ? true
+  : never;
+
+describe('what createRollingLogger hands back', () => {
+  it('keeps the compile-time lock on the sink visible in the run', () => {
+    // The type above is the assertion; `npm run typecheck` is what enforces it.
+    const lock: _RollingSinkIsNarrow = true;
+    expect(lock).toBe(true);
+  });
+
+  it('is still everything both bots actually call — three levels and a bounded flush', async () => {
+    const { logger: sink, lines } = harness({ fileName: 'shape' });
+
+    sink.info({ a: 1 }, 'info');
+    sink.warn({ a: 1 }, 'warn');
+    sink.error({ a: 1 }, 'error');
+
+    expect(lines().map((l) => l['msg'])).toEqual(['info', 'warn', 'error']);
+
+    await expect(
+      new Promise<void>((resolve) => {
+        sink.flush(() => resolve());
+      }),
+    ).resolves.toBeUndefined();
   });
 });

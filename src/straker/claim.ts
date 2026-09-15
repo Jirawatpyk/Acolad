@@ -38,7 +38,7 @@
  */
 
 import type { ClaimResponse } from './claimOutcome.js';
-import { StrakerHttpError } from './httpClient.js';
+import { isIndeterminateStatus, StrakerHttpError } from './httpClient.js';
 
 /**
  * The only capability this module has: one POST, no options.
@@ -158,7 +158,12 @@ export async function claimOffer(door: ClaimDoor, target: ClaimTarget): Promise<
  *   own deadline, a body that was not JSON — is **no answer** for the same reason.
  */
 function translate(target: ClaimTarget, error: unknown): ClaimAttempt {
-  if (error instanceof StrakerHttpError && !isUndetermined(error.status)) {
+  // The transport's own predicate, not a second copy of it. The read path draws the
+  // opposite conclusion from the same question — it asks again, this never does — because a
+  // second attempt at a mutation can commit the same work twice (R7). So an indeterminate
+  // status is routed to `unknown` and left to reconciliation (FR-016a): the outcome that
+  // alerts once and is repaired, rather than one that closes a question nobody can answer.
+  if (error instanceof StrakerHttpError && !isIndeterminateStatus(error.status)) {
     return {
       offerId: target.offerId,
       response: { kind: 'rejected', signal: rejectionSignal(error.status) },
@@ -175,19 +180,6 @@ function translate(target: ClaimTarget, error: unknown): ClaimAttempt {
     followUp: 'none',
     detail: describeError(error),
   };
-}
-
-/**
- * Statuses after which we do not know whether the claim landed.
- *
- * The same predicate `httpClient.isTransientStatus` uses for the READ path, and the
- * opposite conclusion is drawn from it: the read asks again, the claim never does. A 5xx on
- * a mutation endpoint is precisely the case where a second attempt could commit the same
- * work twice, so it is routed to `unknown` and left for reconciliation (FR-016a) — the
- * outcome that alerts once and is repaired, rather than one that closes the question.
- */
-function isUndetermined(status: number): boolean {
-  return status >= 500 || status === 408;
 }
 
 /**

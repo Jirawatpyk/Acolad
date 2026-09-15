@@ -30,12 +30,18 @@
  *
  * ## The assumptions encoded here, all four of them
  *
- * 1. **`due_at` is Bangkok.** The payload carries no zone (`2026-09-15T23:20:00`) and the
- *    portal's own zone is unknown — Straker is a New Zealand company, so this could be off by
- *    five hours. It is pinned in {@link STRAKER_DEADLINE_ZONE}, overridable per call, never
- *    left to a bare `Date.parse` (which would silently take the host's zone: Bangkok on the
- *    office machine, UTC in CI). `createOfferExtractor` states it in the log at startup so it
- *    is visible at runtime and not only in this comment.
+ * 1. **`due_at` is Bangkok** — and this is the assumption whose error runs the wrong way.
+ *    The payload carries no zone (`2026-09-15T23:20:00`) and the portal's own is unknown;
+ *    Straker is a New Zealand company, and NZST is UTC+12 against Bangkok's +7. If the
+ *    portal means New Zealand, every deadline here is read **five hours later than it is**
+ *    (six under NZDT), so the bot believes it has five hours it does not have: it accepts
+ *    work the team cannot finish and misses the deadline, rather than passing over work it
+ *    could have taken. Both errors are possible; only this one costs a delivery. Pinned in
+ *    {@link STRAKER_DEADLINE_ZONE}, overridable per call, never left to a bare `Date.parse`
+ *    (which would silently take the host's zone: Bangkok on the office machine, UTC in CI).
+ *    `createOfferExtractor` states it in the log at startup so it is visible at runtime and
+ *    not only in this comment. **RP-4 settles it on the first real claim** — an assigned job
+ *    shows its deadline in the portal UI, which is the observation that decides.
  * 2. **Effort is the raw `words` count** (FR-009), not `total_unit` and not `budget`. The
  *    sample settles that `words` is genuine: 4 words against 0.010 hours at $18/hour is a
  *    coherent pair.
@@ -71,7 +77,9 @@ export interface DeadlineZone {
  * equally zone-less and is resolved by pinning `TZ=Asia/Bangkok` (both PM2 configs do) — but
  * pins it *in the code* rather than in the environment, so a CI run in UTC and the office
  * machine agree. **If Straker turns out to mean New Zealand time, this constant is the one
- * line that changes.**
+ * line that changes** — and until it is confirmed, every deadline is being read in the
+ * optimistic direction: five hours later than a New Zealand `due_at` would mean, which is
+ * five hours of capacity the team does not have. See assumption 1 in the module docstring.
  */
 export const STRAKER_DEADLINE_ZONE: DeadlineZone = { id: 'Asia/Bangkok', utcOffset: '+07:00' };
 

@@ -10,11 +10,20 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDatabase } from '../../../src/state/db.js';
+import { StrakerOutbox } from '../../../src/straker/outbox.js';
 import { CLAIM_OUTCOMES, SKIP_REASONS } from '../../../src/straker/outcomePolicy.js';
 import type { EndedOfferSighting, OfferSighting } from '../../../src/straker/types.js';
 import {
@@ -23,9 +32,14 @@ import {
   STRAKER_DB_FILENAME,
   StrakerSchemaError,
   StrakerStore,
+  enqueueQuarantineAlert,
+  isStrakerCorruption,
   openStrakerDatabase,
   type NewHold,
+  type ClaimEvent,
   type OfferEvent,
+  type SightingEvent,
+  type SkipEvent,
   type StrakerDB,
 } from '../../../src/straker/strakerStore.js';
 
@@ -92,13 +106,38 @@ const ended = (over: Partial<EndedOfferSighting> = {}): EndedOfferSighting => {
   };
 };
 
-const event = (over: Partial<OfferEvent> = {}): OfferEvent => ({
-  objId: 'e3b0c442-98fc-1c14-9afb-f4c8996fb924',
-  eventType: 'sighting',
-  outcome: null,
-  skipReason: null,
+/**
+ * One builder per variant, because `OfferEvent` is a union: a claim carries an outcome and
+ * a skip carries a reason, and neither can be handed the other's field. The single flat
+ * builder this replaced could produce a skip with a `won` on it, which is exactly the row
+ * the table has always refused and the type now refuses too.
+ */
+const OFFER_ID = 'e3b0c442-98fc-1c14-9afb-f4c8996fb924';
+const DEADLINE_MS = Date.parse('2026-09-17T17:00:00+07:00');
+
+const claimEvent = (over: Partial<ClaimEvent> = {}): ClaimEvent => ({
+  objId: OFFER_ID,
+  eventType: 'claim',
+  outcome: 'won',
   effortWords: 1_200,
-  deadlineMs: Date.parse('2026-09-17T17:00:00+07:00'),
+  deadlineMs: DEADLINE_MS,
+  occurredAtMs: NOW_MS,
+  ...over,
+});
+
+const skipEvent = (over: Partial<SkipEvent> = {}): SkipEvent => ({
+  objId: OFFER_ID,
+  eventType: 'skip',
+  skipReason: 'ceiling_reached',
+  occurredAtMs: NOW_MS,
+  ...over,
+});
+
+const sightingEvent = (over: Partial<SightingEvent> = {}): SightingEvent => ({
+  objId: OFFER_ID,
+  eventType: 'sighting',
+  effortWords: 1_200,
+  deadlineMs: DEADLINE_MS,
   occurredAtMs: NOW_MS,
   ...over,
 });
@@ -150,7 +189,7 @@ describe('isolation from the XTM store', () => {
     openDbs.push(opened.db);
     const store = new StrakerStore(opened.db);
     store.recordSighting(sighting());
-    store.recordEvent(event({ eventType: 'claim', outcome: 'won' }));
+    store.recordEvent(claimEvent({ outcome: 'won' }));
     store.hold(hold());
 
     // Nothing new anywhere except under the Straker state directory.
@@ -199,7 +238,7 @@ describe('isolation from the XTM store', () => {
         // overwrite. Nested, that must become a savepoint the outer rollback still takes
         // with it — otherwise the guard would either refuse to run inside a cycle or
         // commit a row the cycle abandoned.
-        store.recordEvent(event({ eventType: 'claim', outcome: 'won' }));
+        store.recordEvent(claimEvent({ outcome: 'won' }));
         store.hold(hold());
         throw new Error('cycle aborted');
       }),
@@ -252,8 +291,8 @@ describe('offer identity', () => {
 
   it('keeps two offers apart on identity alone, even when every other value matches', () => {
     const { store } = freshStore();
-    store.recordEvent(event({ objId: 'offer-a' }));
-    store.recordEvent(event({ objId: 'offer-b' }));
+    store.recordEvent(sightingEvent({ objId: 'offer-a' }));
+    store.recordEvent(sightingEvent({ objId: 'offer-b' }));
 
     expect(store.listEvents()).toHaveLength(2);
   });
@@ -262,7 +301,9 @@ describe('offer identity', () => {
     const { store } = freshStore();
 
     expect(() => store.recordSighting(sighting({ objId: '' }))).toThrow(MissingOfferIdentityError);
-    expect(() => store.recordEvent(event({ objId: '   ' }))).toThrow(MissingOfferIdentityError);
+    expect(() => store.recordEvent(sightingEvent({ objId: '   ' }))).toThrow(
+      MissingOfferIdentityError,
+    );
     expect(() => store.hold(hold({ objId: '' }))).toThrow(MissingOfferIdentityError);
 
     // A hard failure writes nothing — it does not half-record the entry it refused.
@@ -280,7 +321,7 @@ describe('offer identity', () => {
     // with no signal anywhere.
     const padded = '  offer-1  ';
     store.recordSighting(sighting({ objId: padded }));
-    store.recordEvent(event({ objId: padded, eventType: 'claim', outcome: 'won' }));
+    store.recordEvent(claimEvent({ objId: padded, outcome: 'won' }));
     store.hold(hold({ objId: padded }));
 
     expect(store.sightingsOf(padded)).toHaveLength(1);
@@ -380,9 +421,9 @@ describe('outcome rows', () => {
   it('keeps a sighting, a claim and a recovery of one offer as three rows, not one', () => {
     const { store } = freshStore();
     const objId = 'offer-1';
-    store.recordEvent(event({ objId, eventType: 'sighting' }));
-    store.recordEvent(event({ objId, eventType: 'claim', outcome: 'won' }));
-    store.recordEvent(event({ objId, eventType: 'recovery', outcome: 'recovered' }));
+    store.recordEvent(sightingEvent({ objId }));
+    store.recordEvent(claimEvent({ objId, outcome: 'won' }));
+    store.recordEvent(claimEvent({ objId, eventType: 'recovery', outcome: 'recovered' }));
 
     expect(
       store
@@ -394,36 +435,32 @@ describe('outcome rows', () => {
 
   it('upserts on identity together with event type, so a re-run never duplicates a row', () => {
     const { store } = freshStore();
-    store.recordEvent(event({ eventType: 'claim', outcome: 'unknown' }));
-    store.recordEvent(event({ eventType: 'claim', outcome: 'won', occurredAtMs: NOW_MS + 5_000 }));
+    store.recordEvent(claimEvent({ outcome: 'unknown' }));
+    store.recordEvent(claimEvent({ outcome: 'won', occurredAtMs: NOW_MS + 5_000 }));
 
     const rows = store.listEvents();
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.outcome).toBe('won');
-    expect(rows[0]?.occurredAtMs).toBe(NOW_MS + 5_000);
+    expect(rows[0]).toMatchObject({ outcome: 'won', occurredAtMs: NOW_MS + 5_000 });
   });
 
   it('refuses to overwrite a settled claim outcome with a different one', () => {
     const { store } = freshStore();
-    store.recordEvent(event({ eventType: 'claim', outcome: 'won' }));
+    store.recordEvent(claimEvent({ outcome: 'won' }));
 
     // The claim is the one irreversible act in this feature: the portal has committed the
     // work to the team. A later 'failed' silently replacing 'won' would leave no trace
     // that the work is ours — not in the row, not in a log, nowhere.
     expect(() =>
-      store.recordEvent(
-        event({ eventType: 'claim', outcome: 'failed', occurredAtMs: NOW_MS + 5_000 }),
-      ),
+      store.recordEvent(claimEvent({ outcome: 'failed', occurredAtMs: NOW_MS + 5_000 })),
     ).toThrow(OutcomeOverwriteError);
 
     // and it says which two answers it could not reconcile, because a human has to
-    expect(() => store.recordEvent(event({ eventType: 'claim', outcome: 'failed' }))).toThrow(
+    expect(() => store.recordEvent(claimEvent({ outcome: 'failed' }))).toThrow(
       /won.*failed|failed.*won/s,
     );
 
     const [row] = store.listEvents();
-    expect(row?.outcome).toBe('won');
-    expect(row?.occurredAtMs).toBe(NOW_MS);
+    expect(row).toMatchObject({ outcome: 'won', occurredAtMs: NOW_MS });
   });
 
   it('still settles a claim that was left unresolved, which is what reconciliation does', () => {
@@ -431,16 +468,16 @@ describe('outcome rows', () => {
     // loses nothing. Refusing the resolution would strand every claim whose answer never
     // arrived — the exact case FR-016a exists to close.
     const { store } = freshStore();
-    store.recordEvent(event({ eventType: 'claim', outcome: 'unknown' }));
-    store.recordEvent(event({ eventType: 'claim', outcome: 'lost', occurredAtMs: NOW_MS + 5_000 }));
+    store.recordEvent(claimEvent({ outcome: 'unknown' }));
+    store.recordEvent(claimEvent({ outcome: 'lost', occurredAtMs: NOW_MS + 5_000 }));
 
-    expect(store.listEvents()[0]?.outcome).toBe('lost');
+    expect(store.listEvents()[0]).toMatchObject({ outcome: 'lost' });
   });
 
   it('records the same outcome twice without complaint, so a re-run still converges', () => {
     const { store } = freshStore();
-    store.recordEvent(event({ eventType: 'claim', outcome: 'won' }));
-    store.recordEvent(event({ eventType: 'claim', outcome: 'won', occurredAtMs: NOW_MS + 5_000 }));
+    store.recordEvent(claimEvent({ outcome: 'won' }));
+    store.recordEvent(claimEvent({ outcome: 'won', occurredAtMs: NOW_MS + 5_000 }));
 
     const rows = store.listEvents();
     expect(rows).toHaveLength(1);
@@ -452,37 +489,72 @@ describe('outcome rows', () => {
     // cycle: a day that fills up turns 'outside_schedule' into 'ceiling_reached' with no
     // information lost.
     const { store } = freshStore();
-    store.recordEvent(event({ eventType: 'skip', skipReason: 'outside_schedule' }));
-    store.recordEvent(event({ eventType: 'skip', skipReason: 'ceiling_reached' }));
+    store.recordEvent(skipEvent({ skipReason: 'outside_schedule' }));
+    store.recordEvent(skipEvent({ skipReason: 'ceiling_reached' }));
 
-    expect(store.listEvents()[0]?.skipReason).toBe('ceiling_reached');
+    expect(store.listEvents()[0]).toMatchObject({ skipReason: 'ceiling_reached' });
   });
 
-  it('records a skip with the reason that blocked it, and no outcome', () => {
+  it('records a skip with the reason that blocked it, and no outcome at all', () => {
     const { store } = freshStore();
-    store.recordEvent(event({ eventType: 'skip', skipReason: 'ceiling_reached' }));
+    store.recordEvent(skipEvent({ skipReason: 'ceiling_reached' }));
 
     const [row] = store.listEvents();
-    expect(row?.skipReason).toBe('ceiling_reached');
-    expect(row?.outcome).toBeNull();
+    expect(row).toEqual({
+      objId: OFFER_ID,
+      eventType: 'skip',
+      skipReason: 'ceiling_reached',
+      occurredAtMs: NOW_MS,
+    });
+    // `toEqual` above is exact, so this is the assertion that the reader does not hand back
+    // an `outcome: null` the variant has no room for. A skip read as an event with a null
+    // outcome is one `?? 'lost'` away from being counted as a race the team lost.
+    expect(row).not.toHaveProperty('outcome');
   });
 
-  it('refuses a claim with no outcome, and a skip with no reason', () => {
+  it('still refuses a claim with no outcome, and a skip with no reason, at the table', () => {
+    // The union makes both of these uncompilable, which is the point of it — but the
+    // table's CHECKs are what protect a database this build did not write, and a cast is
+    // one keystroke away. Cast through deliberately: two guards, not one moved.
+    const { store } = freshStore();
+    const write =
+      (bad: unknown): (() => void) =>
+      () => {
+        store.recordEvent(bad as OfferEvent);
+      };
+
+    expect(write({ ...claimEvent(), outcome: null })).toThrow();
+    expect(write({ ...skipEvent(), skipReason: null })).toThrow();
+    expect(store.listEvents()).toEqual([]);
+  });
+
+  it('drops a field the variant has no room for rather than writing a contradictory row', () => {
+    // The third combination behaves DIFFERENTLY from the two above, and the difference is
+    // worth naming rather than smoothing over. `recordEvent` no longer copies fields off the
+    // object — it derives the four nullable columns from the variant — so an `outcome`
+    // smuggled onto a sighting is not rejected by the CHECK, it never reaches the statement.
+    // The row stored is a valid sighting.
+    //
+    // That is the stronger guarantee, not a weaker one: the write cannot produce a
+    // contradictory row even when the caller casts. What it is not is loud, so this test
+    // exists to keep the silence the deliberate kind.
     const { store } = freshStore();
 
-    expect(() => store.recordEvent(event({ eventType: 'claim', outcome: null }))).toThrow();
-    expect(() => store.recordEvent(event({ eventType: 'skip', skipReason: null }))).toThrow();
-    expect(() => store.recordEvent(event({ eventType: 'sighting', outcome: 'won' }))).toThrow();
-    expect(store.listEvents()).toEqual([]);
+    store.recordEvent({ ...sightingEvent(), outcome: 'won' } as OfferEvent);
+
+    const [row] = store.listEvents();
+    expect(row?.eventType).toBe('sighting');
+    expect(row).not.toHaveProperty('outcome');
+    expect(store.claimedObjIds().has(OFFER_ID)).toBe(false);
   });
 
   it('accepts every outcome and every skip reason the shared vocabulary defines', () => {
     const { store } = freshStore();
     for (const outcome of CLAIM_OUTCOMES) {
-      store.recordEvent(event({ objId: `outcome-${outcome}`, eventType: 'claim', outcome }));
+      store.recordEvent(claimEvent({ objId: `outcome-${outcome}`, outcome }));
     }
     for (const reason of SKIP_REASONS) {
-      store.recordEvent(event({ objId: `skip-${reason}`, eventType: 'skip', skipReason: reason }));
+      store.recordEvent(skipEvent({ objId: `skip-${reason}`, skipReason: reason }));
     }
 
     expect(store.listEvents()).toHaveLength(CLAIM_OUTCOMES.length + SKIP_REASONS.length);
@@ -653,7 +725,6 @@ describe('claimedObjIds — what the cycle must not claim a second time (R7, FR-
         objId,
         eventType: 'claim',
         outcome,
-        skipReason: null,
         effortWords: 4,
         deadlineMs: NOW_MS,
         occurredAtMs: NOW_MS,
@@ -672,7 +743,6 @@ describe('claimedObjIds — what the cycle must not claim a second time (R7, FR-
       objId: 'maybe',
       eventType: 'claim',
       outcome: 'unknown',
-      skipReason: null,
       effortWords: 4,
       deadlineMs: NOW_MS,
       occurredAtMs: NOW_MS,
@@ -693,10 +763,7 @@ describe('claimedObjIds — what the cycle must not claim a second time (R7, FR-
     store.recordEvent({
       objId: 'skipped',
       eventType: 'skip',
-      outcome: null,
       skipReason: 'ceiling_reached',
-      effortWords: null,
-      deadlineMs: null,
       occurredAtMs: NOW_MS,
     });
 
@@ -709,5 +776,288 @@ describe('claimedObjIds — what the cycle must not claim a second time (R7, FR-
 
     expect(store.claimedObjIds().size).toBe(0);
     db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What Straker calls corruption — and, far more importantly, what it refuses to
+// ---------------------------------------------------------------------------
+
+describe('narrowing corruption to the failures that really are one', () => {
+  /** A `better-sqlite3` failure as the store receives one: an Error carrying a `code`. */
+  const coded = (code: string): Error => Object.assign(new Error(code), { code });
+
+  it.each([
+    ['SQLITE_CORRUPT', 'the disk image is malformed'],
+    ['SQLITE_CORRUPT_INDEX', 'an extended corruption code — the family, not one member'],
+    ['SQLITE_CORRUPT_VTAB', 'likewise'],
+    ['SQLITE_NOTADB', 'the file is not a database at all'],
+  ])('calls %s corruption — %s', (code) => {
+    expect(isStrakerCorruption(coded(code))).toBe(true);
+  });
+
+  it.each([
+    ['SQLITE_BUSY', 'another instance, or Windows Defender, is holding the file'],
+    ['SQLITE_LOCKED', 'the same, from inside the connection'],
+    ['SQLITE_FULL', 'the disk filled during the DDL — the bytes already written are fine'],
+    ['SQLITE_READONLY', 'ACLs changed under us; the file is intact and unwritable'],
+    ['SQLITE_IOERR', 'a read failed once; a failing disk is not proof the bytes are wrong'],
+    ['SQLITE_IOERR_WRITE', 'nor is a failed write'],
+    ['SQLITE_PROTOCOL', 'WAL contention, which resolves itself'],
+    ['SQLITE_CANTOPEN', 'a path, a permission or a handle limit — never the content'],
+    ['EACCES', 'not a SQLite code at all; the OS refusing the file'],
+    ['EPERM', 'likewise'],
+  ])('refuses to call %s corruption — %s', (code) => {
+    // The whole point of the finding. Each of these destroys an intact ledger if it is read
+    // as corruption, and `heldWork()` coming back empty means the day's committed workload
+    // silently reads zero and every offer then "fits". Adding any of these to the predicate
+    // fails here — including SQLITE_CANTOPEN and the SQLITE_IOERR family, which
+    // `src/state/db.ts` does list. That list answers a different question (inside a
+    // backfill: "is this MY bug, or anything else?"); here the burden of proof runs the
+    // other way, because failing to start is recoverable and destroying the ledger is not.
+    expect(isStrakerCorruption(coded(code))).toBe(false);
+  });
+
+  it.each([
+    ['a plain Error with no code', new Error('something went wrong')],
+    ['a string', 'SQLITE_CORRUPT'],
+    ['null', null],
+    ['undefined', undefined],
+    ['an object whose code is not a string', { code: 11 }],
+  ])('refuses to call %s corruption, and does not throw reading it', (_label, thrown) => {
+    // An unrecognised throw is not evidence of a broken file, and the predicate runs inside
+    // a catch block: throwing here would replace a recoverable failure with a crash on the
+    // error path itself.
+    expect(isStrakerCorruption(thrown)).toBe(false);
+  });
+});
+
+describe('a transient failure must never cost the ledger', () => {
+  it('propagates a read-only state file instead of renaming the ledger away', () => {
+    // A REAL read-only file, not a simulated code: this is the ACL-after-a-Windows-update
+    // case from the finding, and the one that reproduces instantly. Before the predicate
+    // this renamed straker.db aside and handed back an empty one — at which point
+    // `heldWork()` is empty, the daily ceiling reads zero, and the bot claims past capacity
+    // all day while looking healthy.
+    const { strakerDir } = tempRoot();
+    const first = openStrakerDatabase(strakerDir, NOW_MS);
+    new StrakerStore(first.db).hold(hold());
+    first.db.close();
+    const dbPath = join(strakerDir, STRAKER_DB_FILENAME);
+    chmodSync(dbPath, 0o444);
+
+    try {
+      let error: unknown = null;
+      try {
+        const opened = openStrakerDatabase(strakerDir, NOW_MS);
+        openDbs.push(opened.db); // only reached while the bug is present
+      } catch (err) {
+        error = err;
+      }
+
+      expect(error).toMatchObject({ code: 'SQLITE_READONLY' });
+      expect(filesUnder(strakerDir).filter((f) => f.includes('.corrupt-'))).toEqual([]);
+    } finally {
+      chmodSync(dbPath, 0o666);
+    }
+
+    // And the held work — the ledger's only source — is still there to be read.
+    const reopened = openStrakerDatabase(strakerDir, NOW_MS);
+    openDbs.push(reopened.db);
+    expect(reopened.recoveredFromCorruption).toBe(false);
+    expect(new StrakerStore(reopened.db).heldWork()).toHaveLength(1);
+  });
+
+  it('still quarantines a genuinely malformed file, and says the held work is gone', () => {
+    // Narrowing must not become refusing. A file whose header survives but whose pages are
+    // wrecked reports SQLITE_CORRUPT rather than the SQLITE_NOTADB a garbage file produces,
+    // so both members of the predicate are exercised against a real file on disk.
+    const { strakerDir } = tempRoot();
+    const first = openStrakerDatabase(strakerDir, NOW_MS);
+    new StrakerStore(first.db).hold(hold());
+    first.db.close();
+    const dbPath = join(strakerDir, STRAKER_DB_FILENAME);
+    const bytes = readFileSync(dbPath);
+    bytes.fill(0xff, 100, bytes.length); // keep the 100-byte header, wreck every page
+    writeFileSync(dbPath, bytes);
+
+    const opened = openStrakerDatabase(strakerDir, NOW_MS);
+    openDbs.push(opened.db);
+
+    expect(opened.recoveredFromCorruption).toBe(true);
+    expect(opened.corruptCopyPath).toMatch(/straker\.db\.corrupt-/);
+    expect(new StrakerStore(opened.db).heldWork()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A quarantined ledger has to reach a human, not just a log file
+// ---------------------------------------------------------------------------
+
+describe('reporting a quarantine durably', () => {
+  /** An outbox over a fresh Straker database, which is what the coordinator holds. */
+  function freshOutbox(): StrakerOutbox {
+    const { strakerDir } = tempRoot();
+    const opened = openStrakerDatabase(strakerDir, NOW_MS);
+    openDbs.push(opened.db);
+    return new StrakerOutbox(opened.db);
+  }
+
+  const quarantined = {
+    recoveredFromCorruption: true,
+    corruptCopyPath: join('C:', 'state', 'straker.db.corrupt-2026-09-14T03-00-00-000Z'),
+  };
+
+  it('queues the alert on the operations channel, where on-call already looks', () => {
+    // A `logger.error` line in a file nobody watches is what this replaces. Queued into the
+    // outbox it is durable in the same database as everything else, and survives the
+    // restart a quarantine usually comes with.
+    const outbox = freshOutbox();
+
+    expect(enqueueQuarantineAlert(outbox, quarantined, NOW_MS)).toBe('queued');
+
+    const [row] = outbox.due(NOW_MS);
+    expect(row?.channel).toBe('alerts');
+    expect(row?.status).toBe('pending');
+  });
+
+  it('says the ceiling now reads empty, which is the consequence that matters', () => {
+    // The operator does not need to know a file was renamed; they need to know the bot will
+    // over-claim until reconciliation runs. A payload naming only the path fails here.
+    const outbox = freshOutbox();
+
+    enqueueQuarantineAlert(outbox, quarantined, NOW_MS);
+
+    const payload = JSON.parse(outbox.due(NOW_MS)[0]?.payloadJson ?? '{}') as Record<
+      string,
+      unknown
+    >;
+    expect(payload['kind']).toBe('db_quarantined');
+    expect(payload['corruptCopyPath']).toBe(quarantined.corruptCopyPath);
+    expect(payload['heldWorkLost']).toBe(true);
+    expect(String(payload['detail'])).toMatch(/ceiling|capacity/i);
+  });
+
+  it('queues nothing at all when the database opened cleanly', () => {
+    // Called unconditionally by the coordinator, so the healthy path must be silent: an
+    // alert on every ordinary start is an alert nobody reads on the one start that matters.
+    const outbox = freshOutbox();
+
+    expect(enqueueQuarantineAlert(outbox, { recoveredFromCorruption: false }, NOW_MS)).toBeNull();
+    expect(outbox.due(NOW_MS)).toEqual([]);
+  });
+
+  it('raises one alert per quarantined file, not one per restart', () => {
+    // A bot that quarantines is usually a bot in a restart loop. Keying the event on the
+    // quarantined copy's stamped name makes a repeated start converge on the one alert,
+    // while a genuinely new quarantine gets its own.
+    const outbox = freshOutbox();
+
+    expect(enqueueQuarantineAlert(outbox, quarantined, NOW_MS)).toBe('queued');
+    expect(enqueueQuarantineAlert(outbox, quarantined, NOW_MS + 60_000)).toBe('already_pending');
+    expect(
+      enqueueQuarantineAlert(
+        outbox,
+        { ...quarantined, corruptCopyPath: 'straker.db.corrupt-2026-09-14T04-00-00-000Z' },
+        NOW_MS + 120_000,
+      ),
+    ).toBe('queued');
+    expect(outbox.due(NOW_MS + 120_000)).toHaveLength(2);
+  });
+
+  it('still alerts when the quarantine path is missing, because the ceiling is empty anyway', () => {
+    // `corruptCopyPath` is optional on the result type. A quarantine that cannot name its
+    // copy is stranger, not quieter — staying silent here would drop the alert on precisely
+    // the least explicable failure.
+    const outbox = freshOutbox();
+
+    expect(enqueueQuarantineAlert(outbox, { recoveredFromCorruption: true }, NOW_MS)).toBe(
+      'queued',
+    );
+    expect(outbox.due(NOW_MS)).toHaveLength(1);
+  });
+});
+
+describe('OfferEvent — the shape refuses the rows the schema refuses (type design)', () => {
+  /**
+   * The table has carried these two rules since the first migration:
+   *
+   * ```sql
+   * CHECK ((outcome IS NOT NULL)     = (event_type IN ('claim', 'recovery')))
+   * CHECK ((skip_reason IS NOT NULL) = (event_type = 'skip'))
+   * ```
+   *
+   * The *type* did not. It was one flat record with `outcome` and `skipReason` both
+   * nullable on every variant, so a skip carrying a `won`, or a claim with no outcome at
+   * all, compiled perfectly and then threw `SQLITE_CONSTRAINT` at the write. That write is
+   * the one inside the per-claim transaction, after the portal has already committed the
+   * work — the single worst moment in the cycle to discover a caller bug.
+   *
+   * These `@ts-expect-error` lines fail the build if any of the four combinations becomes
+   * constructible again. They are assertions, not suppressions: TypeScript reports an
+   * *unused* `@ts-expect-error` as an error of its own.
+   */
+  it('keeps the compile-time locks visible in the run', () => {
+    const ok: OfferEvent[] = [
+      {
+        objId: 'a',
+        eventType: 'claim',
+        outcome: 'won',
+        effortWords: 4,
+        deadlineMs: 1,
+        occurredAtMs: 1,
+      },
+      {
+        objId: 'a',
+        eventType: 'recovery',
+        outcome: 'unknown',
+        effortWords: null,
+        deadlineMs: null,
+        occurredAtMs: 1,
+      },
+      { objId: 'a', eventType: 'skip', skipReason: 'ceiling_reached', occurredAtMs: 1 },
+      { objId: 'a', eventType: 'sighting', effortWords: null, deadlineMs: null, occurredAtMs: 1 },
+    ];
+    expect(ok).toHaveLength(4);
+  });
+
+  it('cannot be built with an outcome on a skip, or a reason on a claim', () => {
+    // A skip that claims to have won. `lost` and `won` are the two outcomes that never
+    // alert, so this is the combination that hides best.
+    const skipThatWon: OfferEvent = {
+      objId: 'a',
+      eventType: 'skip',
+      skipReason: 'ceiling_reached',
+      // @ts-expect-error a skip has no outcome
+      outcome: 'won',
+      occurredAtMs: 1,
+    };
+    const claimWithAReason: OfferEvent = {
+      objId: 'a',
+      eventType: 'claim',
+      outcome: 'won',
+      // @ts-expect-error a claim has no skip reason
+      skipReason: 'ceiling_reached',
+      effortWords: 4,
+      deadlineMs: 1,
+      occurredAtMs: 1,
+    };
+    // These two are MISSING a required field rather than carrying a forbidden one, so
+    // TypeScript anchors the error to the declaration rather than to a property line —
+    // which is why the directive sits above the `const` and not inside the braces.
+    // A claim row with no outcome records that the irreversible act happened and nothing
+    // about what it produced.
+    // @ts-expect-error a claim must carry an outcome
+    const claimWithNoOutcome: OfferEvent = {
+      objId: 'a',
+      eventType: 'claim',
+      effortWords: 4,
+      deadlineMs: 1,
+      occurredAtMs: 1,
+    };
+    // @ts-expect-error a skip must name the rule that blocked the offer
+    const skipWithNoReason: OfferEvent = { objId: 'a', eventType: 'skip', occurredAtMs: 1 };
+
+    expect([skipThatWon, claimWithAReason, claimWithNoOutcome, skipWithNoReason]).toHaveLength(4);
   });
 });

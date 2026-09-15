@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createHttpClient,
+  isIndeterminateStatus,
+  isSessionExpired,
   StrakerHttpError,
   StrakerRetryExhaustedError,
   StrakerTimeoutError,
@@ -951,5 +953,42 @@ describe('createHttpClient — every request carries a deadline (Constitution VI
     expect(() =>
       createHttpClient({ baseUrl: 'https://portal.test', fetchImpl, timeoutMs: 0 }),
     ).toThrow(/timeoutMs/);
+  });
+});
+
+describe('reading the portal status codes — translated here, at the edge (DC-1, FR-027)', () => {
+  /**
+   * DC-1: a portal's own vocabulary is read at the boundary and never travels inward. Two
+   * places were reading raw HTTP numbers past that boundary — `pollCycle.ts` branched on
+   * `err.status === 401` to decide the session had expired, and `claim.ts` carried its own
+   * copy of the 5xx/408 test under a second name. Both now ask these.
+   */
+  it('names a 401 as an expired session, which is the only status that means re-signing in', () => {
+    expect(isSessionExpired(new StrakerHttpError(401, '/offers', 'expired'))).toBe(true);
+  });
+
+  it('does not read a barred account as an expired session', () => {
+    // Contract 4a: the two arrive as the same kind of refusal on the same authenticated
+    // request, and conflating them turns a suspension into a sign-in storm.
+    expect(isSessionExpired(new StrakerHttpError(403, '/offers', 'blocked'))).toBe(false);
+  });
+
+  it('is false for anything that never became an HTTP reply, rather than throwing on it', () => {
+    expect(isSessionExpired(new Error('socket closed'))).toBe(false);
+    expect(isSessionExpired(undefined)).toBe(false);
+  });
+
+  it('calls 5xx and 408 indeterminate — the portal answered with "no answer"', () => {
+    for (const status of [500, 502, 503, 504, 408]) {
+      expect(isIndeterminateStatus(status)).toBe(true);
+    }
+  });
+
+  it('calls every deliberate refusal determinate, 429 included', () => {
+    // 429 is a budget signal owned by the graduated response (FR-019), not a failure to
+    // answer; reading it as indeterminate would spend more of the allowance just refused.
+    for (const status of [400, 401, 403, 404, 409, 422, 429]) {
+      expect(isIndeterminateStatus(status)).toBe(false);
+    }
   });
 });

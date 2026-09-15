@@ -20,7 +20,7 @@ export interface ListOffersOptions {
    * This flag is the join FR-019b actually depends on. Implementing the backoff inside the
    * transport and then reading through the other door leaves the requirement satisfied in
    * `httpClient.ts` and absent in the running bot — which is exactly what happened before
-   * `tests/integration/straker/sightingCycle.test.ts` started asserting which door was used.
+   * `tests/integration/straker/botWiring.test.ts` started asserting which door was used.
    */
   readonly retry?: boolean;
 }
