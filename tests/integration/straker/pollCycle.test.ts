@@ -232,3 +232,73 @@ describe('what each claim outcome then causes', () => {
     expect(h.claimed).toEqual(['a']);
   });
 });
+
+describe('an offer the halt passed over is still recorded (FR-010)', () => {
+  /**
+   * The offers left behind when `stopClaiming` fires used to reach no row at all: they were
+   * decided `claim`, so the skip pass — which records only `action: 'skip'` — ignored them,
+   * and the claim pass iterates only what was attempted. An offer with a sighting and
+   * nothing else.
+   *
+   * Two things make that worse than untidy. FR-010 asks that every offer not claimed carry
+   * the reason that blocked it, and a barred account does not self-heal: `stop_claiming`
+   * fires again every cycle, so the same offers stay invisible for as long as the block
+   * lasts. And FR-017's win rate is won ÷ genuinely winnable — these ARE winnable, our own
+   * rules asked for them, so leaving them out of the record inflates the rate at exactly
+   * the moment the bot is least able to win anything.
+   */
+  it('records the ones it never attempted, naming the halt as the reason', async () => {
+    const h = harness({
+      offers: [raw('a'), raw('b'), raw('c')],
+      extract: () => [eligible('a'), eligible('b'), eligible('c')],
+      claim: () => ({ status: 403 }),
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['a']);
+    const skips = h.events.filter((e) => e.eventType === 'skip');
+    expect(skips.map((e) => e.objId)).toEqual(['b', 'c']);
+    expect(skips.every((e) => e.skipReason === 'claiming_halted')).toBe(true);
+  });
+
+  it('logs which condition halted it, once for the cycle rather than once per offer', async () => {
+    // The row says an offer was passed over; it does not say why the bot stopped, and there
+    // is no prose column to put that in. It belongs to the cycle, not to each offer — a
+    // barred account needs someone to call Straker, an expired session needs nothing — so
+    // it is one log line naming the condition and how many offers it cost.
+    const barred = harness({
+      offers: [raw('a'), raw('b'), raw('c')],
+      extract: () => [eligible('a'), eligible('b'), eligible('c')],
+      claim: () => ({ status: 403 }),
+    });
+    const expired = harness({
+      offers: [raw('a'), raw('b')],
+      extract: () => [eligible('a'), eligible('b')],
+      claim: () => ({ status: 401 }),
+    });
+
+    await barred.cycle.runOnce();
+    await expired.cycle.runOnce();
+
+    const halt = (h: typeof barred) => h.logs.find((l) => l.fields.action === 'claiming_halted');
+    expect(halt(barred)?.fields).toMatchObject({ followUp: 'stop_claiming', passedOver: 2 });
+    expect(halt(expired)?.fields).toMatchObject({ followUp: 're_authenticate', passedOver: 1 });
+  });
+
+  it('does not alert once per passed-over offer — the halt itself already alerted', async () => {
+    // One dead session or one barred account arriving as a burst of alerts about unrelated
+    // offers is the thing `stopClaiming` exists to prevent; recording must not undo it.
+    const h = harness({
+      offers: [raw('a'), raw('b'), raw('c'), raw('d')],
+      extract: () => [eligible('a'), eligible('b'), eligible('c'), eligible('d')],
+      claim: () => ({ status: 403 }),
+    });
+
+    await h.cycle.runOnce();
+
+    const alerts = h.queued.filter((q) => q.channel === 'alerts');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.eventId).toBe('claim:a:failed');
+  });
+});

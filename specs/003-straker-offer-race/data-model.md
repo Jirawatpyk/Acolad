@@ -132,6 +132,7 @@ Why an offer that appeared was never claimed. Recorded for **every** skip (FR-01
 | `exceeds_daily_ceiling_entirely` | Ledger — the offer alone is larger than a whole day. Kept distinct from an ordinary ceiling skip because it will recur every day forever and needs a human, not patience |
 | `holiday_calendar_uncurated` | Gate — the deadline's year has no curated calendar; **refuses rather than assumes** (FR-012) |
 | `effort_unknown` / `deadline_unknown` | Gate — a required number was missing from the payload. **These two also raise an alert** (FR-023a): they mean the recorded-as-unverified assumption that the list carries everything the decision needs has failed |
+| `claiming_halted` | **Not the gate.** The offer passed every rule and was never attempted: the cycle stopped claiming part-way, after a barred account (contract §4a) or a session that expired mid-run. Added 2026-09-15 — these offers previously reached no row at all, being neither attempted nor refused, which cost FR-010 its completeness and quietly shrank FR-017's "genuinely winnable" denominator at the one time the bot can win nothing. A barred account does not self-heal, so the same offers vanished every cycle for as long as the block lasted. **Raises no alert**: the claim that triggered the halt already raised one, and one per passed-over offer is the burst that stopping early exists to prevent. Which condition halted the cycle is logged once as `action: 'claiming_halted'` rather than copied onto each row, because it is a fact about the cycle |
 
 ---
 

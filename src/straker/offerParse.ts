@@ -195,7 +195,10 @@ export function createOfferExtractor(
       'an unverified assumption about the portal, not a fact it states',
   );
 
-  return (raw) => raw.map((entry) => parseOffer(entry, { ...options, deadlineZone: zone }));
+  // Resolved once, not rebuilt per offer: the zone announced in the line above is then
+  // provably the same object every parse runs against.
+  const resolved: OfferParseOptions = { ...options, deadlineZone: zone };
+  return (raw) => raw.map((entry) => parseOffer(entry, resolved));
 }
 
 function asRecord(entry: unknown): Record<string, unknown> {

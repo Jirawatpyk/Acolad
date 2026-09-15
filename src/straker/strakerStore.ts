@@ -675,7 +675,6 @@ export class StrakerStore {
     return rows.map(toEvent);
   }
 
-  /** Every event, oldest first — the tracking record's source. */
   /**
    * Every offer identity a claim has already been attempted against, whatever it produced.
    *
@@ -700,6 +699,7 @@ export class StrakerStore {
     return new Set(rows.map((r) => r.obj_id));
   }
 
+  /** Every event, oldest first — the tracking record's source. */
   listEvents(): OfferEvent[] {
     const rows = this.db
       .prepare('SELECT * FROM offer_events ORDER BY occurred_at_ms, obj_id, event_type')

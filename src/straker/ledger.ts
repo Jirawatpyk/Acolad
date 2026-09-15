@@ -179,7 +179,7 @@ export class StrakerLedger {
 
   /** Committed effort against one effective deadline day. */
   committedOn(deadlineDay: string, nowMs: number, held?: readonly HeldWork[]): number {
-    return this.committedByDay(nowMs, held ?? this.store.heldWork()).get(deadlineDay) ?? 0;
+    return this.committedByDay(nowMs, held).get(deadlineDay) ?? 0;
   }
 
   /** Ceiling minus what is committed, floored at zero — a day past its ceiling has no
@@ -225,7 +225,7 @@ export class StrakerLedger {
       );
     }
 
-    const byDay = this.committedByDay(nowMs, held ?? this.store.heldWork());
+    const byDay = this.committedByDay(nowMs, held);
     const verdict = decideGroupCapacity(
       [{ effort: candidate.effortWords, deadlineDate: deadlineDay }],
       (day) => byDay.get(day) ?? 0,

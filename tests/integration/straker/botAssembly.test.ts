@@ -65,13 +65,23 @@ function env(overrides: Record<string, string> = {}): Record<string, string> {
 }
 
 interface FakePortal extends StrakerPortal {
+  /** What the portal lists right now. Assignable, because a real one changes between cycles. */
+  listing: readonly RawOffer[];
+  /** Offer ids the bot actually claimed, in the order they were sent. */
   readonly claims: string[];
 }
 
 /** A portal that lists what it is given and accepts every claim, recording which arrived. */
-function portalListing(offers: readonly RawOffer[]): FakePortal {
+function portalListing(offers: readonly RawOffer[] = []): FakePortal {
   const claims: string[] = [];
+  let listing = offers;
   return {
+    get listing() {
+      return listing;
+    },
+    set listing(next: readonly RawOffer[]) {
+      listing = next;
+    },
     get claims() {
       return claims;
     },
@@ -82,7 +92,7 @@ function portalListing(offers: readonly RawOffer[]): FakePortal {
       },
     } as never,
     signIn: async () => ({ vendorId: 'vendor-1' }),
-    listOpenOffers: async () => offers,
+    listOpenOffers: async () => listing,
   };
 }
 
@@ -259,26 +269,10 @@ describe('assembleStrakerBot — the sighting tracker survives a restart', () =>
     return assembly;
   }
 
-  /** A portal whose listing the test changes between cycles, as a real one does. */
-  function switchablePortal(): StrakerPortal & { listing: RawOffer[] } {
-    const state = { listing: [] as RawOffer[] };
-    return {
-      get listing() {
-        return state.listing;
-      },
-      set listing(next: RawOffer[]) {
-        state.listing = next;
-      },
-      client: { postJson: async () => ({}) } as never,
-      signIn: async () => ({ vendorId: 'vendor-1' }),
-      listOpenOffers: async () => state.listing,
-    };
-  }
-
   it('resumes the sighting count instead of writing back into a closed appearance', async () => {
     const cfg = loadStrakerBotConfig(env({ STRAKER_EXCLUDED_LANGUAGE_PAIRS: 'en-us>ms-my' }));
     const offer = captured()['aj-265:ms-my'] as RawOffer;
-    const portal = switchablePortal();
+    const portal = portalListing();
     let clock = at('2026-09-15T10:00:00+07:00');
 
     const before = assembleAt(cfg, portal, () => clock);
@@ -329,7 +323,7 @@ describe('assembleStrakerBot — the sighting tracker survives a restart', () =>
     // `not_found_at_ms`, and the second appearance is never recorded at all.
     const cfg = loadStrakerBotConfig(env({ STRAKER_EXCLUDED_LANGUAGE_PAIRS: 'en-us>ms-my' }));
     const offer = captured()['aj-265:ms-my'] as RawOffer;
-    const portal = switchablePortal();
+    const portal = portalListing();
     let clock = at('2026-09-15T10:00:00+07:00');
 
     const before = assembleAt(cfg, portal, () => clock);
@@ -356,7 +350,7 @@ describe('assembleStrakerBot — the sighting tracker survives a restart', () =>
   it('can still close an appearance that began before the restart', async () => {
     const cfg = loadStrakerBotConfig(env({ STRAKER_EXCLUDED_LANGUAGE_PAIRS: 'en-us>ms-my' }));
     const offer = captured()['aj-265:ms-my'] as RawOffer;
-    const portal = switchablePortal();
+    const portal = portalListing();
     let clock = at('2026-09-15T10:00:00+07:00');
 
     const before = assembleAt(cfg, portal, () => clock);

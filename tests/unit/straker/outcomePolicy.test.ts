@@ -71,6 +71,9 @@ describe('ClaimOutcome — the result of the one irreversible action (data-model
 
 describe('SkipReason — why an offer that appeared was never claimed (data-model 4)', () => {
   it('carries exactly the reasons the data model settled on', () => {
+    // A closed list, deliberately: the column's CHECK is generated from it, and a reason
+    // added here without a row in data-model §4 is a value the stored schema will reject
+    // on the one database that matters. This test failing is the intended way to notice.
     expect([...SKIP_REASONS].sort()).toEqual(
       [
         'ineligible_language',
@@ -82,6 +85,10 @@ describe('SkipReason — why an offer that appeared was never claimed (data-mode
         'holiday_calendar_uncurated',
         'effort_unknown',
         'deadline_unknown',
+        // Added 2026-09-15. The only one that is not "our rules said no": the offer passed
+        // every rule and the cycle halted before it could be attempted. Recorded in
+        // data-model §4 with why it earns a row.
+        'claiming_halted',
       ].sort(),
     );
   });
@@ -103,9 +110,13 @@ describe('alertsOnSkip — the two skips that mean a contract assumption failed 
     expect(alertsOnSkip('deadline_unknown')).toBe(true);
   });
 
-  it('stays quiet for every skip that is our own rules working as intended', () => {
-    // These are decisions, not faults. Alerting on them would page someone every time the
-    // bot correctly declined work, and the page that cries wolf is the one nobody reads.
+  it('stays quiet for every other skip, whatever put it there', () => {
+    // Most of these are decisions, not faults: alerting on them would page someone every
+    // time the bot correctly declined work, and the page that cries wolf is the one nobody
+    // reads. `claiming_halted` is quiet for the opposite reason — our rules said yes and
+    // something outside them stopped the cycle, which has ALREADY alerted through the claim
+    // that triggered it. One barred account should arrive as one alert and N rows, not as N
+    // alerts about offers that have nothing wrong with them.
     for (const reason of SKIP_REASONS) {
       if (reason === 'effort_unknown' || reason === 'deadline_unknown') continue;
       expect(alertsOnSkip(reason)).toBe(false);

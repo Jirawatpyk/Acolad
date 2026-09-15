@@ -44,8 +44,8 @@ export const STRAKER_OUTBOX_STATUSES = ['pending', 'sent', 'dead'] as const;
 export type StrakerOutboxStatus = (typeof STRAKER_OUTBOX_STATUSES)[number];
 
 /**
- * What `enqueue` did — and when it queued nothing, which situation it found. A boolean
- * collapsed three answers into one, and the three call for different things:
+ * What `enqueue` did — and when it queued nothing, which of three situations it found. A
+ * boolean collapsed those three into one "not queued", and they call for different things:
  *
  * - `queued` — the outcome is now durable and will be delivered.
  * - `already_pending` — a re-run of a cycle that had already queued it. Nothing to do:

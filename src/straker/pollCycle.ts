@@ -23,7 +23,7 @@
 
 import type { Logger } from '../monitoring/logger.js';
 import { classifyClaim } from './claimOutcome.js';
-import { claimOffer } from './claim.js';
+import { claimOffer, type ClaimFollowUp } from './claim.js';
 import {
   decideClaims,
   type ClaimDecision,
@@ -32,8 +32,7 @@ import {
 } from './claimDecision.js';
 import { isSessionExpired, StrakerHttpError } from './httpClient.js';
 import type { StrakerLedger } from './ledger.js';
-import type { StrakerCycle, StrakerPortal } from './main.js';
-import type { SightingTracker } from './main.js';
+import type { SightingTracker, StrakerCycle, StrakerPortal } from './main.js';
 import { alertsOn, alertsOnSkip, countsTowardLedger } from './outcomePolicy.js';
 import type { StrakerOutbox } from './outbox.js';
 import type { RawOffer } from './probe.js';
@@ -151,12 +150,20 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       // --- act -------------------------------------------------------------------
       // Nothing below writes or announces until every claim has resolved (FR-003).
       const acted: ActedClaim[] = [];
+      // Decided `claim` but never attempted, because the cycle halted first. They are not
+      // `acted` (nothing was sent) and they are not `skip` decisions (our rules said yes),
+      // so without collecting them here they reach no row at all — see `claiming_halted`.
+      const halted: Extract<ClaimDecision, { action: 'claim' }>[] = [];
       // Read once, before the loop: `re_authenticate` below clears `session`, and a claim
       // that reached for it afterwards would be aiming at nothing.
       const { vendorId } = session;
-      let stopClaiming = false;
+      let stopClaiming: ClaimFollowUp | null = null;
       for (const decision of decisions) {
-        if (decision.action !== 'claim' || stopClaiming) continue;
+        if (decision.action !== 'claim') continue;
+        if (stopClaiming !== null) {
+          halted.push(decision);
+          continue;
+        }
         const attempt = await claimOffer(deps.portal.client, {
           vendorId,
           offerId: decision.objId,
@@ -175,8 +182,25 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
         // would meet the same 401, each would classify as a fault, and one dead session
         // would arrive as a burst of alerts about unrelated offers. Stopping here costs
         // one cycle and the next one signs in fresh.
-        if (attempt.followUp !== 'none') stopClaiming = true;
+        if (attempt.followUp !== 'none') stopClaiming = attempt.followUp;
         if (attempt.followUp === 're_authenticate') session = null;
+      }
+      if (stopClaiming !== null) {
+        // Once for the cycle, not once per offer — which is the whole point of halting.
+        // The rows below say *that* each offer was passed over; this says why, and how
+        // much it cost, in the one place an operator can act on it.
+        deps.logger.warn(
+          {
+            module: 'pollCycle',
+            action: 'claiming_halted',
+            outcome: 'failed',
+            followUp: stopClaiming,
+            passedOver: halted.length,
+          },
+          stopClaiming === 'stop_claiming'
+            ? 'the portal has barred this account — stopped claiming for this cycle, and it will not self-heal'
+            : 'the session expired mid-cycle — stopped claiming, and the next cycle signs in fresh',
+        );
       }
 
       // --- persist + notify -------------------------------------------------------
@@ -215,10 +239,11 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
                 atMs,
               );
             }
-            if (alertsOn(outcome) || outcome === 'won') {
+            const alerts = alertsOn(outcome);
+            if (alerts || outcome === 'won') {
               enqueue(
                 deps,
-                alertsOn(outcome) ? 'alerts' : 'offers',
+                alerts ? 'alerts' : 'offers',
                 `claim:${decision.objId}:${outcome}`,
                 atMs,
                 {
@@ -260,6 +285,16 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
             // appearance the store never recorded, and the store's own docstring says the
             // caller is the only thing in a position to notice.
             if (!deps.store.endSighting(offer)) diverged.push(offer.objId);
+          }
+          for (const decision of halted) {
+            // No alert: the claim that triggered the halt already raised one, and a second
+            // per passed-over offer is the burst that stopping early exists to prevent.
+            deps.store.recordEvent({
+              objId: decision.objId,
+              eventType: 'skip',
+              skipReason: 'claiming_halted',
+              occurredAtMs: atMs,
+            });
           }
           for (const decision of decisions) {
             if (decision.action !== 'skip') continue;

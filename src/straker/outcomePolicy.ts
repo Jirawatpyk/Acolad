@@ -17,10 +17,10 @@
  *
  * ## Consumers
  *
- * The three predicates have no caller yet: they encode the decision tables in
- * data-model.md §3 and §4, and the code that reads them is the poll cycle (T037) and the
- * skip-reason recording in it (T040). They are tested here rather than left to arrive with
- * their first caller, because the meaning of an outcome is the part that must not drift.
+ * The three predicates encode the decision tables in data-model.md §3 and §4, and the code
+ * that reads all three is the poll cycle (`pollCycle.ts`, T037 with the skip-reason recording
+ * of T040). They were written and tested here before that caller existed, rather than being
+ * left to arrive with it, because the meaning of an outcome is the part that must not drift.
  */
 
 import { WORDS_UNIT, type EffortUnit } from '../schedule/effort.js';
@@ -104,6 +104,21 @@ export const SKIP_REASONS = [
   'holiday_calendar_uncurated',
   'effort_unknown',
   'deadline_unknown',
+  /**
+   * Not "our rules said no" like the rest, but "we never got to ask": the cycle stopped
+   * claiming part-way, after a barred account (contract §4a) or a session that expired
+   * mid-run, and these offers were already decided `claim` when it did.
+   *
+   * It earns a row because FR-010 asks that every offer not claimed carry the reason, and
+   * because FR-017's win rate is won ÷ **genuinely winnable** — these are winnable by our
+   * own rules, so leaving them unrecorded inflates the rate exactly when the bot can win
+   * nothing. A barred account does not self-heal, so without this the same offers stay
+   * invisible every cycle for as long as the block lasts.
+   *
+   * Which condition stopped the cycle is a fact about the cycle, not about each offer, and
+   * is logged once as `action: 'claiming_halted'`.
+   */
+  'claiming_halted',
 ] as const;
 export type SkipReason = (typeof SKIP_REASONS)[number];
 

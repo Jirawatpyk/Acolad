@@ -21,10 +21,10 @@ import { listOpenOffers } from './offersApi.js';
 import {
   applySnapshot,
   emptyTrackerState,
+  type OfferSnapshot,
   type SnapshotResult,
   type TrackerState,
 } from './offerTracker.js';
-import type { OfferSnapshot } from './offerTracker.js';
 import { createStrakerLogger, STRAKER_LOG_NAME } from './logger.js';
 import { StrakerLedger } from './ledger.js';
 import { StrakerOutbox } from './outbox.js';
@@ -405,9 +405,7 @@ export function assembleStrakerBot(
     cycle,
     store,
     outbox,
-    quarantinedCopyPath: opened.recoveredFromCorruption
-      ? (opened.corruptCopyPath ?? '(path unknown)')
-      : null,
+    quarantinedCopyPath: opened.recoveredFromCorruption ? opened.corruptCopyPath : null,
     close: () => opened.db.close(),
   };
 }
