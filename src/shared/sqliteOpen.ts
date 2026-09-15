@@ -77,19 +77,37 @@ export interface SqliteOpenSpec {
   readonly isCorruption?: ((err: unknown) => boolean) | undefined;
 }
 
-export interface OpenedSqlite {
+interface OpenedSqliteBase {
   readonly db: Database.Database;
   /** The file actually opened — returned rather than implied, so a caller (and an
    *  isolation test) can assert which file this store touched. */
   readonly path: string;
-  /** True when the previous file was unusable and was moved aside; the caller treats this
-   *  as a cold start plus an alert. */
-  readonly recoveredFromCorruption: boolean;
-  /** Where the unusable file went. The key is **absent**, not present-and-undefined, when
-   *  nothing was quarantined — callers whose own result type is stricter than this one
-   *  rebuild from it rather than spreading, so their shape is unchanged. */
-  readonly corruptCopyPath?: string | undefined;
 }
+
+/** The ordinary outcome: the file on disk was usable, or there was none and one was made. */
+export interface SqliteOpenedClean extends OpenedSqliteBase {
+  readonly recoveredFromCorruption: false;
+}
+
+/** The previous file was unusable and was moved aside. The caller treats this as a cold
+ *  start **plus an alert** — and now always has a path to put in that alert. */
+export interface SqliteOpenedAfterQuarantine extends OpenedSqliteBase {
+  readonly recoveredFromCorruption: true;
+  readonly corruptCopyPath: string;
+}
+
+/**
+ * A union rather than a flag beside an optional path.
+ *
+ * The two used to be independent fields, so `{ recoveredFromCorruption: true }` with no
+ * path was constructible — and every consumer grew a fallback for it. `bootstrap.ts`
+ * printed `?? 'n/a'` into the XTM alert and Straker's queued alert said `?? 'unknown'`:
+ * an operator told their state file had been quarantined and not told where it went, for
+ * a state this function has never been able to produce. The union deletes the state and
+ * the fallbacks with it, and makes a caller check the flag before reaching for the path —
+ * which is the order it should have been read in anyway.
+ */
+export type OpenedSqlite = SqliteOpenedClean | SqliteOpenedAfterQuarantine;
 
 export function openSqliteWithQuarantine(spec: SqliteOpenSpec): OpenedSqlite {
   const { dir, fileName, nowIso, migrate, isLogicError, isCorruption } = spec;

@@ -333,9 +333,11 @@ describe('createHttpClient — backoff on the reading path (FR-019b)', () => {
       random: () => 1,
     });
 
-    // FR-023 and the contract's governing rule: the XTM bot lost 38 minutes of work to a
-    // failed read that reached the tracker as an empty list. Settled explicitly, because
-    // a `rejects.toThrow` assertion would also pass for a promise that resolved to [].
+    // FR-023 and the contract's governing rule: an exhausted read must not reach the
+    // tracker as an empty list. That is the silent-zero family the XTM bot's 38-minute
+    // outage belongs to — its mechanism was a different one, recorded in `offersApi.ts`,
+    // but a zero believed as fact is invisible whichever route produced it. Settled
+    // explicitly, because `rejects.toThrow` would also pass for a promise resolving to [].
     const settled = await client.getJsonWithBackoff<unknown[]>(OFFERS_PATH).then(
       (value) => ({ outcome: 'resolved' as const, value: value as unknown }),
       (error: unknown) => ({ outcome: 'rejected' as const, value: error }),

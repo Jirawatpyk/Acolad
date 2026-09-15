@@ -218,12 +218,21 @@ export interface StrakerPortal {
 }
 
 /**
- * Per-attempt deadline (Constitution VI). Chosen against two numbers: recon measured a
- * round trip of 256–670 ms, so 2 s is roughly three times the slowest response ever
- * observed; and the whole retry sequence — 4 attempts plus ~1.75 s of waits — then lands
- * near 9.75 s, inside one 10 s poll interval. **Revisit at T043**, which sets the polling
- * rhythm from the capture probe's measured offer lifetime: if the rhythm drops to a second,
- * a worst-case read must not outlast several cycles.
+ * Per-attempt deadline (Constitution VI). Chosen against two numbers: recon measured a round
+ * trip of 256–670 ms, so 2 s is roughly three times the slowest response ever observed; and
+ * the whole retry sequence — 4 attempts plus ~1.75 s of waits — lands near 9.75 s.
+ *
+ * **Revisited 2026-09-15, once T043 set the rhythm** (the note here used to say "revisit at
+ * T043" and the revisit had not happened). The rhythm came out at **10 s**, so a worst-case
+ * read of 9.75 s very nearly fills one interval — but it cannot overrun it, because the loop
+ * sleeps *after* the cycle rather than on a fixed schedule: a maximally slow read stretches
+ * that turn to ~19.75 s and the bot polls at half rate while the portal is struggling, which
+ * is what FR-019b wants anyway. The original worry — a sub-second rhythm, where one bad read
+ * would outlast several cycles — is off the table: T044's deferral records that the race is
+ * decided at 204 s, not in milliseconds, so the rhythm is not going below ten.
+ *
+ * So 2 s stands, for a different reason than it was first chosen for. What would move it is a
+ * shorter measured offer lifetime, which is the same observation that would reopen T044.
  */
 const REQUEST_TIMEOUT_MS = 2_000;
 

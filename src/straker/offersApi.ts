@@ -7,9 +7,27 @@ import type { RawOffer } from './probe.js';
 
 /**
  * Recon §4.2: `job-offers` returns a BARE array while `assigned-jobs` returns an
- * `{ items, total, ... }` envelope. If Straker ever moves this endpoint to an envelope,
- * a permissive cast would quietly read "zero open offers" forever — the same silent-zero
- * failure that cost the XTM bot 38 minutes of missed jobs. So the shape is checked.
+ * `{ items, total, ... }` envelope. If Straker ever moves this endpoint to an envelope, a
+ * permissive cast would quietly read "zero open offers" forever. So the shape is checked.
+ *
+ * ## The silent zero — and what the XTM precedent actually was
+ *
+ * This feature cites a 38-minute outage in several places, so it is worth stating once,
+ * accurately, here at the read it is really about.
+ *
+ * The XTM bot spent about 38 minutes and 114 polls reporting no jobs while a real one sat
+ * in Active. The mechanism was **not** a fault, an error reply, or an unexpected payload
+ * shape: the inbox grid renders its shell and a "0 - 0 of 0" footer immediately and fills
+ * the rows from a *later* XHR, so a read that **succeeded** against a DOM the data had not
+ * reached yet saw zero rows. Straker is HTTP-only and cannot reproduce that — there is no
+ * DOM to race, and the read either returns a list or throws.
+ *
+ * What carries over is not the mechanism but why it lasted 38 minutes. A zero is the one
+ * answer that looks identical whether it is true or a failure to see: no exception, no log
+ * line, no failed heartbeat, and — in that case — no way even in principle to tell a
+ * loading grid from an empty one. Every "must never be read as zero offers" rule in this
+ * feature (FR-023, and the throws in `httpClient.ts` and `pollCycle.ts`) exists to stop a
+ * *different* route to that same consequence from being equally quiet.
  */
 export interface ListOffersOptions {
   /**

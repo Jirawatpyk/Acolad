@@ -82,12 +82,16 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 `;
 
-export interface OpenResult {
-  db: DB;
-  /** True when the previous db file was corrupt and quarantined (FR-017). */
-  recoveredFromCorruption: boolean;
-  corruptCopyPath?: string;
-}
+/**
+ * The outcome of opening the state file, as a union: the quarantine flag and the path to
+ * the quarantined copy are one fact, so a `true` always names its file. They used to be
+ * two independent fields, which is why `bootstrap.ts` carried a `?? 'n/a'` for a state
+ * `openDatabase` cannot produce — an alert that says a file was moved aside and not where.
+ */
+export type OpenResult =
+  | { db: DB; recoveredFromCorruption: false }
+  /** Quarantined as `acolad.db.corrupt-<ts>` (FR-017). */
+  | { db: DB; recoveredFromCorruption: true; corruptCopyPath: string };
 
 /**
  * A migration step failed for a LOGIC reason (a bug in our migration code — e.g. an
@@ -128,14 +132,16 @@ export function openDatabase(stateDir: string, nowIso: string): OpenResult {
   });
   // Rebuilt rather than spread, on purpose: `OpenResult` carries no `path`, and its
   // `corruptCopyPath` must stay ABSENT (not present-and-undefined) on the healthy path —
-  // the shape callers have always been handed.
-  return opened.corruptCopyPath === undefined
-    ? { db: opened.db, recoveredFromCorruption: opened.recoveredFromCorruption }
-    : {
+  // the shape callers have always been handed. Branching on the flag rather than on the
+  // path's absence because `OpenedSqlite` is now a union that carries the path only on the
+  // quarantined side; the two conditions were always the same condition.
+  return opened.recoveredFromCorruption
+    ? {
         db: opened.db,
-        recoveredFromCorruption: opened.recoveredFromCorruption,
+        recoveredFromCorruption: true,
         corruptCopyPath: opened.corruptCopyPath,
-      };
+      }
+    : { db: opened.db, recoveredFromCorruption: false };
 }
 
 /**

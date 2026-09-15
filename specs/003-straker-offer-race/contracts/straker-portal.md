@@ -1,6 +1,6 @@
 # Contract — What the bot depends on from the Straker portal
 
-**Date**: 2026-09-11 | **Status**: partially confirmed against the live portal; the offer payload region is **BLOCKED** by SC-000
+**Date**: 2026-09-11, offer-payload region updated 2026-09-15 | **Status**: partially confirmed against the live portal. The offer payload region was **blocked by SC-000** until 2026-09-15, when the owner proceeded on three captured payloads (two independent jobs) rather than wait for the 10-offer exit — see spec.md §Clarifications. §2 is now confirmed against those files; §4, §4a and §5 remain **unexercised**, and the claim path is still the part of this contract nothing has tested against the real portal.
 
 > **This contract is reverse-engineered.** The portal publishes no specification — its own documentation endpoints are closed — so every statement here is an observation, not a guarantee the vendor has made. That is exactly why the rule below exists.
 
@@ -8,7 +8,24 @@
 
 **Any departure from this contract must fail loud and stop that action. It must never be absorbed, guessed around, or read as "there is no work".**
 
-The specific failure to prevent: a fault, an unexpected shape, or an empty-looking response being interpreted as "no open offers". That would mark every live offer as vanished, stamp fabricated lifetimes on them, and corrupt both the record and the ledger — silently. The XTM bot lost 38 minutes of work to this exact class of bug.
+The specific failure to prevent: a fault, an unexpected shape, or an empty-looking response being interpreted as "no open offers". That would mark every live offer as vanished, stamp fabricated lifetimes on them, and corrupt both the record and the ledger — silently.
+
+**Why the XTM bot's 38-minute incident is cited here, precisely** (corrected 2026-09-15): the
+mechanism does not carry over, only the consequence does. XTM's cause was a **browser DOM
+race** — the inbox grid rendered its shell and a "0 - 0 of 0" footer before a later XHR filled
+the rows, so a read that *succeeded* against a not-yet-populated page saw zero rows. There was
+no fault, no unexpected shape and no error response; a still-loading grid was simply
+indistinguishable from an empty one. It polled ~114 times over ~38 minutes while a real Malay
+job sat in the list, and the fix was to wait for the network to settle before reading
+(`settleGrid()`).
+
+Straker is read over HTTP with no browser, so it **cannot** have that mechanism at all. What it
+can have is the same *consequence* — believing there are no offers when there are — reached by
+a different route: a fault read as an empty list, an envelope where a bare list was expected, a
+shape guard that absorbs instead of refusing. The precedent is worth citing not for how it
+happened but for how it ended: the wrong answer was **plausible**, so nothing alerted, and it
+went unnoticed for 38 minutes. A silent zero is the failure mode that does not announce itself,
+whichever layer produces it.
 
 ---
 

@@ -221,17 +221,22 @@ CREATE INDEX IF NOT EXISTS idx_straker_outbox_due
 `;
 }
 
-export interface OpenStrakerDbResult {
+/**
+ * The outcome of opening Straker's state file. A union for the same reason
+ * {@link OpenedSqlite} is one: a quarantine that cannot name the file it moved aside is a
+ * state this code has never produced, and modelling it only bought every caller a
+ * fallback string to print instead of a path.
+ */
+export type QuarantineOutcome =
+  | { readonly recoveredFromCorruption: false }
+  | { readonly recoveredFromCorruption: true; readonly corruptCopyPath: string };
+
+export type OpenStrakerDbResult = {
   readonly db: StrakerDB;
   /** The file actually opened. Returned rather than implied, so a caller — and the
    *  isolation test — can assert which file this store touched. */
   readonly path: string;
-  /** True when the previous file was unusable and was quarantined; the caller treats
-   *  this as a cold start plus an alert. */
-  readonly recoveredFromCorruption: boolean;
-  /** Absent — not present-and-undefined — when nothing was quarantined. */
-  readonly corruptCopyPath?: string | undefined;
-}
+} & QuarantineOutcome;
 
 /**
  * Open (and migrate) Straker's SQLite state with WAL, under the state directory it is
@@ -325,13 +330,11 @@ export type QuarantineAlertSink = Pick<StrakerOutbox, 'enqueue'>;
  */
 export function enqueueQuarantineAlert(
   outbox: QuarantineAlertSink,
-  opened: Pick<OpenStrakerDbResult, 'recoveredFromCorruption' | 'corruptCopyPath'>,
+  opened: QuarantineOutcome,
   nowMs: number,
 ): StrakerEnqueueResult | null {
   if (!opened.recoveredFromCorruption) return null;
-  // A quarantine that cannot name its copy is stranger than one that can, not quieter: the
-  // ceiling is empty either way, so the alert goes out either way.
-  const corruptCopyPath = opened.corruptCopyPath ?? 'unknown';
+  const { corruptCopyPath } = opened;
   return outbox.enqueue(
     `db_quarantined:${basename(corruptCopyPath)}`,
     'alerts',

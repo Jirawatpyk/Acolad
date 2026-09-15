@@ -1,10 +1,10 @@
 # Feature Specification: JobCatch 003 — Straker Offer Race
 
-**Feature Branch**: `feat/003-straker-phase0-probe` (Phase 0 landed here; implementation branch TBD)
+**Feature Branch**: `feat/003-straker-phase0-probe` — the capture probe landed here and the implementation continues on it (decided 2026-09-11, plan.md header). It is no longer "TBD": cutting a fresh branch from `main` was ruled out because `main` carries none of the probe's `src/straker/` modules, which the bot reuses rather than rewrites.
 
 **Created**: 2026-09-11
 
-**Status**: Draft — blocked on Phase 0 evidence for the conditional criteria (see SC-000)
+**Status**: Active. SC-000's gate was **lifted by decision on 2026-09-15**, at 3 captured offers of the 10 its exit asks for and on day 4.2 of 14 — recorded in §Clarifications with its evidence and its cost. The conditional criteria SC-001/SC-002 are **kept** (the strike rule keeps them below a sample of 10) while the latency work they justify is deferred on the measurement. Phases 1–3 are built; Phases 4–6 and every release precondition (RP-1..RP-5) are outstanding.
 
 **Input**: The "Feature description" section of `docs/003-straker-feature-brief.md`, with `docs/straker-recon-note.md` as the evidence record. Binding context supplied with the request: ADR-001 (no portal SPI), ADR-002 (program name **JobCatch**), DC-1..DC-4 as mandatory design constraints, SC-001/SC-002 conditional on Phase 0, and SC-000 forbidding `/speckit-plan` from locking the data model before Phase 0 delivers fixtures.
 
@@ -117,12 +117,22 @@ minutes before the deadline at the configured throughput.
 
 ### Capture-probe evidence — interim record, 2026-09-15
 
-**This is not an SC-000 decision.** SC-000 is **not satisfied** and Track B stays blocked:
-3 distinct offers of the 10 required, on day 4.2 of the 14-day branch (exit falls
-2026-09-25 ~11:56 BKK). Recorded here because the Clarifications log is where SC-000 says
-probe evidence belongs, and because three of the findings below change what later work
-should assume. `data-model.md` §1 is deliberately **left untouched** — replacing it is the
-act SC-000 blocks, and it waits for exit.
+> **Superseded in its framing, not in its measurements — same day.** This entry was written
+> while Track B was still blocked, and it says so below. Hours later the owner decided to
+> proceed without SC-000's exit (the two decision entries above), so its opening claims are no
+> longer true: **Track B is unblocked, and `data-model.md` §1 has since been modelled from
+> these very payloads.** The original wording is kept rather than rewritten, because the order
+> of events is the point — the evidence was gathered and read *before* the gate was lifted, and
+> the gate was lifted on this evidence and nothing else. The measurements are unchanged and
+> remain the record. **One correction has been applied inline**, marked where it occurs: the
+> claim that `budget = unit_cost × total_unit` holds on every offer is false.
+
+**As written, before that decision:** this is not an SC-000 decision. SC-000 is **not
+satisfied** and Track B stays blocked: 3 distinct offers of the 10 required, on day 4.2 of the
+14-day branch (exit falls 2026-09-25 ~11:56 BKK). Recorded here because the Clarifications log
+is where SC-000 says probe evidence belongs, and because three of the findings below change
+what later work should assume. `data-model.md` §1 is deliberately left untouched — replacing it
+is the act SC-000 blocks, and it waits for exit.
 
 **Measured so far** (probe `jobcatch-straker-recon`, 10-second rhythm, 0 restarts):
 
@@ -147,11 +157,29 @@ offer that lived less than one interval.
 
 1. **`words` is genuine, and the jobs really are that small.** An earlier draft of this note
    guessed the opposite — that a field reading 2, 2 and 4 could not be the effort the gate
-   needs. The pricing fields settle it: `budget = unit_cost × total_unit` holds on every
-   offer, `total_unit` is **1 project** when `rate_type` is `total_project` and **hours** when
-   it is `per_hour`. The third offer is the proof: **4 words against 0.010 hours — 36 seconds
-   of work at $18/hour.** Four words in thirty-six seconds is a coherent pair, so the word
-   count is real.
+   needs. What settles it is the *unit* the pricing fields reveal: `total_unit` is **1 project**
+   when `rate_type` is `total_project` and **hours** when it is `per_hour`. The third offer
+   carries the argument: **4 words against 0.010 hours — 36 seconds of work at $18/hour.** Four
+   words in thirty-six seconds is a coherent pair, so the word count is real.
+
+   **Correction applied 2026-09-15 (this entry originally claimed more than the files
+   support).** It said `budget = unit_cost × total_unit` holds on *every* offer and used that
+   identity as the proof. Re-run on the three payloads, it does not hold:
+
+   | `job_ref` | `rate_type` | `unit_cost` | `total_unit` | product | stated `budget` | |
+   |---|---|---|---|---|---|---|
+   | aj-265 (th) | `total_project` | 1.0000 | 1.000 | 1.0000 | 1.00 | ✓ |
+   | aj-265 (ms-my) | `total_project` | 1.0000 | 1.000 | 1.0000 | 1.00 | ✓ |
+   | aj-267 (zh-tw) | `per_hour` | 18.0000 | 0.010 | **0.1800** | **0.19** | ✗ |
+
+   The two rows it holds on are the same job split across two languages, so the identity is
+   confirmed on **one** independent job and contradicted on the only other one. 0.1800 does not
+   round to 0.19, so rounding is not the explanation, and no explanation has been found — it is
+   left standing as an unexplained one-cent gap rather than rounded away. The conclusion above
+   survives unharmed because it never needed the identity: it rests on `total_unit` being hours
+   under `per_hour`. But the pricing fields are now *consistent with* the reading of `words`
+   rather than proof of it, and anyone tempted to derive effort from the pricing arithmetic
+   should read this gap first.
 
    The consequence is not a parsing problem but a **sizing** one. These three offers are worth
    **$1.00, $1.00 and $0.19**. If that is representative, then the daily capacity ceiling
@@ -337,7 +365,7 @@ Because each portal enforces its own ceiling, the two ceilings can add up to mor
 
 ### Key Entities
 
-- **Offer**: A unit of work Straker is offering to vendors. Expected arrival is **2-3 per day at most, irregular, sometimes none**. Low volume rules out *throughput* engineering — batching, parallel handling, bulk anything — but it does **not** weaken the case for speed. The opposite: with only a couple of offers a day, every one lost is a large share of everything this portal will ever give the team, and a bot that loses them all makes the portal worth nothing at all. Scarcity raises the value of winning each race; it does not lower it. Carries its own identity, the language direction, a size measure, a deadline, a budget, and a listing category. Its full shape is deliberately **not fixed by this specification** — see SC-000.
+- **Offer**: A unit of work Straker is offering to vendors. Expected arrival is **2-3 per day at most, irregular, sometimes none**. Low volume rules out *throughput* engineering — batching, parallel handling, bulk anything — but it does **not** weaken the case for speed. The opposite: with only a couple of offers a day, every one lost is a large share of everything this portal will ever give the team, and a bot that loses them all makes the portal worth nothing at all. Scarcity raises the value of winning each race; it does not lower it. Carries its own identity, the language direction, a size measure, a deadline, a budget, and a listing category. Its full shape is deliberately **not fixed by this specification** — see SC-000. **Since 2026-09-15 it is fixed elsewhere**: data-model.md §1 models it from three captured payloads, so this paragraph is no longer the last word on an offer's shape, and the limits of that sample are recorded there.
 - **Offer sighting**: One continuous period during which a given offer was visible. An offer that disappears and returns is a **new** sighting of the same offer; distinct-offer counts are taken over offer identities, not sightings.
 - **Claim outcome**: The result of attempting to claim an offer — won, lost to another vendor, or failed — together with the time taken.
 - **Skip reason**: Why an eligible-looking offer was not claimed: ineligible, outside the schedule, ceiling reached, deadline unreachable, or calendar uncurated.
@@ -350,6 +378,18 @@ Because each portal enforces its own ceiling, the two ceilings can add up to mor
 Numbering follows the brief, which is authoritative over the functional requirements when the two are measured against each other.
 
 ### Gating criterion
+
+> **Outcome, 2026-09-15 — the gate was lifted before its exit was reached.** Exit was never
+> met: 3 distinct offers of 10, on day 4.2 of 14. The owner proceeded anyway, on the ground
+> that the criterion's *purpose* had been served — real payloads existed, so the model was read
+> off files rather than assumed, which is the thing the last sentence below forbids. The
+> decision, its date, its sample size and the measured shortest lifetime are recorded in
+> §Clarifications, as the criterion itself requires. **What remains unverified, and is stated
+> wherever it is used rather than implied here**: the shape is confirmed on two independent
+> jobs; `direct_po` is the only listing type ever seen; `due_at`'s timezone is assumed, not
+> known; and polling cannot observe an offer that lives less than one interval. The criterion
+> is left below exactly as written, because a gate that was deliberately lifted early reads
+> very differently from one that was never there.
 
 - **SC-000** *(blocks `/speckit-plan`)*: The capture probe MUST have delivered real offer payloads as fixtures plus measured offer lifetimes **before** planning fixes the data model. Planning MUST NOT commit to the shape of an offer, nor to a polling rhythm, on assumption.
   - **Exit is reached at whichever comes first**: **10 distinct offers** captured, **or 14 days elapsed** since the probe started.

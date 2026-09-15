@@ -16,7 +16,11 @@ import Database from 'better-sqlite3';
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openSqliteWithQuarantine, type SqliteOpenSpec } from '../../../src/shared/sqliteOpen.js';
+import {
+  openSqliteWithQuarantine,
+  type OpenedSqlite,
+  type SqliteOpenSpec,
+} from '../../../src/shared/sqliteOpen.js';
 
 const NOW_ISO = '2026-09-11T10:30:45.123Z';
 const FILE = 'probe.db';
@@ -61,6 +65,15 @@ function spec(dir: string, over: Partial<SqliteOpenSpec> = {}): SqliteOpenSpec {
   };
 }
 
+/**
+ * The quarantined copy's path, or undefined. `OpenedSqlite` is a union, so the path exists
+ * only on the quarantined side and a test has to say which side it is asserting about —
+ * which is the whole point of the union and no hardship here.
+ */
+function copyPath(opened: OpenedSqlite): string | undefined {
+  return opened.recoveredFromCorruption ? opened.corruptCopyPath : undefined;
+}
+
 function open(s: SqliteOpenSpec): ReturnType<typeof openSqliteWithQuarantine> {
   const opened = openSqliteWithQuarantine(s);
   openDbs.push(opened.db);
@@ -90,7 +103,7 @@ describe('opening a healthy database', () => {
     expect(opened.path).toBe(join(dir, FILE));
     expect(existsSync(opened.path)).toBe(true);
     expect(opened.recoveredFromCorruption).toBe(false);
-    expect(opened.corruptCopyPath).toBeUndefined();
+    expect(copyPath(opened)).toBeUndefined();
     expect(opened.db.prepare('SELECT k FROM marker').get()).toEqual({ k: 'migrated' });
   });
 
@@ -123,8 +136,8 @@ describe('quarantining a file that cannot be used', () => {
     expect(opened.recoveredFromCorruption).toBe(true);
     // Moved, never overwritten: it is the only copy of whatever state was in there, and the
     // stamp comes from the caller's clock so a second corruption cannot land on the first.
-    expect(opened.corruptCopyPath).toBe(join(dir, `${FILE}.corrupt-2026-09-11T10-30-45-123Z`));
-    expect(existsSync(opened.corruptCopyPath ?? '')).toBe(true);
+    expect(copyPath(opened)).toBe(join(dir, `${FILE}.corrupt-2026-09-11T10-30-45-123Z`));
+    expect(existsSync(copyPath(opened) ?? '')).toBe(true);
     expect(opened.db.prepare('SELECT k FROM marker').get()).toEqual({ k: 'migrated' });
   });
 
@@ -136,7 +149,7 @@ describe('quarantining a file that cannot be used', () => {
 
     const opened = open(spec(dir, { fileName: 'other.db' }));
 
-    expect(opened.corruptCopyPath).toMatch(/other\.db\.corrupt-/);
+    expect(copyPath(opened)).toMatch(/other\.db\.corrupt-/);
   });
 
   it('quarantines when the file opens but the migration rejects what is stored', () => {
@@ -149,10 +162,10 @@ describe('quarantining a file that cannot be used', () => {
     const opened = open(spec(dir, { migrate: rejectSeededShape }));
 
     expect(opened.recoveredFromCorruption).toBe(true);
-    expect(existsSync(opened.corruptCopyPath ?? '')).toBe(true);
+    expect(existsSync(copyPath(opened) ?? '')).toBe(true);
     // Genuinely fresh: the seeded row is in the quarantined copy, not in the one handed back.
     expect(opened.db.prepare('SELECT COUNT(*) AS n FROM marker').get()).toEqual({ n: 0 });
-    const quarantined = new Database(opened.corruptCopyPath ?? '');
+    const quarantined = new Database(copyPath(opened) ?? '');
     openDbs.push(quarantined);
     expect(quarantined.prepare('SELECT k FROM marker').get()).toEqual({ k: 'history' });
   });
@@ -253,7 +266,7 @@ describe('which failures count as corruption — narrowed by the caller, never b
     const opened = open(spec(dir, { migrate: failsFirstWith(sqliteError('SQLITE_BUSY')) }));
 
     expect(opened.recoveredFromCorruption).toBe(true);
-    expect(existsSync(opened.corruptCopyPath ?? '')).toBe(true);
+    expect(existsSync(copyPath(opened) ?? '')).toBe(true);
   });
 
   it('propagates a failure the caller does not call corruption, leaving the file untouched', () => {
@@ -296,7 +309,7 @@ describe('which failures count as corruption — narrowed by the caller, never b
     // Genuinely fresh — it carries the migration's own stamp and nothing else. The seeded
     // history went to the quarantined copy, which is where it must still be readable.
     expect(opened.db.prepare('SELECT k FROM marker').all()).toEqual([{ k: 'migrated' }]);
-    const quarantined = new Database(opened.corruptCopyPath ?? '');
+    const quarantined = new Database(copyPath(opened) ?? '');
     openDbs.push(quarantined);
     expect(quarantined.prepare('SELECT k FROM marker').get()).toEqual({ k: 'history' });
   });
@@ -319,5 +332,52 @@ describe('which failures count as corruption — narrowed by the caller, never b
 
     expect(err).toBeInstanceOf(LogicError);
     expect(readdirSync(dir).filter((f) => f.includes('.corrupt-'))).toEqual([]);
+  });
+});
+
+describe('OpenedSqlite — the quarantine flag and its path are one fact, not two', () => {
+  /**
+   * The two fields were independent: `recoveredFromCorruption: boolean` beside an optional
+   * `corruptCopyPath`. So `{ recoveredFromCorruption: true }` with no path, and
+   * `{ recoveredFromCorruption: false, corruptCopyPath: '…' }`, both compiled — and every
+   * consumer grew a fallback for the first of those. `bootstrap.ts` printed
+   * `?? 'n/a'` into the XTM alert and Straker's queued alert said `?? 'unknown'`: an
+   * operator told a file was quarantined and not told where it went, for a state the
+   * function cannot actually produce.
+   *
+   * As a union the flag carries the path, the fallbacks become unreachable, and a caller
+   * that wants the path has to check the flag first — which is the order it should have
+   * been read in anyway.
+   */
+  /**
+   * The lock, written as the narrowing a real caller does. The declared `string | null`
+   * return is the assertion: were `corruptCopyPath` still optional, this branch would be
+   * `string | undefined` and would not compile.
+   */
+  const pathIfQuarantined = (opened: OpenedSqlite): string | null =>
+    opened.recoveredFromCorruption ? opened.corruptCopyPath : null;
+
+  it('hands back the path after a real quarantine, and null after a clean open', () => {
+    // Two directories, not one reused: overwriting the file after a clean open leaves that
+    // open's `-wal` beside the garbage, and SQLite recovers the database from it — so the
+    // second open would succeed and never quarantine at all.
+    expect(pathIfQuarantined(open(spec(tempDir())))).toBeNull();
+
+    const corrupt = tempDir();
+    writeFileSync(join(corrupt, FILE), 'not a database');
+    expect(pathIfQuarantined(open(spec(corrupt)))).toContain('.corrupt-');
+  });
+
+  it('cannot describe a quarantine without saying where the file went', () => {
+    // @ts-expect-error a quarantine must name its copy
+    const noPath: OpenedSqlite = { db: {} as never, path: 'p', recoveredFromCorruption: true };
+    const strayPath: OpenedSqlite = {
+      db: {} as never,
+      path: 'p',
+      recoveredFromCorruption: false,
+      // @ts-expect-error a healthy open has no copy to name
+      corruptCopyPath: 'p.corrupt-2026',
+    };
+    expect([noPath, strayPath]).toHaveLength(2);
   });
 });

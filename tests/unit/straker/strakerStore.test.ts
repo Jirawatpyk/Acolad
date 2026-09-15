@@ -38,6 +38,7 @@ import {
   type NewHold,
   type ClaimEvent,
   type OfferEvent,
+  type QuarantineOutcome,
   type SightingEvent,
   type SkipEvent,
   type StrakerDB,
@@ -702,7 +703,9 @@ describe('recovery from an unusable database file', () => {
     openDbs.push(opened.db);
 
     expect(opened.recoveredFromCorruption).toBe(true);
-    expect(opened.corruptCopyPath).toMatch(/straker\.db\.corrupt-/);
+    expect(opened.recoveredFromCorruption && opened.corruptCopyPath).toMatch(
+      /straker\.db\.corrupt-/,
+    );
     expect(filesUnder(strakerDir).some((f) => f.startsWith('straker.db.corrupt-'))).toBe(true);
     expect(new StrakerStore(opened.db).listEvents()).toEqual([]);
   });
@@ -885,7 +888,9 @@ describe('a transient failure must never cost the ledger', () => {
     openDbs.push(opened.db);
 
     expect(opened.recoveredFromCorruption).toBe(true);
-    expect(opened.corruptCopyPath).toMatch(/straker\.db\.corrupt-/);
+    expect(opened.recoveredFromCorruption && opened.corruptCopyPath).toMatch(
+      /straker\.db\.corrupt-/,
+    );
     expect(new StrakerStore(opened.db).heldWork()).toEqual([]);
   });
 });
@@ -965,15 +970,24 @@ describe('reporting a quarantine durably', () => {
     expect(outbox.due(NOW_MS + 120_000)).toHaveLength(2);
   });
 
-  it('still alerts when the quarantine path is missing, because the ceiling is empty anyway', () => {
-    // `corruptCopyPath` is optional on the result type. A quarantine that cannot name its
-    // copy is stranger, not quieter — staying silent here would drop the alert on precisely
-    // the least explicable failure.
+  it('cannot be asked to report a quarantine that does not name its copy', () => {
+    // This used to be a runtime guard: `corruptCopyPath` was optional beside the flag, so
+    // the helper carried a `?? 'unknown'` and this test proved the alert still went out.
+    // `QuarantineOutcome` is now a union, so that state is not reachable — the flag carries
+    // the path. The guard did not move to a weaker place; the state it guarded is gone, and
+    // an operator told their ledger was quarantined is now always told where it went.
     const outbox = freshOutbox();
 
-    expect(enqueueQuarantineAlert(outbox, { recoveredFromCorruption: true }, NOW_MS)).toBe(
-      'queued',
-    );
+    // @ts-expect-error a quarantine must name its copy
+    const withoutPath: QuarantineOutcome = { recoveredFromCorruption: true };
+    expect(withoutPath.recoveredFromCorruption).toBe(true);
+
+    // What the caller can express instead — and the alert still goes out, now naming a file.
+    const named: QuarantineOutcome = {
+      recoveredFromCorruption: true,
+      corruptCopyPath: 'straker.db.corrupt-2026-09-15T10-00-00-000Z',
+    };
+    expect(enqueueQuarantineAlert(outbox, named, NOW_MS)).toBe('queued');
     expect(outbox.due(NOW_MS)).toHaveLength(1);
   });
 });

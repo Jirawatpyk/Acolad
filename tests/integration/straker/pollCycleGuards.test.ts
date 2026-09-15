@@ -141,7 +141,8 @@ describe('a read that fails MID-RUN marks nothing as vanished (FR-023, V6)', () 
   it('records no ending and no lifetime when the read fails after offers were known', async () => {
     // V6 asks for a fault "mid-run". Failing the very FIRST read proves nothing: an empty
     // tracker has nothing that could be marked vanished, so the assertion passes vacuously.
-    // This is the shape that catches the bug that cost the XTM bot 38 minutes.
+    // This is the shape that catches a silent zero — the failure family the XTM bot's
+    // 38-minute outage belongs to, though by a different mechanism (`offersApi.ts`).
     const p = shiftingPortal();
     const h = harness(p.opts);
 

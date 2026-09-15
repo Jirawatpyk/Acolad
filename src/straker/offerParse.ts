@@ -23,8 +23,9 @@
  * A throw rejects the **whole read**, not the one entry. That matches `listOpenOffers`, which
  * already rejects an entire reply over a single entry with no `obj_id`, and it is deliberate:
  * dropping a bad entry would shrink the list silently, and a silently shorter list is
- * indistinguishable from offers vanishing — which stamps fabricated lifetimes on live offers,
- * the exact class of bug that cost the XTM bot 38 minutes of work. Upstream, a throw is caught
+ * indistinguishable from offers vanishing — which stamps fabricated lifetimes on live offers.
+ * That is the silent-zero family the XTM bot's 38-minute outage belongs to; the mechanism
+ * there was different and `offersApi.ts` records it. Upstream, a throw is caught
  * by the bot's supervised cycle guard, logged as `outcome: 'threw'` and fails the heartbeat,
  * so a portal change pages a human within about five minutes instead of decaying quietly.
  *
@@ -42,9 +43,18 @@
  *    `createOfferExtractor` states it in the log at startup so it is visible at runtime and
  *    not only in this comment. **RP-4 settles it on the first real claim** — an assigned job
  *    shows its deadline in the portal UI, which is the observation that decides.
- * 2. **Effort is the raw `words` count** (FR-009), not `total_unit` and not `budget`. The
- *    sample settles that `words` is genuine: 4 words against 0.010 hours at $18/hour is a
- *    coherent pair.
+ * 2. **Effort is the raw `words` count** (FR-009), not `total_unit` and not `budget`. What
+ *    the sample shows: `total_unit` is **hours** when `rate_type` is `per_hour` and one
+ *    project when it is `total_project`, so the third offer's 0.010 hours is 36 seconds —
+ *    and 4 words in 36 seconds is a coherent pair, where 4 *projects* or 4 *dollars* would
+ *    not be. That is consistent with `words` meaning words; it is not proof. The pricing
+ *    identity that would have made it proof does **not** hold: `unit_cost × total_unit` is
+ *    18.0000 × 0.010 = **0.18** against a stated `budget` of **0.19** on that very offer,
+ *    a cent that rounding does not explain. It holds exactly on the other two, which are
+ *    one job split across two languages — so the arithmetic is confirmed on a single
+ *    independent offer and contradicted on the other. Effort is the number the whole
+ *    capacity ceiling rests on; RP-4 should settle it against an assigned job rather than
+ *    leaving it on this.
  * 3. **Every direction that arrives is one of the 44 registered**, so eligibility is just
  *    "not excluded" — see `eligibility.ts`, where that inference is written down. An
  *    unfamiliar-looking direction is logged loudly and still treated as eligible.

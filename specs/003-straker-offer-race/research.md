@@ -6,6 +6,13 @@ Sources: the recon note (`docs/straker-recon-note.md`, browser-based, 2026-08-25
 
 > Reminder: this file is Spec Kit's research step. It is **not** "Phase 0" in the brief's sense. The brief's Phase 0 is the capture probe, and SC-000 refers to that.
 
+> **Update 2026-09-15**: the two items this file recorded as BLOCKED — **R9** (polling rhythm)
+> and **R10** (offer model) — were both resolved on that date, when the owner decided to
+> proceed on the probe's 3-offer sample rather than wait for SC-000's exit at 10 offers or 14
+> days. Each entry keeps its original reasoning and carries the resolution beneath it, so the
+> gate that existed, and what lifting it early costs, stay legible. The decision itself is in
+> spec.md §Clarifications; the sample's limits are in data-model.md §1.
+
 ---
 
 ## R1 — Transport: HTTP client, not a browser
@@ -45,6 +52,13 @@ The gap of roughly 400 ms matches the recon note's prediction of "+2 round trips
 
 **Alternatives considered**: Always building the pool regardless. Rejected — if offers turn out to live for minutes, nobody is racing and the complexity is unpaid-for. Shortening the poll interval instead of reusing connections was rejected: it spends request budget to buy back latency that a warm connection gives for free.
 
+**Outcome 2026-09-15: not built, and the condition is why.** Offers were measured surviving
+204–1,938 s before a competitor took them. Against 204 seconds of slack, 400 ms of handshake is
+noise, so the "if and only if" above resolves to *not now* — T044 is deferred, `undici` is not
+a dependency, and the transport uses the platform `fetch`. The measurement in the table stands;
+what changed is that nothing is racing at the scale it matters on. One materially shorter
+lifetime reverses this.
+
 ---
 
 ## R4 — Request budget: follow what the portal reports
@@ -64,6 +78,13 @@ The gap of roughly 400 ms matches the recon note's prediction of "+2 round trips
 **Rationale**: A rejection mid-race costs that race outright. The probe already implements the reactive half and its failure-mode tests cover it: one retry behind a fresh sign-in for the expiry signal, no retry for a server fault, and a hard stop after one attempt so a genuinely rejected credential cannot become a sign-in hammer. The proactive half belongs to Track B because its value depends on whether races are real (U2).
 
 **Alternatives considered**: Reactive-only renewal — rejected for the race path, kept as the safety net beneath the proactive one. Renewing on a fixed short timer regardless — rejected as waste until the session's real lifetime is known (it still is not; the portal exposes a renewal call whose semantics are unconfirmed).
+
+**Outcome 2026-09-15: reactive-only is what runs.** The proactive half was deferred with the
+rest of T044 for the reason in R3 — at 204 s of slack a re-sign-in mid-race costs a fraction of
+the window rather than the race. So the position R5 called "rejected for the race path" is, for
+now, the shipped one: a single reactive re-sign-in on the expiry signal and nothing proactive.
+It is a deliberate acceptance of a known cost, not an oversight; reopen it with R3 and T044
+together.
 
 ---
 
@@ -99,29 +120,98 @@ This is the same failure the XTM bot hit for real: a job accepted on the portal 
 
 The sighting distinction matters for more than tidiness: the capture probe's exit criterion counts **10 distinct offers** (or 14 days elapsed, whichever comes first), and without it a single offer flickering ten times would appear to satisfy the count. This mirrors the appearance-event model the XTM bot already uses.
 
-**Note for the later key design**: the XTM bot needed a mid-flight fix when two projects sharing a filename collided under a composed key. Straker's identifier is opaque and server-issued, so composition is unnecessary — and should be avoided for exactly that reason.
+**Note for the later key design — corrected 2026-09-15.** This note previously read the XTM
+collision as an argument *against* composed keys. It is not one, and the correction matters
+because the wrong reading would mislead whoever designs the fallback. What XTM actually did
+(PR #22, 2026-07-01): two different projects sharing a file name collided under
+`fileName|step|role`, and the fix was to **add** `projectName` — the key is composed to this
+day, as `projectName|fileName|step|role`. The lesson is *"if you must compose, compose from
+enough fields to be unique"*, a caution about how to build a fallback key, not a case against
+building one.
 
-**Alternatives considered**: A key composed from language, deadline and title. Rejected — it reintroduces the collision class that the XTM bot already paid to fix, for no gain.
+**The real reason Straker does not compose is simply that it does not need to**: the portal
+issues an opaque identifier per offer, so there is nothing to compose — no field selection to
+get wrong, and no collision class to reason about. That is an absence of a problem, not a
+principle.
+
+**Where the XTM lesson does apply**: if `obj_id` ever proves unstable — reissued between
+sightings, reused across offers, or absent on some listing type we have not seen — a composed
+fallback becomes necessary, and then XTM's experience is the guide: include the fields that
+actually distinguish two offers (at minimum the job reference **and** the target language;
+the captured sample already contains one job split across two languages, which a job-reference
+key alone would collide), and treat a shortfall as a correctness bug rather than a tidiness
+one.
+
+**Alternatives considered**: Composing a key from language, deadline and title *while an
+opaque identifier exists*. Rejected — it would discard a guaranteed-unique server value in
+favour of a guess, taking on the collision class XTM paid to fix for no gain whatever.
 
 ---
 
-## R9 — Polling rhythm — **BLOCKED (U2)**
+## R9 — Polling rhythm — **DECIDED 2026-09-15: 10 seconds** *(was BLOCKED on U2)*
 
-**Decision**: Deferred. The rhythm will be set from the measured offer lifetime, not chosen now.
+**Decision as first written (2026-09-11)**: deferred. The rhythm will be set from the measured
+offer lifetime, not chosen now.
 
-**Rationale**: SC-000 exists for this. The spec now states the decision as a computable rule rather than a judgement: strike SC-001/SC-002 **only if the shortest sighting lifetime in the sample is 120 seconds or more**, and only when the sample reached 10 offers — below that, keep them. When struck, a 30–60 second rhythm is ample and R3's pooling and R5's proactive renewal both disappear. When kept, the starting point is one second — 20% of the stated budget — tuned afterwards against measured win rate.
+**Rationale then**: SC-000 exists for this. The spec states the decision as a computable rule
+rather than a judgement: strike SC-001/SC-002 **only if the shortest sighting lifetime in the
+sample is 120 seconds or more**, and only when the sample reached 10 offers — below that, keep
+them. When struck, a 30–60 second rhythm is ample and R3's pooling and R5's proactive renewal
+both disappear. When kept, the starting point was to be one second — 20% of the stated budget
+— tuned afterwards against measured win rate.
+
+**Resolved 2026-09-15, without waiting for the probe's exit.** The owner chose to proceed on
+the sample in hand: 3 captured offers (two of them one job split across two languages), on day
+4.2 of the 14-day branch. Full record in spec.md §Clarifications.
+
+- **The rhythm is 10 seconds**, not one second — and it is now the *measured* choice rather
+  than the probe-era default it happens to equal. The shortest observed window between an
+  offer appearing and a competitor taking it was **204 s**, so a 10 s rhythm sees an offer with
+  roughly 194 s of slack. One second would buy nine of those seconds for ten times the request
+  budget. `STRAKER_POLL_INTERVAL_MS` defaults to `10_000` in `src/straker/config.ts`.
+- **SC-001 and SC-002 are KEPT**, because the strike rule keeps them below a sample of 10 — even
+  though the measurement points the other way. That tension is stated, not resolved, in the
+  spec's decision entry.
+- **What stays unverified**: whether any offer ever lives less than one poll interval. A
+  lifetime measured by polling is blind to exactly that, and three offers from one day cannot
+  close it. A single materially shorter observation reopens this entry, R3 and T044 together.
 
 **Explicitly rejected reasoning**: that 2–3 offers a day makes the fast rhythm not worth building. Volume is the wrong axis. With that few offers, each one lost is a large share of everything the portal will ever give the team; scarcity raises the value of winning a race rather than lowering it. **Only measured lifetime may strike SC-001/SC-002.**
 
 ---
 
-## R10 — Offer model — **BLOCKED (U1)**
+## R10 — Offer model — **RESOLVED 2026-09-15 from three captured payloads** *(was BLOCKED on U1)*
 
-**Decision**: Deferred to real fixtures. See [data-model.md](./data-model.md), where the blocked region is marked explicitly.
+**Decision as first written (2026-09-11)**: deferred to real fixtures. See
+[data-model.md](./data-model.md), where the blocked region was marked explicitly.
 
-**Rationale**: The recon note's field list was read out of the front end's own code, with **zero real payloads observed** — at recon time the open list was empty, and the probe has captured none yet either. Committing the model now would mean guessing which field carries effort and which carries the deadline, and those two feed the gate directly (R6). A wrong guess is not a cosmetic error: it would mis-measure every capacity and feasibility decision the bot makes.
+**Rationale then**: The recon note's field list was read out of the front end's own code, with
+**zero real payloads observed** — at recon time the open list was empty, and the probe had
+captured none. Committing the model then would have meant guessing which field carries effort
+and which carries the deadline, and those two feed the gate directly (R6). A wrong guess is not
+a cosmetic error: it would mis-measure every capacity and feasibility decision the bot makes.
 
-**Alternatives considered**: Modelling from the front-end code and correcting later. Rejected — it is precisely what SC-000 forbids, and the recon note has already been wrong twice about this portal (R2, and the assumption about connection warmth in R3).
+**Resolved 2026-09-15.** The probe captured three payloads (`fixtures/straker/offers/`), the
+owner decided not to wait for the 10-offer exit, and `data-model.md` §1 is modelled from those
+files — read off payloads, never off the recon note's field list. `offerParse.ts` and its test
+are built from the same fixtures. **The deferral was lifted because its premise lapsed**: the
+model is no longer being fixed *on assumption*, which is the thing SC-000 forbade.
+
+**What the small sample costs, recorded rather than implied**:
+
+- the shape is confirmed on **two independent jobs** (three payloads, two of them one job split
+  across two languages) — anything absent from those two is unseen, not absent;
+- the parser answers that by **failing loud on anything it has not seen** (FR-023) rather than
+  by absorbing it, which is what makes proceeding on three payloads survivable;
+- `listing_type` is `direct_po` on all three and no other value has ever been observed (U3/Q3
+  remains Straker's to answer);
+- `due_at` carries no timezone; it is read as Bangkok through one named constant
+  (`STRAKER_DEADLINE_ZONE` in `offerParse.ts`), which is an assumption, not a finding.
+
+**Alternatives considered**: Modelling from the front-end code and correcting later — rejected
+then and never done; the model that shipped came from payloads. Waiting for the full 10 —
+rejected on 2026-09-15 on the grounds above, with the thin sample recorded wherever it is used
+rather than left implicit.
 
 ---
 
@@ -147,12 +237,16 @@ The sighting distinction matters for more than tidiness: the capture probe's exi
 
 ## Open items that research cannot close
 
-| # | Item | Who closes it |
-|---|---|---|
-| U1 | Real offer payload shape | The capture probe |
-| U2 | Offer lifetime | The capture probe |
-| U3 | Meaning of each listing category | **Straker** — not answerable internally |
-| U4 | Numeric daily ceiling | The team, once the probe shows volume and size |
-| U5 | Whether one throughput figure is honest across 44 directions | The team, once the probe shows the language mix |
-| — | Whether the portal's terms permit automated claiming | **A human must read them — this is a release blocker** |
-| — | Rotating the account password shared over chat | **Release blocker** |
+*Status column added 2026-09-15, when the owner proceeded on a 3-offer sample rather than
+waiting for SC-000's exit. "Answered thinly" is not the same as "closed" and is written that
+way on purpose.*
+
+| # | Item | Who closes it | Status 2026-09-15 |
+|---|---|---|---|
+| U1 | Real offer payload shape | The capture probe | **Answered on 3 payloads / 2 independent jobs** — data-model §1, `offerParse.ts`. Unseen fields and unseen listing types remain unseen; the parser fails loud rather than absorbing them |
+| U2 | Offer lifetime | The capture probe | **Answered thinly**: 204 s / 587 s / 1,938 s, all ended by a competitor claiming. Rhythm set to 10 s (R9). Blind by construction to anything shorter than one poll interval |
+| U3 | Meaning of each listing category | **Straker** — not answerable internally | **Open.** Only `direct_po` has ever been seen, on all three offers, and operator observation confirms those were contested — so the conservative default is validated for that one value, not for the category as a whole |
+| U4 | Numeric daily ceiling | The team, once the probe shows volume and size | **Open, and deliberately un-defaulted**: `STRAKER_MAX_WORDS_PER_DAY` is a required config value, so the code refuses to invent one. Observed sizes (2, 2, 4 words) are too thin and too small to set it from |
+| U5 | Whether one throughput figure is honest across 44 directions | The team, once the probe shows the language mix | **Open.** Observed directions: `en-us→th`, `en-us→ms-my`, `en-us→zh-tw` — three of forty-four |
+| — | Whether the portal's terms permit automated claiming | **A human must read them — this is a release blocker** | **Open** (RP-2) |
+| — | Rotating the account password shared over chat | **Release blocker** | **Open** (RP-1) |

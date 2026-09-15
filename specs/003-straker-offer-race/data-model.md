@@ -29,13 +29,36 @@ it (FR-023).
 
 | Field | Type | What the decision uses it for |
 |---|---|---|
-| `obj_id` | string | The stable identity. Opaque, never composed (R8). |
+| `obj_id` | string | The stable identity. Server-issued and opaque, so there is nothing to compose it from and no reason to (R8). |
 | `source_lang`, `target_lang` | string | The language direction (FR-011, FR-011a), lower-case and hyphenated: `en-us`, `ms-my`, `th`. **Granularity is inconsistent** — `th` carries no region while `ms-my` and `zh-tw` do. |
-| `words` | number | **Effort**, raw word count (FR-009). Confirmed against the pricing fields rather than assumed: `budget = unit_cost × total_unit` holds on every offer, `total_unit` is one project under `rate_type: total_project` and **hours** under `per_hour`, and the third offer pairs 4 words with 0.010 hours — 36 seconds at $18/hour, a coherent pair. |
+| `words` | number | **Effort**, raw word count (FR-009). Read against the pricing fields rather than assumed — but they **corroborate** the reading, they do not prove it (corrected 2026-09-15, see the note below the table). What they do establish is the *unit*: `total_unit` is one project under `rate_type: total_project` and **hours** under `per_hour`, so the third offer pairs 4 words with 0.010 hours — 36 seconds at $18/hour, a coherent pair. |
 | `due_at` | string | **Deadline** — and it carries **no timezone** (`2026-09-15T23:20:00`). Which zone the portal means is unknown and cannot be derived from two samples. Read as Bangkok, following the same precedent the XTM bot set for its zone-less Due cell, through one named constant so changing it is one line. |
 | `listing_type` | string | Only ever `direct_po`. Any other value **fails loud** — Q3's meanings are still Straker's to supply. |
 | `status` | string | Only ever `open`; the list is already queried for it, so anything else means the portal contradicts itself. |
 | `job_ref`, `title`, `budget`, `currency`, `rate_type`, `total_unit`, `unit_cost`, `service` | — | Present, and no decision reads them. Recorded so the next reader knows they were seen and deliberately unused. |
+
+**The pricing identity does not hold on every offer — corrected 2026-09-15.** An earlier
+version of this document claimed `budget = unit_cost × total_unit` holds on all three
+payloads and used that as the *proof* that `words` is the genuine effort field. Re-run on the
+files, it does not:
+
+| `job_ref` | `rate_type` | `unit_cost` | `total_unit` | product | stated `budget` | |
+|---|---|---|---|---|---|---|
+| aj-265 (th) | `total_project` | 1.0000 | 1.000 | 1.0000 | 1.00 | ✓ |
+| aj-265 (ms-my) | `total_project` | 1.0000 | 1.000 | 1.0000 | 1.00 | ✓ |
+| aj-267 (zh-tw) | `per_hour` | 18.0000 | 0.010 | **0.1800** | **0.19** | ✗ |
+
+Two of the three rows are the *same job* split across two languages, so the identity is
+confirmed on exactly **one** independent job — and contradicted on the only other one.
+Rounding does not explain the gap: 0.1800 does not round to 0.19. Nobody has explained it,
+and it is left here unexplained rather than smoothed away; a fee, a floor price or a
+different rounding rule on the `per_hour` path are all plausible and none is evidenced.
+
+**The conclusion still stands on its own ground.** `total_unit` under `per_hour` is hours, so
+0.010 h = 36 seconds, and 4 words in 36 seconds is coherent — `words` reads as genuine effort.
+That is the pricing fields being *consistent with* the reading, not proving it. If the parser
+is ever changed on the strength of the pricing arithmetic, this one-cent gap is the reason not
+to.
 
 **Observed sizes**: the three offers were worth **$1.00, $1.00 and $0.19**, at 2, 2 and 4
 words. If that is representative the daily ceiling (U4) would never bind and the feasibility
@@ -54,7 +77,7 @@ One continuous period during which a given offer was visible in the open list.
 
 | Field | Meaning | Rules |
 |---|---|---|
-| `objId` | The offer's own identifier, as issued by the portal | Opaque; **never composed** from other fields (R8 — the XTM bot had to fix a collision caused by a composed key). An entry without one is a hard failure, not a skip. |
+| `objId` | The offer's own identifier, as issued by the portal | Used as issued, and **not composed** from other fields — because the portal supplies one, not because composing is wrong in itself (R8; the XTM bot composes its key to this day). An entry without one is a hard failure, not a skip: there would be nothing left to compose from that we trust. |
 | `sighting` | 1-based count of appearances of this `objId` | An offer that disappears and returns starts a **new** sighting. Distinct-offer counts are taken over `objId`, never over sightings. |
 | `firstSeenAtMs` | When this sighting began | |
 | `lastSeenAtMs` | Last check at which it was still listed | |
@@ -134,7 +157,10 @@ Derived from held work rather than kept as a running counter, so finishing a job
 
 Every offer seen produces one row in Straker's **own tracking file** (a separate file from the XTM record, clarified 2026-09-11), carrying at least: the offer identifier, the language direction (FR-011a), effort, deadline, outcome, skip reason if any, and the timestamps needed to measure win rate and latency.
 
-**The column layout is deferred** with the offer model — it cannot be finalised before the payload is known.
+**The column layout is still open**, but no longer for the original reason: the payload is
+known as of 2026-09-15, and what is outstanding is simply that the sink writing it (T052,
+Phase 4) has not been built. Deciding the layout is now a matter of building it, not of
+waiting for evidence.
 
 The combined daily view (FR-018) reads **both** portals' records, reports each and the total, and — because they now live in separate files — must state plainly when either is unreadable rather than presenting a partial total as a whole one.
 

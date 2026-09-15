@@ -108,8 +108,10 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
           err instanceof Error ? err.message : String(err),
         );
         // A failed read drives NO transition. Applying an empty list here would mark every
-        // live offer as vanished and stamp a fabricated lifetime on each — the bug that
-        // cost the XTM bot 38 minutes of missed work.
+        // live offer as vanished and stamp a fabricated lifetime on each — and it would do
+        // so in silence, because a zero read as fact is indistinguishable from a true one.
+        // That invisibility, not any particular mechanism, is what let the XTM bot's own
+        // silent zero run for 38 minutes; `offersApi.ts` records what actually happened.
         return false;
       }
 

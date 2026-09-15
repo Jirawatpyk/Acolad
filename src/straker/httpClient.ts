@@ -164,11 +164,11 @@ export interface HttpClientOptions {
    * "fall back to the hard ceiling **and warn**"). Warn-level, once per change of state
    * rather than once per reply — the condition can persist for hours.
    *
-   * **Not wired to a sink yet.** `createStrakerPortal` in `main.ts` (coordinator-owned)
-   * passes `onAlert` and not this, so today the warning has nowhere to go; it needs the
-   * matching `onWarning: (w) => report(() => logger.warn({ module: 'httpClient', ...w },
-   * w.detail))`. Routed through `onAlert` instead it would arrive as an error labelled
-   * "read gave up after exhausting its retry cap", which is a different and untrue event.
+   * Wired by `createStrakerPortal` in `main.ts`, and asserted there — the composition root
+   * has to pass this, and for a while it did not, which left the warning with nowhere to go.
+   * Kept **separate from `onAlert`** deliberately: routed through that one it would arrive as
+   * an error labelled "read gave up after exhausting its retry cap", a different and untrue
+   * event. Two hooks because they are two conditions, not one with two severities.
    */
   readonly onWarning?: (warning: StrakerTransportWarning) => void;
 }
@@ -344,7 +344,9 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
           reason,
         });
         // Throwing is the other half of FR-023: an exhausted read must never be readable
-        // as "no offers available". The XTM bot lost 38 minutes of work to exactly that.
+        // as "no offers available". A zero is the one answer that looks the same whether
+        // it is true or a failure to see — see the note in `offersApi.ts` for what that
+        // cost the XTM bot, and why its mechanism was not one this transport can have.
         throw new StrakerRetryExhaustedError(path, attemptNumber, waitedMs, result.error);
       }
 

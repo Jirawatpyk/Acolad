@@ -40,17 +40,28 @@ Required before anything runs:
 npm run lint ; npm run typecheck ; npm test      # must all be clean before anything else
 
 npm run straker:recon      # the capture probe — READ ONLY, already running in production
-npm run straker:once       # one cycle, then exit (smoke test)
-pm2 start recon.config.cjs # the probe under supervision
+pm2 start recon.config.cjs # the probe under supervision (app: jobcatch-straker-recon)
+
+npm run deploy -- -Target straker   # build + restart the Straker bot only
+npm run deploy -- -Target xtm       # build + restart the live XTM bot only
+npm run deploy -- -Target both      # xtm first, then straker; a failure stops the rest
 ```
 
-The XTM bot is released and restarted exactly as before. **Releasing or restarting either bot must never touch the other** — that is itself an acceptance item (V12).
+**Corrected 2026-09-15**: an earlier version of this section listed `npm run straker:once`.
+**No such script exists** — `package.json` defines `straker:recon` and nothing else for this
+bot. The bot's own one-cycle path is `runOnce()` inside `src/straker/main.ts`, reached through
+`straker.config.cjs` (PM2 app `jobcatch-straker`, running `dist/straker/main.js`); the deploy
+script uses one completed cycle, not a started process, as its proof of life. Adding a
+`straker:once` npm script would be a reasonable convenience, but it is not there today and this
+document should not imply it is.
+
+The XTM bot is released and restarted exactly as before. **Releasing or restarting either bot must never touch the other** — that is itself an acceptance item (V12), and `-Target` is what implements it.
 
 ---
 
 ## Acceptance table
 
-Legend: **A** = buildable now · **B** = waits for the capture probe · **P** = the probe itself
+Legend: **A** = buildable now · **B** = needed real offer payloads; **that wait ended on 2026-09-15 by decision rather than by V19 being met** (3 offers, not 10 — see V19) · **P** = the probe itself
 
 | # | What is checked | Track | Proves | How |
 |---|---|---|---|---|
@@ -83,16 +94,25 @@ Legend: **A** = buildable now · **B** = waits for the capture probe · **P** = 
 | **V31** | The backoff is **never** applied to the claim path | A | FR-019c | Assert an unknown claim outcome produces no second attempt at any interval — the risk there is a duplicate irreversible commitment, not a wasted request |
 | **V32** | **No further enquiry about an offer is made between noticing it and claiming it** | A | FR-002 | Assert no detail fetch or file listing occurs on the path from read to claim — it costs a round trip where a round trip decides the outcome, and nothing else looks wrong |
 | **V33** | Both bots use the same names, with the same meanings, for sighting, claim outcome, effort unit and gate decision | A | FR-028 (DC-2) | Compare the shared type names against the XTM bot's — drift here is what would make the deferred core extraction stop being mechanical |
-| **V19** | **Probe exit reached: 10 distinct offers captured, or 14 days elapsed — whichever first — with lifetimes measured** | **P** | **SC-000 — gates the rest** | `fixtures/straker/offers/` and the probe's event log. A sample under 10 is recorded as an explicit limitation. |
-| **V20** | Detect→claim ≤ 400 ms at p95 | B *(conditional)* | SC-001 | Only if V19 shows offers are short-lived; otherwise **struck** |
-| **V21** | Gap between consecutive successful checks ≤ 1.3× the configured rhythm | B *(conditional)* | SC-002 | As V20 |
+| **V19** | **Probe exit reached: 10 distinct offers captured, or 14 days elapsed — whichever first — with lifetimes measured** | **P** | **SC-000 — gated the rest** | `fixtures/straker/offers/` and the probe's event log. **NOT MET, and deliberately not waited for**: at 2026-09-15 the probe held **3 distinct offers** (two of them one job split across two languages) on day 4.2 of 14, and the owner unblocked Track B rather than wait — spec.md §Clarifications. The probe is still running, so this row can still be satisfied later; the sample under 10 is recorded as an explicit limitation in data-model §1, research §R10 and plan §The unknowns. Treat V19 as **the gate that was consciously bypassed**, not as an item still pending. |
+| **V20** | Detect→claim ≤ 400 ms at p95 | B *(conditional — **in force**)* | SC-001 | The strike rule keeps SC-001 below a sample of 10, so this stays an acceptance item. Unmeasured so far: no claim has ever been dispatched at the real portal (RP-4) |
+| **V21** | Gap between consecutive successful checks ≤ 1.3× the configured rhythm | B *(conditional — **in force**)* | SC-002 | As V20. The configured rhythm is 10 s (`STRAKER_POLL_INTERVAL_MS`), so the bound is 13 s |
 | **V22** | Win rate measured and reported from the first day | A | SC-004 | A target is set only after a baseline; at 2–3 offers a day an early figure is a weak signal |
 
-**V19 gates V1, V3, V20 and V21.** Everything marked A can be built and accepted before a single offer is captured.
+**V19 gated V1, V3, V20 and V21.** Everything marked A can be built and accepted before a single offer is captured — and was. **The gate was released early on 2026-09-15** on three captured offers, so V1 and V3 are now buildable and their code exists (`offerParse.ts`, `eligibility.ts`); V20 and V21 remain in force but unmeasured, because no claim has yet been dispatched at the real portal.
 
 ---
 
 ## The one decision the probe makes for you
+
+> **Taken 2026-09-15, before V19 completed.** The owner applied this table's **third row** —
+> fewer than 10 offers — while the probe was still running, rather than waiting for its exit.
+> On 3 offers, SC-001 and SC-002 are therefore **kept**. What the row prescribes next ("build
+> keep-alive pooling and proactive session renewal, start at one second") was **not** followed:
+> the measured shortest window before a competitor claimed was 204 s, so the rhythm was set to
+> **10 seconds** and the pooling work deferred (T044). The rule and the measurement disagree,
+> the rule won on the criteria and the measurement won on the engineering, and both halves are
+> written down rather than reconciled. See spec.md §Clarifications.
 
 When V19 completes, apply the rule exactly as the spec states it. It is computable, not a judgement call:
 
@@ -110,7 +130,14 @@ Why the **shortest** lifetime rather than the median: at a sample of ten a media
 
 ## Tearing down the capture probe
 
-When V19 is satisfied, the probe has done its job:
+**The trigger is no longer V19 — it is RP-5.** V19 was bypassed on 2026-09-15 and the probe is
+still running, which is right: it costs nothing to keep collecting, every further offer
+strengthens a sample of three, and a materially shorter lifetime is the one observation that
+would reopen T044 and the rhythm. **What it must not do is run alongside the bot** — they would
+share one request budget and produce two views of the same offers — so the teardown below is
+gated on the bot's release, not on the probe's exit criterion.
+
+When the bot is ready to start, the probe has done its job:
 
 ```powershell
 pm2 delete jobcatch-straker-recon
