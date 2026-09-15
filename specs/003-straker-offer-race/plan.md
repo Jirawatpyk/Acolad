@@ -90,6 +90,34 @@ The feature brief plans for 003 to also perform a mechanical extraction of the p
 
 ---
 
+> ### Scope decision — 003 modifies the live XTM bot's daily report (owner-approved 2026-09-16)
+>
+> **FR-018 cannot be satisfied without it.** The requirement is about *the* daily summary, and
+> the daily summary is the `📋 Daily Report` the XTM bot already sends at 09:00 from
+> `src/reporting/dailyReport.ts`. A combined view that lives only in a Straker ops script is
+> the mitigation for the two-ceiling problem sitting somewhere nobody looks — which is the
+> failure this feature has now produced four times, and the reason T052a and T056a exist.
+>
+> **Why this is compatible with SC-005**, whose three checks are all about job-catching:
+> the suite stays green with the coverage gate intact (check 1 — note it says *green*, not
+> *unchanged in count*, and the count necessarily grows when tests are added); nothing on the
+> accept or skip path is touched (check 2); and the report is not an alert and stays inside
+> the loop's existing try/catch, so a fault in it cannot page anyone or raise the error count
+> (check 3). `dailyReport.ts` was made throw-safe in PR #14 after a bug in it took the loop
+> down; that property must survive this change and is the thing to test for.
+>
+> **The 820-test figure this branch has been holding to is a proxy I adopted, not SC-005
+> itself.** It was the right proxy while 003 claimed to touch nothing of XTM's; once XTM code
+> is deliberately changed it stops being meaningful, and the invariant becomes: the XTM suite
+> stays green, its coverage gate holds, and every test that existed before still exists and
+> still passes. Any drop in that set is a regression; growth is the new work.
+>
+> **The change is inert until deployed.** Editing the file carries no risk to the running bot;
+> `npm run deploy` is what takes effect, is the owner's to run, and is best run in a quiet
+> window — which is what prompted this approval.
+
+---
+
 ## Technical Context
 
 **Language/Version**: TypeScript 5.x (strict, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) on Node.js 22

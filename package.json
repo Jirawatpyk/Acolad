@@ -21,6 +21,7 @@
     "report:catch-rate": "npm run build && node dist/runtime/catchRateReport.js",
     "straker:recon": "npm run build && node dist/straker/reconMain.js",
     "straker:win-rate": "npm run build && node dist/straker/winRateReport.js",
+    "report:combined": "npm run build && node dist/straker/combinedSummary.js",
     "xtm:recon": "tsc scripts/xtm-recon.ts --outDir dist-recon --module nodenext --moduleResolution nodenext --target ES2022 --skipLibCheck && node dist-recon/xtm-recon.js",
     "xtm:recon-logout": "tsc scripts/recon-logout.ts --outDir dist-recon --module nodenext --moduleResolution nodenext --target ES2022 --skipLibCheck && node dist-recon/recon-logout.js",
     "deploy": "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1"

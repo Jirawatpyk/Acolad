@@ -514,3 +514,51 @@ describe('buildDailyReportCard — metric-aware effort (Task 8)', () => {
     expect(card).not.toContain('100 words');
   });
 });
+
+describe('the companion portal section (FR-018, US3, V17)', () => {
+  /**
+   * Each portal enforces its own daily ceiling, and the two can sum past what the crew can
+   * actually do. Separate ledgers were accepted **on the condition** that the combined
+   * figure is visible somewhere a human reads — and the place a human reads is this report,
+   * not an ops script someone has to remember to type.
+   *
+   * What this file owns is only the rendering. Reading Straker's record, combining the two
+   * and deciding when a total may be shown belong to `src/straker/combinedSummary.ts`; the
+   * XTM report builder takes already-decided rows and stays free of any Straker import, so
+   * the live bot's report cannot break on a change to Straker's internals.
+   */
+  const held: XtmJobState[] = [];
+
+  it('renders nothing extra when no companion section is supplied', () => {
+    // The default path is the report exactly as it was. A bot running without the Straker
+    // side — or with it unreadable — must produce the card it produced yesterday.
+    const before = text(buildDailyReportCard(held, NOW, 'http://x', 1000));
+
+    expect(before).not.toContain('Straker');
+  });
+
+  it('renders the rows it is given, so the combined figure reaches the report', () => {
+    const card = text(
+      buildDailyReportCard(held, NOW, 'http://x', 1000, undefined, true, 'words', [
+        { label: 'Straker', value: '120 words (cap 2000/day)' },
+        { label: 'Both portals', value: '470 words due today' },
+      ]),
+    );
+
+    expect(card).toContain('Straker');
+    expect(card).toContain('470 words due today');
+  });
+
+  it('renders a stated gap as plainly as it renders a figure (scenario 2)', () => {
+    // The whole point of scenario 2: a partial total must never be presented as a complete
+    // one. The sentence saying so is as much a part of the report as the number would be.
+    const card = text(
+      buildDailyReportCard(held, NOW, 'http://x', 1000, undefined, true, 'words', [
+        { label: 'Straker', value: 'record unreadable — state/straker/straker.db not found' },
+        { label: 'Both portals', value: 'no combined total: Straker could not be read' },
+      ]),
+    );
+
+    expect(card).toContain('no combined total');
+  });
+});

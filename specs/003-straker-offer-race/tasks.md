@@ -227,7 +227,7 @@ that later tasks must not assume around:
 
 ---
 
-## Phase 5: User Story 3 — See the combined workload across both portals (Priority: P3) — **NOT STARTED**
+## Phase 5: User Story 3 — See the combined workload across both portals (Priority: P3) — **COMPLETE 2026-09-16**
 
 **Goal**: one daily view of committed work across both portals, so a human can lower a ceiling before the crew is over-committed
 
@@ -235,13 +235,15 @@ that later tasks must not assume around:
 
 ### Tests for User Story 3 (MANDATORY — Constitution II) ⚠️
 
-- [ ] T057 [P] [US3] Write failing tests that the summary reads **both** records and reports each portal, the combined total, and the period's **retries performed and uptime**, in `tests/unit/straker/combinedSummary.test.ts` (FR-018, V17) — the last two are named by the constitution and are what reveal a bot limping rather than failing
-- [ ] T058 [P] [US3] (FR-018) Write a failing test that an unreadable record is **stated plainly**, never presented as a complete total, in `tests/unit/straker/combinedSummary.test.ts` (US3 scenario 2)
-- [ ] T059 [P] [US3] Write a failing test that the combined total is suppressed or labelled when the two portals are not measuring in the same unit, in `tests/unit/straker/combinedSummary.test.ts` (FR-018)
+- [x] T057 [P] [US3] Write failing tests that the summary reads **both** records and reports each portal, the combined total, and the period's **retries performed and uptime**, in `tests/unit/straker/combinedSummary.test.ts` (FR-018, V17) — the last two are named by the constitution and are what reveal a bot limping rather than failing
+- [x] T058 [P] [US3] (FR-018) Write a failing test that an unreadable record is **stated plainly**, never presented as a complete total, in `tests/unit/straker/combinedSummary.test.ts` (US3 scenario 2)
+- [x] T059 [P] [US3] Write a failing test that the combined total is suppressed or labelled when the two portals are not measuring in the same unit, in `tests/unit/straker/combinedSummary.test.ts` (FR-018)
 
 ### Implementation for User Story 3
 
-- [ ] T060 [US3] Implement the combined daily view to pass T057-T059 in `src/straker/combinedSummary.ts` (FR-018), reading both records **read-only at reporting time** and never on the claim path
+- [x] T060 [US3] Implement the combined daily view to pass T057-T059 in `src/straker/combinedSummary.ts` (FR-018), reading both records **read-only at reporting time** and never on the claim path
+
+- [x] T060a [US3] Wire the combined view into the **09:00 daily report the XTM bot already sends** (`src/reporting/dailyReport.ts`), so FR-018's summary reaches the place a human reads. **Owner-approved 2026-09-16** as a deliberate change to the live bot — see plan §Scope decision, which records why SC-005 still holds and what the test invariant becomes now that "exactly 820" no longer applies. Two properties must survive: the report stays **throw-safe** (PR #14 fixed a bug in it that took the loop down) and a Straker record that cannot be read must degrade to the XTM-only report rather than suppressing the whole thing — the combined view is a mitigation, and a mitigation that can break the report it rides on is worse than none
 
 **Checkpoint**: the accepted cost of separate ledgers is visible to a human who can act on it
 
