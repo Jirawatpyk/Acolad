@@ -832,6 +832,29 @@ export function readStrakerWorkload(spec: StrakerReadSpec): PortalResult {
  * Never throws: `combinedReportRows` promises the report still goes out, and a win rate is
  * the least important thing on it.
  */
+/**
+ * The window the win-rate row is measured over, which is deliberately NOT the card's.
+ *
+ * The rest of the card describes the last 24 hours. At the spec's stated 2-3 offers a day
+ * that makes `winnable` 0-3, so the figure could never reach {@link WEAK_SIGNAL_BELOW} and
+ * the weak-signal caveat would be permanently attached — a caveat that is always true is one
+ * people stop reading. Worse, SC-004's "target set only after two weeks of baseline" would
+ * never arrive on this surface at all, which is the whole reason T076 exists.
+ *
+ * Fourteen days is that baseline, and at 2-3 offers a day it crosses ten winnable in about a
+ * week, so the caveat drops off when it stops being true.
+ */
+export const WIN_RATE_WINDOW_DAYS = 14;
+
+/** The fourteen-day window {@link WIN_RATE_WINDOW_DAYS} describes, as a period. */
+function winRatePeriod(nowMs: number): SummaryPeriod {
+  return {
+    fromMs: nowMs - WIN_RATE_WINDOW_DAYS * 24 * 3_600_000,
+    toMs: nowMs,
+    label: `the last ${String(WIN_RATE_WINDOW_DAYS)} days`,
+  };
+}
+
 export function strakerWinRateRow(period: SummaryPeriod, stateDir: string): CardRow {
   const label = 'Straker win rate';
   const source = join(stateDir, STRAKER_DB_FILENAME);
@@ -847,13 +870,24 @@ export function strakerWinRateRow(period: SummaryPeriod, stateDir: string): Card
     const events = new StrakerStore(db as unknown as StrakerDB).listEvents();
     const rate = computeWinRate(events, { fromMs: period.fromMs, toMs: period.toMs });
 
+    // FR-017a: the turn-away count travels with the rate, always, including on the n/a line.
+    // "Reporting only one of the two numbers makes the other invisible" — and the two point at
+    // opposite fixes: a low rate with a high turn-away count is a configuration question, a low
+    // rate with a low one is a speed question. The ops script prints both; a row that dropped
+    // one would leave FR-017a unreported on the surface T076 argues is the one that counts.
+    const turnedAway = ` · ${String(rate.turnedAway)} turned away by our own rules`;
+
     if (rate.ratePct === null) {
-      return {
-        label,
-        value: `n/a — no genuinely winnable offers in ${period.label}`,
-      };
+      return { label, value: `n/a — no genuinely winnable offers in ${period.label}${turnedAway}` };
     }
 
+    // An unresolved claim is one reconciliation has not settled yet. Counting it as a loss
+    // would understate the rate; omitting it lets a temporarily depressed figure read as a
+    // verdict. So the rate is named as a lower bound for exactly as long as that is true.
+    const unresolved =
+      rate.unknownPending > 0
+        ? ` · ${String(rate.unknownPending)} unresolved, so this is a lower bound`
+        : '';
     const caveat =
       rate.winnable < WEAK_SIGNAL_BELOW
         ? ` (weak signal — fewer than ${String(WEAK_SIGNAL_BELOW)} winnable)`
@@ -862,7 +896,7 @@ export function strakerWinRateRow(period: SummaryPeriod, stateDir: string): Card
       label,
       value:
         `${rate.ratePct.toFixed(1)}% — ${String(rate.won)} won of ` +
-        `${String(rate.winnable)} winnable in ${period.label}${caveat}`,
+        `${String(rate.winnable)} winnable in ${period.label}${caveat}${turnedAway}${unresolved}`,
     };
   } catch (err) {
     return { emoji: '⚠️', label, value: `record unreadable — ${describe(err)}` };
@@ -1116,7 +1150,27 @@ export function combinedReportRows(spec: CombinedRowsSpec): CardRow[] {
         dayOf: spec.xtm.dayOf,
       }),
     ]);
-    return [...combinedRowsOf(view), strakerWinRateRow(period, strakerStateDir)];
+    const rows = combinedRowsOf(view);
+
+    // Pushed in its own guard rather than inside the outer one, and the difference is the
+    // whole point: the outer `catch` REPLACES every row with a single "unavailable" line, so
+    // a throw from the least important row here would discard the XTM figure, the Straker
+    // figure and the combined total that were already computed successfully. The section is
+    // not optional; this row is.
+    try {
+      // One fault, one warning. When the Straker record is unreadable the portal row above has
+      // already said so in the same words; a second identical line reads as two problems and
+      // makes the card longer at the moment it is hardest to scan.
+      const strakerUnread = view.portals.some((p) => !p.read && p.failure.portal === 'Straker');
+      if (!strakerUnread) {
+        rows.push(strakerWinRateRow(winRatePeriod(spec.nowMs), strakerStateDir));
+      }
+    } catch {
+      // Deliberately silent: `strakerWinRateRow` already turns every failure it can see into
+      // a stated row, so reaching here means something outside its contract changed. The
+      // report still goes out, which is what FR-018 asks of this function.
+    }
+    return rows;
   } catch (err) {
     // The last line of defence, and it should never be reached: both readers already turn
     // their own failures into a stated `PortalResult`. If it IS reached, something changed

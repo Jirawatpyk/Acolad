@@ -1323,3 +1323,116 @@ describe('T076 — the Straker win rate reaches the 09:00 report (SC-004)', () =
     expect(rows.some((r) => r.label === 'Straker win rate')).toBe(true);
   });
 });
+
+describe('T076 review fixes — the row has to be usable, not merely present', () => {
+  async function record(events: readonly unknown[]): Promise<string> {
+    const dir = tempDir();
+    const stateDir = join(dir, 'straker');
+    mkdirSync(stateDir, { recursive: true });
+    const { openStrakerDatabase, StrakerStore } =
+      await import('../../../src/straker/strakerStore.js');
+    const opened = openStrakerDatabase(stateDir, NOW_MS);
+    const store = new StrakerStore(opened.db);
+    for (const e of events) store.recordEvent(e as never);
+    opened.db.close();
+    return stateDir;
+  }
+  const claim = (id: string, outcome: string, atMs: number) => ({
+    objId: id,
+    occurredAtMs: atMs,
+    eventType: 'claim' as const,
+    outcome,
+    effortWords: 4,
+    deadlineMs: NOW_MS + 24 * 3_600_000,
+  });
+  const skip = (id: string, atMs: number) => ({
+    objId: id,
+    occurredAtMs: atMs,
+    eventType: 'skip' as const,
+    skipReason: 'ineligible_language' as const,
+  });
+
+  it('reports offers turned away beside the rate, because FR-017a says one number hides the other', async () => {
+    // "a low rate with a high turn-away count is a configuration question; a low rate with a
+    // low one is a speed question, and they call for opposite responses" — winRate.ts. The ops
+    // script printed both; the first cut of this row printed only the rate, which by T076's own
+    // argument left FR-017a unreported on the surface that counts.
+    const stateDir = await record([
+      claim('a', 'won', NOW_MS - 3_600_000),
+      claim('b', 'lost', NOW_MS - 3_600_000),
+      skip('c', NOW_MS - 3_600_000),
+      skip('d', NOW_MS - 3_600_000),
+    ]);
+
+    const row = strakerWinRateRow(PERIOD, stateDir);
+
+    expect(row.value).toContain('2 turned away');
+  });
+
+  it('says the figure is a lower bound while claims are still unresolved', async () => {
+    // An `unknown` outcome is a claim reconciliation has not settled. Counting it as a loss
+    // would understate the rate; hiding it lets a temporarily depressed figure read as a verdict.
+    const stateDir = await record([
+      claim('a', 'won', NOW_MS - 3_600_000),
+      claim('b', 'unknown', NOW_MS - 3_600_000),
+    ]);
+
+    const row = strakerWinRateRow(PERIOD, stateDir);
+
+    expect(row.value).toMatch(/unresolved|lower bound/i);
+  });
+
+  it('measures the report row over 14 days, not the card’s 24-hour period', async () => {
+    // The window this row needs is not the window the rest of the card uses. At 2-3 offers a
+    // day a 24-hour window makes `winnable` 0-3, so it can NEVER reach WEAK_SIGNAL_BELOW (10):
+    // the caveat would be permanently on and SC-004's two-week baseline never arrives. A
+    // caveat that is always true is one people stop reading.
+    const eightDaysAgo = NOW_MS - 8 * 24 * 3_600_000;
+    const stateDir = await record([
+      claim('recent', 'won', NOW_MS - 3_600_000),
+      claim('older', 'lost', eightDaysAgo),
+    ]);
+    const xtmDir = tempDir();
+
+    const rows = combinedReportRows({
+      xtm: {
+        stateDir: xtmDir,
+        metric: 'words',
+        ceilingPerDay: 3_500,
+        dayOf: (ms) =>
+          ms === null ? null : new Date(ms + 7 * 3_600_000).toISOString().slice(0, 10),
+      },
+      strakerStateDir: stateDir,
+      nowMs: NOW_MS,
+    });
+
+    const row = rows.find((r) => r.label === 'Straker win rate');
+    // The eight-day-old loss is inside 14 days and outside 24 hours. Seeing it counted is
+    // what proves the call site does not simply reuse the card's period.
+    expect(row?.value).toContain('1 won of 2');
+  });
+
+  it('keeps the portal rows even if the win-rate row were to fail', async () => {
+    // Defence in depth for the composition: the least important row must not be able to
+    // discard the most important ones. No input reaches the throwing path today — that is the
+    // point, since what this protects against is the NEXT edit to strakerWinRateRow.
+    const stateDir = await record([claim('a', 'won', NOW_MS - 3_600_000)]);
+    const xtmDir = tempDir();
+
+    const rows = combinedReportRows({
+      xtm: {
+        stateDir: xtmDir,
+        metric: 'words',
+        ceilingPerDay: 3_500,
+        dayOf: (ms) =>
+          ms === null ? null : new Date(ms + 7 * 3_600_000).toISOString().slice(0, 10),
+      },
+      strakerStateDir: stateDir,
+      nowMs: NOW_MS,
+    });
+
+    // The FR-018 section survives as itself, rather than collapsing to one "unavailable" line.
+    expect(rows.filter((r) => r.label === 'Both portals')).toHaveLength(1);
+    expect(rows.length).toBeGreaterThan(2);
+  });
+});

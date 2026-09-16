@@ -52,6 +52,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import ts from 'typescript';
 import type { AppConfig } from '../../../src/config/index.js';
 import type { XtmJobSnapshot, XtmRawJob } from '../../../src/detection/types.js';
 import type { LogoutKind } from '../../../src/portal/errors.js';
@@ -724,125 +725,223 @@ function firstCapturedOffer(): RawOffer & Record<string, unknown> {
 // ===========================================================================================
 
 /**
- * Strip comments before looking for anything.
+ * These rules parse the TypeScript rather than matching text against it, and that decision
+ * came out of a review of the first attempt, which did use regexes.
  *
- * The R11 guard above gets away without this because import syntax is distinctive enough
- * that prose cannot imitate it. A bare `fetch` is not: `claim.ts`, `main.ts` and
- * `pollCycle.ts` all use the word in their own comments — "a detail fetch or a file
- * listing", "fetch → diff → gate → act" — and a guard that counted those would fail on
- * three files that issue no request at all, then get "fixed" by weakening it. That is how a
- * guard stops guarding.
+ * Two defects made the change necessary rather than merely tidier. The stripper that removed
+ * comments and string literals before matching was desynchronised by apostrophes inside prose
+ * — "a portal's daily ceiling" in a template literal is enough — and a mis-paired quote
+ * swallows real code until the next one. That left **114 places** across `src/straker` where a
+ * genuine `fetch(url)` compiled, ran, and the guard stayed green. The comment defending it
+ * claimed a crude stripper "can only make this guard stricter, never laxer", which is
+ * backwards: offenders are found by MATCHING text, so removing more text finds fewer of them.
+ *
+ * The parser has no such failure mode. It also knows the difference between `x.fetch` (a
+ * method on an injected port — the DI seam) and `globalThis.fetch` (the global by another
+ * name), which a lookbehind could not express, and it sees a `typeof fetch` type query as the
+ * distinct thing it is.
  */
-function withoutComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+function parse(file: string, source: string): ts.SourceFile {
+  return ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true);
+}
+
+/** Object names through which the global `fetch` can be reached without naming it directly. */
+const GLOBAL_OBJECTS = new Set(['globalThis', 'global', 'window', 'self']);
+
+/**
+ * Every reference to the global `fetch` in a **value** position.
+ *
+ * `typeof fetch` is excluded for the reason R11 excludes `import type`: a type annotation
+ * erases at compile time, so it cannot open a connection, spend the request budget, or exist
+ * at runtime. A value reference to the same global can do all three — and the form matters,
+ * because `httpClient.ts` does not call `fetch(...)` at all. It writes
+ * `options.fetchImpl ?? fetch`, taking the global as a fallback for an injected port, so a
+ * detector looking only for call sites would have found nothing anywhere and passed happily
+ * over a codebase in which every file did the same.
+ */
+function globalFetchUsesIn(file: string, source: string): string[] {
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && node.text === 'fetch') {
+      const parent = node.parent as ts.Node | undefined;
+      if (parent !== undefined && ts.isPropertyAccessExpression(parent) && parent.name === node) {
+        // `something.fetch` — the global only when `something` is a global object.
+        const obj = parent.expression;
+        if (ts.isIdentifier(obj) && GLOBAL_OBJECTS.has(obj.text)) found.push(`${obj.text}.fetch`);
+      } else if (
+        parent !== undefined &&
+        (ts.isTypeQueryNode(parent) || ts.isTypeOfExpression(parent))
+      ) {
+        // `typeof fetch`. As a TYPE query it erases at compile time; as the runtime operator
+        // it is a feature detect that reads a binding without calling it. Neither can open a
+        // connection or spend the budget, which is the line this rule actually draws. A bare
+        // `fetch` elsewhere in the same expression is still caught on its own.
+        // The type-query form is pinned by name in its own test below.
+      } else if (
+        parent !== undefined &&
+        (ts.isPropertyAssignment(parent) ||
+          ts.isPropertySignature(parent) ||
+          ts.isMethodDeclaration(parent) ||
+          ts.isBindingElement(parent)) &&
+        parent.name === node
+      ) {
+        // A member NAMED fetch, not a use of the global one.
+      } else {
+        found.push('fetch');
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parse(file, source));
+  return found;
 }
 
 /**
- * References to the global `fetch` in a **value** position.
+ * Every module specifier a file imports, in all the spellings that reach the runtime.
  *
- * `typeof fetch` is excluded for precisely the reason `import type` is excluded from the
- * R11 rule: a type annotation erases at compile time, so it cannot open a connection, spend
- * the request budget, or exist at runtime. A value reference to the same global can do all
- * three — and the form matters, because `httpClient.ts` does not call `fetch(...)` at all.
- * It writes `options.fetchImpl ?? fetch`, taking the global as a fallback for an injected
- * port, so a detector looking for a call site would have found nothing and passed happily
- * over a codebase where every file did the same.
- *
- * `.fetch(` is excluded too: a method on an injected port is the DI seam, not the wire.
+ * Static `import`, `export … from`, `import()` and `require()` all count. The R11 guard above
+ * learned this the hard way — its comment records that dynamic and side-effect imports "went
+ * straight through it, which was demonstrated by adding a dynamic import of `state/db.js` to a
+ * Straker module and watching this suite stay green" — and the first cut of THIS guard matched
+ * a single spelling, 180 lines below that lesson.
  */
-function globalFetchUsesIn(source: string): string[] {
-  // String literals are stripped as well as comments, and that is not belt-and-braces:
-  // `pollCycle.ts` logs `action: 'fetch'` as the name of a loop step. A detector that
-  // counted it would report the poll cycle as touching the wire, and the obvious "fix"
-  // would have been to exclude pollCycle.ts — quietly exempting the file the rule most
-  // needs to cover.
-  // Deliberately simple literal matching (no escaped-quote handling): these sources contain
-  // no string with an embedded quote near the word `fetch`, and a crude stripper that errs
-  // toward removing MORE text can only make this guard stricter, never laxer.
-  const code = withoutComments(source)
-    .replace(/'[^']*'/g, "''")
-    .replace(/"[^"]*"/g, '""')
-    .replace(/`[^`]*`/g, '``');
-  return [...code.matchAll(/(?<![.\w])(typeof\s+)?fetch(?![\w])/g)]
-    .filter((m) => m[1] === undefined)
-    .map(() => 'fetch');
+function moduleSpecifiersIn(file: string, source: string): string[] {
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier !== undefined &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      found.push(node.moduleSpecifier.text);
+    }
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const dynamic =
+        callee.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(callee) && callee.text === 'require');
+      const first = node.arguments[0];
+      if (dynamic && first !== undefined && ts.isStringLiteral(first)) found.push(first.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parse(file, source));
+  return found;
 }
 
-/** Transport libraries: importing one outside the one file is the same breach as calling one. */
-function transportImportsIn(source: string): string[] {
-  const re = /from\s+['"](node:https?|undici|axios|got|node-fetch)['"]/g;
-  return [...withoutComments(source).matchAll(re)].map((m) => m[1] ?? '');
-}
+/**
+ * The complete set of packages `src/straker` may depend on — an ALLOWLIST, not a denylist.
+ *
+ * A denylist of known HTTP clients was the first attempt and it is the wrong shape: it missed
+ * `import https from 'https'` (valid, idiomatic, and nothing in the lint config requires the
+ * `node:` prefix), `node:http2`, `node:net`, and every client nobody thought to name — `ky`,
+ * `superagent`, the next one. An allowlist inverts the burden: a new dependency fails here
+ * until someone adds it deliberately, which is the property that makes R11's pinned exception
+ * list worth having.
+ */
+const ALLOWED_PACKAGES = new Set([
+  'better-sqlite3',
+  'dotenv',
+  'node:fs',
+  'node:path',
+  'zod',
+  // Reaches the network, and allowed on purpose: DC-4 is about the Straker PORTAL transport —
+  // everything between a claim decision and the wire. The Sheets client is a reporting
+  // destination on the delivery path, governed by the outbox rather than by FR-019's pacing.
+  'googleapis',
+]);
 
 describe('FR-030 (DC-4) — everything between the decision and the wire lives in httpClient.ts', () => {
   /**
    * The invariant held when this guard was written; nothing enforced it. Its sibling R11 has
    * had a walking test since T066, and that asymmetry is what made this worth closing. The
    * hazard is named in `httpClient.ts` itself: adding a *racing* read through `getJson`
-   * silently joins the `deferrable` class and is shed below 120 remaining (FR-019), so the
-   * hot path loses its budget priority with nothing failing and nothing logged.
+   * silently joins the `deferrable` class and is shed below 120 remaining (FR-019), so the hot
+   * path loses its budget priority with nothing failing and nothing logged.
    *
    * DC-4's payoff is concrete rather than tidy — a future third portal of the same family is
    * meant to start by copying one file.
    */
   const TRANSPORT_FILE = 'src/straker/httpClient.ts';
   const rel = (p: string): string => p.replace(/.*\/src\//, 'src/');
+  const read = (f: string): string => readFileSync(f, 'utf8');
 
   it('is reading real sources and the detector actually detects, so a clean pass means something', () => {
-    // Guard the guard. A broken walk or a broken regex would make every rule below vacuously
-    // true, which is the failure a guard is least able to report about itself.
+    // Guard the guard. A broken walk or a broken detector would make every rule below
+    // vacuously true, which is the failure a guard is least able to report about itself.
     expect(sourcesUnder(join(SRC, 'straker')).length).toBeGreaterThan(20);
 
-    expect(globalFetchUsesIn('const doFetch = options.fetchImpl ?? fetch;')).toEqual(['fetch']);
-    expect(globalFetchUsesIn('const r = await fetch(url);')).toEqual(['fetch']);
-    expect(globalFetchUsesIn('readonly fetchImpl?: typeof fetch;')).toEqual([]);
-    expect(globalFetchUsesIn('await this.client.fetch(url);')).toEqual([]);
-    expect(globalFetchUsesIn('// fetch -> diff -> gate -> act')).toEqual([]);
-    // The case that actually caught this detector out, kept as a regression.
-    expect(globalFetchUsesIn("logger.info({ action: 'fetch' });")).toEqual([]);
-    expect(transportImportsIn("import got from 'got';")).toEqual(['got']);
+    const uses = (src: string): string[] => globalFetchUsesIn('t.ts', src);
+    expect(uses('const doFetch = options.fetchImpl ?? fetch;')).toEqual(['fetch']);
+    expect(uses('const r = await fetch(url);')).toEqual(['fetch']);
+    // The bypasses a review found in the regex version, every one of them now caught.
+    expect(uses('await globalThis.fetch(url);')).toEqual(['globalThis.fetch']);
+    expect(uses('await global.fetch(url);')).toEqual(['global.fetch']);
+    expect(uses('await window.fetch(url);')).toEqual(['window.fetch']);
+    expect(uses('const f = fetch; await f(url);')).toEqual(['fetch']);
+    // And the shapes that are NOT a use of the global.
+    // Wrapped in an interface on purpose: as a bare statement `typeof fetch` parses as the
+    // RUNTIME operator, not a type query, so the unwrapped form tested something else.
+    expect(uses('interface O { readonly fetchImpl?: typeof fetch }')).toEqual([]);
+    expect(uses("if (typeof fetch === 'function') { ok(); }")).toEqual([]);
+    expect(uses('await this.client.fetch(url);')).toEqual([]);
+    expect(uses("logger.info({ action: 'fetch' });")).toEqual([]);
+    // The case the regex version could not survive: an apostrophe in prose desynchronised its
+    // quote pairing and swallowed the code after it.
+    expect(uses("// a portal's ceiling\nconst r = await fetch(url);")).toEqual(['fetch']);
+
+    const specs = (src: string): string[] => moduleSpecifiersIn('t.ts', src);
+    expect(specs("import https from 'https';")).toEqual(['https']);
+    expect(specs("await import('undici');")).toEqual(['undici']);
+    expect(specs("require('got');")).toEqual(['got']);
+    expect(specs("export { x } from 'ky';")).toEqual(['ky']);
   });
 
   it('finds the transport where DC-4 says it is, which proves the rule is not passing by accident', () => {
     // If httpClient.ts ever stopped matching, every rule below would pass on an empty set and
     // DC-4 would read as satisfied by a codebase that issues no requests at all.
-    expect(
-      globalFetchUsesIn(readFileSync(join(SRC, 'straker/httpClient.ts'), 'utf8')).length,
-    ).toBeGreaterThan(0);
+    const f = join(SRC, 'straker/httpClient.ts');
+    expect(globalFetchUsesIn(f, read(f)).length).toBeGreaterThan(0);
   });
 
   it('lets no file under src/straker reach the global fetch except httpClient.ts', () => {
     const offenders = sourcesUnder(join(SRC, 'straker'))
       .filter((f) => rel(f) !== TRANSPORT_FILE)
-      .flatMap((f) => globalFetchUsesIn(readFileSync(f, 'utf8')).map(() => rel(f)));
+      .flatMap((f) => globalFetchUsesIn(f, read(f)).map((how) => `${rel(f)} -> ${how}`));
 
     expect(offenders).toEqual([]);
   });
 
   it('pins the one type-only reference by name, so a second cannot arrive unnoticed', () => {
     // `main.ts` types its injectable port as `typeof fetch` so a test can hand the assembly a
-    // fake. That erases at compile time and is not a breach — but recording it by name is
-    // what makes it an exception somebody added deliberately rather than one nobody noticed,
-    // which is the same reason R11 pins `outcomePolicy.ts -> state`.
+    // fake. That erases at compile time and is not a breach — but recording it by name is what
+    // makes it an exception somebody added deliberately rather than one nobody noticed, the
+    // same reason R11 pins `outcomePolicy.ts -> state`.
     const typeOnly = sourcesUnder(join(SRC, 'straker'))
-      .filter((f) => rel(f) !== TRANSPORT_FILE)
-      .filter((f) =>
-        /(?<![.\w])typeof\s+fetch(?![\w])/.test(withoutComments(readFileSync(f, 'utf8'))),
-      )
-      .map(rel);
+      .filter((f) => {
+        let hit = false;
+        const visit = (n: ts.Node): void => {
+          if (ts.isTypeQueryNode(n) && n.exprName.getText() === 'fetch') hit = true;
+          ts.forEachChild(n, visit);
+        };
+        visit(parse(f, read(f)));
+        return hit;
+      })
+      .map(rel)
+      .filter((f) => f !== TRANSPORT_FILE);
 
     expect(typeOnly).toEqual(['src/straker/main.ts']);
   });
 
-  it('lets no file under src/straker import a transport library except httpClient.ts', () => {
+  it('lets src/straker depend only on the packages it is recorded as depending on', () => {
     // The other half of "everything between the decision and the wire". A second HTTP client
-    // would obey none of FR-019's pacing, and the budget it spent would be invisible to the
-    // one that does.
-    const offenders = sourcesUnder(join(SRC, 'straker'))
-      .filter((f) => rel(f) !== TRANSPORT_FILE)
-      .flatMap((f) =>
-        transportImportsIn(readFileSync(f, 'utf8')).map((lib) => `${rel(f)} -> ${lib}`),
-      );
+    // would obey none of FR-019's pacing, and the budget it spent would be invisible to the one
+    // that does — so a new package has to be argued for here before it can be imported.
+    const offenders = sourcesUnder(join(SRC, 'straker')).flatMap((f) =>
+      moduleSpecifiersIn(f, read(f))
+        .filter((spec) => !spec.startsWith('.') && !ALLOWED_PACKAGES.has(spec))
+        .map((spec) => `${rel(f)} -> ${spec}`),
+    );
 
     expect(offenders).toEqual([]);
   });

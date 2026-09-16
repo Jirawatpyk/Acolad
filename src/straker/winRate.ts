@@ -212,10 +212,6 @@ export type OfferStanding =
   | { readonly kind: 'undecided' };
 
 /**
- * A measurement period, applied to `occurredAtMs`. Half-open — `fromMs` inclusive, `toMs`
- * exclusive — so two adjacent periods can never count the same event twice.
- */
-/**
  * Below this many winnable offers the figure is a weak signal. SC-004 sets a target only
  * after roughly two weeks of baseline, which at the stated 2-3 offers a day is about thirty
  * offers; ten is the point below which a single race moves the rate by ten points or more.
@@ -226,6 +222,10 @@ export type OfferStanding =
  */
 export const WEAK_SIGNAL_BELOW = 10;
 
+/**
+ * A measurement period, applied to `occurredAtMs`. Half-open — `fromMs` inclusive, `toMs`
+ * exclusive — so two adjacent periods can never count the same event twice.
+ */
 export interface WinRateWindow {
   readonly fromMs?: number;
   readonly toMs?: number;
