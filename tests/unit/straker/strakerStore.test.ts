@@ -12,6 +12,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
@@ -861,7 +862,18 @@ describe('a transient failure must never cost the ledger', () => {
       expect(error).toMatchObject({ code: 'SQLITE_READONLY' });
       expect(filesUnder(strakerDir).filter((f) => f.includes('.corrupt-'))).toEqual([]);
     } finally {
-      chmodSync(dbPath, 0o666);
+      // Restore the SIDECARS too, not just the database file. SQLite creates `-wal` and
+      // `-shm` with the permissions of the database file itself, so the failed open above
+      // left read-only sidecars behind — and WAL cannot take a write lock against a
+      // read-only `-shm`, so the reopen below still fails with SQLITE_READONLY even once
+      // `straker.db` is writable again.
+      //
+      // This is why the test passed on Windows and failed on POSIX CI: `chmod` on Windows
+      // only toggles the read-only attribute, and the sidecars do not inherit it there.
+      // The assertions above are unchanged — only the cleanup was incomplete.
+      for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+        if (existsSync(path)) chmodSync(path, 0o666);
+      }
     }
 
     // And the held work — the ledger's only source — is still there to be read.
