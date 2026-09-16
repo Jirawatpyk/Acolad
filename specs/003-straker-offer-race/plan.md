@@ -224,7 +224,8 @@ src/
 │   ├── probe.ts              # built · probe cycle (read-only). `runProbeCycle` has had no
 │   │                         #   production caller since T072; kept deliberately (T078).
 │   │                         #   `RawOffer` lives here and IS used throughout the bot
-│   │                         # reconMain.ts — DELETED by T072 (the probe's entry point)
+│   ├── (reconMain.ts)        # DELETED by T072 — the probe's entry point. Kept as a line so
+│   │                         #   the removal is visible rather than merely absent
 │   ├── types.ts              # built · shared vocabulary (DC-2), TYPE-ONLY — the coverage
 │   │                         #   gate excludes **/types.ts, so no runtime member may live here
 │   ├── outcomePolicy.ts      # built · NOT IN THE ORIGINAL PLAN — the runtime half of

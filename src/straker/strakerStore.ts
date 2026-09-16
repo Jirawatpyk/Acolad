@@ -726,10 +726,22 @@ export class StrakerStore {
   }
 
   /** Every event, oldest first — the tracking record's source. */
-  listEvents(): OfferEvent[] {
-    const rows = this.db
-      .prepare('SELECT * FROM offer_events ORDER BY occurred_at_ms, obj_id, event_type')
-      .all() as EventRow[];
+  listEvents(window?: { readonly fromMs: number; readonly toMs: number }): OfferEvent[] {
+    // The window is applied in SQL rather than by the caller, because the caller that needs
+    // it runs inside the XTM bot's 09:00 report: `combinedSummary` wants fourteen days and
+    // would otherwise materialise every event ever written in order to discard most of them.
+    // Half-open to match `WinRateWindow`, so two adjacent windows cannot count one event twice.
+    const rows =
+      window === undefined
+        ? (this.db
+            .prepare('SELECT * FROM offer_events ORDER BY occurred_at_ms, obj_id, event_type')
+            .all() as EventRow[])
+        : (this.db
+            .prepare(
+              `SELECT * FROM offer_events WHERE occurred_at_ms >= ? AND occurred_at_ms < ?
+                ORDER BY occurred_at_ms, obj_id, event_type`,
+            )
+            .all(window.fromMs, window.toMs) as EventRow[]);
     return rows.map(toEvent);
   }
 

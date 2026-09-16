@@ -104,7 +104,7 @@ import { parseHHMM, parseWorkdays } from '../schedule/parseSchedule.js';
 import { holidaysForEffectiveDay } from '../schedule/thaiHolidays.js';
 import type { CardRow } from '../reporting/chatCard.js';
 import { STRAKER_EFFORT_UNIT } from './outcomePolicy.js';
-import { STRAKER_DB_FILENAME, StrakerStore, type StrakerDB } from './strakerStore.js';
+import { STRAKER_DB_FILENAME, StrakerStore } from './strakerStore.js';
 import { STRAKER_LOG_NAME } from './logger.js';
 import { WEAK_SIGNAL_BELOW, computeWinRate } from './winRate.js';
 
@@ -780,7 +780,7 @@ export function readStrakerWorkload(spec: StrakerReadSpec): PortalResult {
   }
 
   try {
-    const held = new StrakerStore(db as unknown as StrakerDB)
+    const held = new StrakerStore(db)
       .heldWork()
       .map((w) => ({ effort: w.effortWords, deadlineMs: w.deadlineMs }));
 
@@ -804,6 +804,29 @@ export function readStrakerWorkload(spec: StrakerReadSpec): PortalResult {
   } finally {
     db.close();
   }
+}
+
+/**
+ * The window the win-rate row is measured over, which is deliberately NOT the card's.
+ *
+ * The rest of the card describes the last 24 hours. At the spec's stated 2-3 offers a day
+ * that makes `winnable` 0-3, so the figure could never reach {@link WEAK_SIGNAL_BELOW} and
+ * the weak-signal caveat would be permanently attached — a caveat that is always true is one
+ * people stop reading. Worse, SC-004's "target set only after two weeks of baseline" would
+ * never arrive on this surface at all, which is the whole reason T076 exists.
+ *
+ * Fourteen days is that baseline, and at 2-3 offers a day it crosses ten winnable in about a
+ * week, so the caveat drops off when it stops being true.
+ */
+export const WIN_RATE_WINDOW_DAYS = 14;
+
+/** The fourteen-day window {@link WIN_RATE_WINDOW_DAYS} describes, as a period. */
+function winRatePeriod(nowMs: number): SummaryPeriod {
+  return {
+    fromMs: nowMs - WIN_RATE_WINDOW_DAYS * 24 * 3_600_000,
+    toMs: nowMs,
+    label: `the last ${String(WIN_RATE_WINDOW_DAYS)} days`,
+  };
 }
 
 /**
@@ -832,29 +855,6 @@ export function readStrakerWorkload(spec: StrakerReadSpec): PortalResult {
  * Never throws: `combinedReportRows` promises the report still goes out, and a win rate is
  * the least important thing on it.
  */
-/**
- * The window the win-rate row is measured over, which is deliberately NOT the card's.
- *
- * The rest of the card describes the last 24 hours. At the spec's stated 2-3 offers a day
- * that makes `winnable` 0-3, so the figure could never reach {@link WEAK_SIGNAL_BELOW} and
- * the weak-signal caveat would be permanently attached — a caveat that is always true is one
- * people stop reading. Worse, SC-004's "target set only after two weeks of baseline" would
- * never arrive on this surface at all, which is the whole reason T076 exists.
- *
- * Fourteen days is that baseline, and at 2-3 offers a day it crosses ten winnable in about a
- * week, so the caveat drops off when it stops being true.
- */
-export const WIN_RATE_WINDOW_DAYS = 14;
-
-/** The fourteen-day window {@link WIN_RATE_WINDOW_DAYS} describes, as a period. */
-function winRatePeriod(nowMs: number): SummaryPeriod {
-  return {
-    fromMs: nowMs - WIN_RATE_WINDOW_DAYS * 24 * 3_600_000,
-    toMs: nowMs,
-    label: `the last ${String(WIN_RATE_WINDOW_DAYS)} days`,
-  };
-}
-
 export function strakerWinRateRow(period: SummaryPeriod, stateDir: string): CardRow {
   const label = 'Straker win rate';
   const source = join(stateDir, STRAKER_DB_FILENAME);
@@ -867,8 +867,10 @@ export function strakerWinRateRow(period: SummaryPeriod, stateDir: string): Card
   }
 
   try {
-    const events = new StrakerStore(db as unknown as StrakerDB).listEvents();
-    const rate = computeWinRate(events, { fromMs: period.fromMs, toMs: period.toMs });
+    // Bounded in SQL. Unbounded, this read materialises every event ever written in order to
+    // answer a fourteen-day question, inside the XTM bot's 09:00 report.
+    const window = { fromMs: period.fromMs, toMs: period.toMs };
+    const rate = computeWinRate(new StrakerStore(db).listEvents(window), window);
 
     // FR-017a: the turn-away count travels with the rate, always, including on the n/a line.
     // "Reporting only one of the two numbers makes the other invisible" — and the two point at
@@ -1157,19 +1159,32 @@ export function combinedReportRows(spec: CombinedRowsSpec): CardRow[] {
     // a throw from the least important row here would discard the XTM figure, the Straker
     // figure and the combined total that were already computed successfully. The section is
     // not optional; this row is.
+    // Built BEFORE deciding whether to show it, which is the difference between suppressing a
+    // duplicate message and suppressing information. An earlier cut skipped the row whenever
+    // the portal read had failed — but `readStrakerWorkload` fails when `heldWork()` does, and
+    // `offer_events` can read perfectly while `held_work` cannot. That dropped a computable
+    // figure for a fault in a different table, which is the "going quiet on an unreadable
+    // record" this row's own docstring refuses to do.
+    let winRateRow: CardRow;
     try {
-      // One fault, one warning. When the Straker record is unreadable the portal row above has
-      // already said so in the same words; a second identical line reads as two problems and
-      // makes the card longer at the moment it is hardest to scan.
-      const strakerUnread = view.portals.some((p) => !p.read && p.failure.portal === 'Straker');
-      if (!strakerUnread) {
-        rows.push(strakerWinRateRow(winRatePeriod(spec.nowMs), strakerStateDir));
-      }
-    } catch {
-      // Deliberately silent: `strakerWinRateRow` already turns every failure it can see into
-      // a stated row, so reaching here means something outside its contract changed. The
-      // report still goes out, which is what FR-018 asks of this function.
+      winRateRow = strakerWinRateRow(winRatePeriod(spec.nowMs), strakerStateDir);
+    } catch (err) {
+      // Never silent. `strakerWinRateRow` already turns every failure it can see into a stated
+      // row, so reaching here means something outside its contract changed — and a row that
+      // vanishes is indistinguishable from one that was never wanted. Fail loud, in the card.
+      winRateRow = {
+        emoji: '⚠️',
+        label: 'Straker win rate',
+        value: `could not be computed — ${describe(err)}`,
+      };
     }
+
+    // One fault, one line — but only when it really is the same fault. Both rows have to be
+    // reporting the record as unreadable before the second is dropped as a repetition.
+    const portalUnread = view.portals.some((p) => !p.read && p.failure.portal === 'Straker');
+    const rowIsUnreadable = (winRateRow.value ?? '').includes('record unreadable');
+    if (!(portalUnread && rowIsUnreadable)) rows.push(winRateRow);
+
     return rows;
   } catch (err) {
     // The last line of defence, and it should never be reached: both readers already turn
