@@ -718,3 +718,132 @@ function firstCapturedOffer(): RawOffer & Record<string, unknown> {
   return JSON.parse(readFileSync(join(OFFERS_DIR, first), 'utf8')) as RawOffer &
     Record<string, unknown>;
 }
+
+// ===========================================================================================
+// T077 / FR-030 (DC-4) — transport lives in ONE file, and now something enforces that
+// ===========================================================================================
+
+/**
+ * Strip comments before looking for anything.
+ *
+ * The R11 guard above gets away without this because import syntax is distinctive enough
+ * that prose cannot imitate it. A bare `fetch` is not: `claim.ts`, `main.ts` and
+ * `pollCycle.ts` all use the word in their own comments — "a detail fetch or a file
+ * listing", "fetch → diff → gate → act" — and a guard that counted those would fail on
+ * three files that issue no request at all, then get "fixed" by weakening it. That is how a
+ * guard stops guarding.
+ */
+function withoutComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
+/**
+ * References to the global `fetch` in a **value** position.
+ *
+ * `typeof fetch` is excluded for precisely the reason `import type` is excluded from the
+ * R11 rule: a type annotation erases at compile time, so it cannot open a connection, spend
+ * the request budget, or exist at runtime. A value reference to the same global can do all
+ * three — and the form matters, because `httpClient.ts` does not call `fetch(...)` at all.
+ * It writes `options.fetchImpl ?? fetch`, taking the global as a fallback for an injected
+ * port, so a detector looking for a call site would have found nothing and passed happily
+ * over a codebase where every file did the same.
+ *
+ * `.fetch(` is excluded too: a method on an injected port is the DI seam, not the wire.
+ */
+function globalFetchUsesIn(source: string): string[] {
+  // String literals are stripped as well as comments, and that is not belt-and-braces:
+  // `pollCycle.ts` logs `action: 'fetch'` as the name of a loop step. A detector that
+  // counted it would report the poll cycle as touching the wire, and the obvious "fix"
+  // would have been to exclude pollCycle.ts — quietly exempting the file the rule most
+  // needs to cover.
+  // Deliberately simple literal matching (no escaped-quote handling): these sources contain
+  // no string with an embedded quote near the word `fetch`, and a crude stripper that errs
+  // toward removing MORE text can only make this guard stricter, never laxer.
+  const code = withoutComments(source)
+    .replace(/'[^']*'/g, "''")
+    .replace(/"[^"]*"/g, '""')
+    .replace(/`[^`]*`/g, '``');
+  return [...code.matchAll(/(?<![.\w])(typeof\s+)?fetch(?![\w])/g)]
+    .filter((m) => m[1] === undefined)
+    .map(() => 'fetch');
+}
+
+/** Transport libraries: importing one outside the one file is the same breach as calling one. */
+function transportImportsIn(source: string): string[] {
+  const re = /from\s+['"](node:https?|undici|axios|got|node-fetch)['"]/g;
+  return [...withoutComments(source).matchAll(re)].map((m) => m[1] ?? '');
+}
+
+describe('FR-030 (DC-4) — everything between the decision and the wire lives in httpClient.ts', () => {
+  /**
+   * The invariant held when this guard was written; nothing enforced it. Its sibling R11 has
+   * had a walking test since T066, and that asymmetry is what made this worth closing. The
+   * hazard is named in `httpClient.ts` itself: adding a *racing* read through `getJson`
+   * silently joins the `deferrable` class and is shed below 120 remaining (FR-019), so the
+   * hot path loses its budget priority with nothing failing and nothing logged.
+   *
+   * DC-4's payoff is concrete rather than tidy — a future third portal of the same family is
+   * meant to start by copying one file.
+   */
+  const TRANSPORT_FILE = 'src/straker/httpClient.ts';
+  const rel = (p: string): string => p.replace(/.*\/src\//, 'src/');
+
+  it('is reading real sources and the detector actually detects, so a clean pass means something', () => {
+    // Guard the guard. A broken walk or a broken regex would make every rule below vacuously
+    // true, which is the failure a guard is least able to report about itself.
+    expect(sourcesUnder(join(SRC, 'straker')).length).toBeGreaterThan(20);
+
+    expect(globalFetchUsesIn('const doFetch = options.fetchImpl ?? fetch;')).toEqual(['fetch']);
+    expect(globalFetchUsesIn('const r = await fetch(url);')).toEqual(['fetch']);
+    expect(globalFetchUsesIn('readonly fetchImpl?: typeof fetch;')).toEqual([]);
+    expect(globalFetchUsesIn('await this.client.fetch(url);')).toEqual([]);
+    expect(globalFetchUsesIn('// fetch -> diff -> gate -> act')).toEqual([]);
+    // The case that actually caught this detector out, kept as a regression.
+    expect(globalFetchUsesIn("logger.info({ action: 'fetch' });")).toEqual([]);
+    expect(transportImportsIn("import got from 'got';")).toEqual(['got']);
+  });
+
+  it('finds the transport where DC-4 says it is, which proves the rule is not passing by accident', () => {
+    // If httpClient.ts ever stopped matching, every rule below would pass on an empty set and
+    // DC-4 would read as satisfied by a codebase that issues no requests at all.
+    expect(
+      globalFetchUsesIn(readFileSync(join(SRC, 'straker/httpClient.ts'), 'utf8')).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('lets no file under src/straker reach the global fetch except httpClient.ts', () => {
+    const offenders = sourcesUnder(join(SRC, 'straker'))
+      .filter((f) => rel(f) !== TRANSPORT_FILE)
+      .flatMap((f) => globalFetchUsesIn(readFileSync(f, 'utf8')).map(() => rel(f)));
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('pins the one type-only reference by name, so a second cannot arrive unnoticed', () => {
+    // `main.ts` types its injectable port as `typeof fetch` so a test can hand the assembly a
+    // fake. That erases at compile time and is not a breach — but recording it by name is
+    // what makes it an exception somebody added deliberately rather than one nobody noticed,
+    // which is the same reason R11 pins `outcomePolicy.ts -> state`.
+    const typeOnly = sourcesUnder(join(SRC, 'straker'))
+      .filter((f) => rel(f) !== TRANSPORT_FILE)
+      .filter((f) =>
+        /(?<![.\w])typeof\s+fetch(?![\w])/.test(withoutComments(readFileSync(f, 'utf8'))),
+      )
+      .map(rel);
+
+    expect(typeOnly).toEqual(['src/straker/main.ts']);
+  });
+
+  it('lets no file under src/straker import a transport library except httpClient.ts', () => {
+    // The other half of "everything between the decision and the wire". A second HTTP client
+    // would obey none of FR-019's pacing, and the budget it spent would be invisible to the
+    // one that does.
+    const offenders = sourcesUnder(join(SRC, 'straker'))
+      .filter((f) => rel(f) !== TRANSPORT_FILE)
+      .flatMap((f) =>
+        transportImportsIn(readFileSync(f, 'utf8')).map((lib) => `${rel(f)} -> ${lib}`),
+      );
+
+    expect(offenders).toEqual([]);
+  });
+});

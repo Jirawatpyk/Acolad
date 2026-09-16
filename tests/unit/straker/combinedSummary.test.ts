@@ -42,6 +42,7 @@ import {
   readCeilingFromEnv,
   readCycleTimestamps,
   readStrakerWorkload,
+  strakerWinRateRow,
   combinedReportRows,
   readXtmWorkload,
   UPTIME_MIN_GRACE_MS,
@@ -1202,5 +1203,123 @@ describe('combinedReportRows — the rows the XTM 09:00 report renders (T060a, F
     expect(text).toContain('350');
     expect(text).toContain('120');
     expect(text).toContain('470');
+  });
+});
+
+// ===========================================================================================
+// T076 / SC-004 — the win rate has to reach the report, not wait for someone to run a script
+// ===========================================================================================
+
+describe('T076 — the Straker win rate reaches the 09:00 report (SC-004)', () => {
+  /**
+   * SC-004 says the win rate is "measured and reported **continuously**". It was measured —
+   * `computeWinRate` is correct and tested — but its only caller was the manual
+   * `npm run straker:win-rate`. The gap that matters is not a missing number: SC-004 sets a
+   * target only after a two-week baseline, and a baseline nobody is shown is one nobody reads.
+   */
+
+  async function strakerRecord(events: readonly unknown[]): Promise<string> {
+    const dir = tempDir();
+    const stateDir = join(dir, 'straker');
+    mkdirSync(stateDir, { recursive: true });
+    const { openStrakerDatabase, StrakerStore } =
+      await import('../../../src/straker/strakerStore.js');
+    const opened = openStrakerDatabase(stateDir, NOW_MS);
+    const store = new StrakerStore(opened.db);
+    for (const e of events) store.recordEvent(e as never);
+    opened.db.close();
+    return stateDir;
+  }
+
+  const won = (id: string, atMs = NOW_MS - 3_600_000) => ({
+    objId: id,
+    occurredAtMs: atMs,
+    eventType: 'claim' as const,
+    outcome: 'won' as const,
+    effortWords: 4,
+    deadlineMs: NOW_MS + 24 * 3_600_000,
+  });
+  const lost = (id: string, atMs = NOW_MS - 3_600_000) => ({
+    ...won(id, atMs),
+    outcome: 'lost' as const,
+  });
+  const turnedAway = (id: string, atMs = NOW_MS - 3_600_000) => ({
+    objId: id,
+    occurredAtMs: atMs,
+    eventType: 'skip' as const,
+    skipReason: 'ineligible_language' as const,
+  });
+
+  it('reports the rate, the numerator and the denominator — never a bare percentage', async () => {
+    const stateDir = await strakerRecord([won('a'), lost('b'), lost('c')]);
+
+    const row = strakerWinRateRow(PERIOD, stateDir);
+
+    expect(row.label).toBe('Straker win rate');
+    // 1 of 3 winnable. The counts travel with the percentage because at 2-3 offers a day a
+    // bare "33%" invites a decision the sample cannot support.
+    expect(row.value).toContain('33.3%');
+    expect(row.value).toContain('1 won of 3');
+  });
+
+  it('says n/a rather than 0% when nothing was genuinely winnable', async () => {
+    // FR-017's only exclusion is offers the team's own rules turned away. A day of those is
+    // not a day of losing — reporting 0% would read as the bot failing at its job.
+    const stateDir = await strakerRecord([turnedAway('a'), turnedAway('b')]);
+
+    const row = strakerWinRateRow(PERIOD, stateDir);
+
+    expect(row.value).toContain('n/a');
+    expect(row.value).not.toContain('0.0%');
+  });
+
+  it('marks a small sample as a weak signal, which is what SC-004 turns on', async () => {
+    const stateDir = await strakerRecord([won('a'), lost('b')]);
+
+    const row = strakerWinRateRow(PERIOD, stateDir);
+
+    expect(row.value).toMatch(/weak signal/i);
+  });
+
+  it('counts only what happened inside the period', async () => {
+    // A figure quoted without its window is the failure this guards: a loss from last week
+    // must not drag down today's line.
+    const stateDir = await strakerRecord([won('a'), lost('old', NOW_MS - 8 * 24 * 3_600_000)]);
+
+    const row = strakerWinRateRow(PERIOD, stateDir);
+
+    expect(row.value).toContain('1 won of 1');
+  });
+
+  it('says the record was unreadable rather than going quiet', async () => {
+    const row = strakerWinRateRow(PERIOD, join(tempDir(), 'never-existed'));
+
+    expect(row.emoji).toBe('⚠️');
+    expect(row.value).toMatch(/unreadable/i);
+  });
+
+  it('never throws, whatever the state directory is', () => {
+    expect(() => strakerWinRateRow(PERIOD, '')).not.toThrow();
+  });
+
+  it('is actually wired into the report rows — the seam, not just the capability', async () => {
+    // The lesson this feature learned five times: a capability can ship built, tested and
+    // unreachable. Asserting the row exists in `combinedReportRows` is the seam test.
+    const stateDir = await strakerRecord([won('a'), lost('b')]);
+    const xtmDir = tempDir();
+
+    const rows = combinedReportRows({
+      xtm: {
+        stateDir: xtmDir,
+        metric: 'words',
+        ceilingPerDay: 3_500,
+        dayOf: (ms) =>
+          ms === null ? null : new Date(ms + 7 * 3_600_000).toISOString().slice(0, 10),
+      },
+      strakerStateDir: stateDir,
+      nowMs: NOW_MS,
+    });
+
+    expect(rows.some((r) => r.label === 'Straker win rate')).toBe(true);
   });
 });

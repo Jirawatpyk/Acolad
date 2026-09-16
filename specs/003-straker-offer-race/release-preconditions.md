@@ -149,4 +149,28 @@ shape is confirmed on two jobs and resurrecting evidence collection should be ch
 stops being worth it, deleting them is the follow-up; `probe.ts` itself must stay regardless,
 since `RawOffer` is used throughout the bot.
 
+> #### T078 — decided 2026-09-16: **KEEP**, and on evidence rather than sentiment
+>
+> The follow-up above was left open, so `/speckit-converge` raised it as `unrequested` code.
+> The decision is to keep both, and the deciding fact is one nobody had written down:
+>
+> **The live bot does not preserve raw offer payloads.** It parses, and on a shape it does
+> not recognise it fails loud and alerts (FR-023) — but the payload that would let someone
+> *fix* the parser is not kept anywhere. `CaptureStore` is the only code in the repository
+> that writes one to disk. Deleting it would not remove dead weight; it would remove the only
+> means of recovering the evidence, at a moment when `offerParse.ts` still opens by saying the
+> evidence is "three files, of which only **two are** independent jobs" — unchanged since RP-5
+> — and RP-4 has still not put a single real claim through the path.
+>
+> **Reopen trigger, so this is a decision and not a deferral**: delete both once the parser has
+> been confirmed against ten or more independent offers, or once RP-4 closes and the observed
+> payload shapes have held steady for a month. `probe.ts` itself stays regardless — `RawOffer`
+> is used throughout the bot.
+>
+> **Observed while deciding, not acted on**: a third option exists that neither keeping nor
+> deleting covers — wiring `CaptureStore` into the parser's *failure* path, so an unrecognised
+> payload is written to disk as it alerts. That would turn code with no caller into the thing
+> that closes the evidence gap. It is out of T078's scope (which was to decide, not to build)
+> and is left here for the owner rather than done unasked.
+
 > Probe deleted: **2026-09-16**, on the owner's instruction. Password rotation (RP-1) is now safe to perform.

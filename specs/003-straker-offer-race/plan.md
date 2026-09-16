@@ -206,19 +206,25 @@ specs/003-straker-offer-race/
 ```text
 src/
 ├── straker/                  # EXTENDED — started by the capture probe, already real
-│   │                         #   STATUS as of 2026-09-15: Phases 1-3 built; Phase 4-6 files
-│   │                         #   below marked "not built" do not exist yet
+│   │                         #   STATUS as of 2026-09-16 (T079): ALL phases built and the
+│   │                         #   bot is live. Every file below exists except reconMain.ts,
+│   │                         #   which T072/RP-5 deleted with the capture probe
 │   ├── httpClient.ts         # built · transport in one file (DC-4): cookie jar,
 │   │                         #   Origin/Referer, budget headers, loud non-2xx,
 │   │                         #   retry-with-backoff, opt-in per-attempt deadline
 │   ├── session.ts            # built · sign-in; vendor identity read, never pinned
 │   ├── offersApi.ts          # built · open-offer read + shape guards
 │   ├── offerTracker.ts       # built · appeared / still-here / vanished (pure)
-│   ├── captureStore.ts       # built · probe evidence on disk
+│   ├── captureStore.ts       # built · probe evidence on disk. No production caller since
+│   │                         #   T072; KEPT on the T078 decision — the live bot does not
+│   │                         #   preserve raw payloads, and the parser still stands on two
+│   │                         #   independent jobs
 │   ├── config.ts             # built · ceiling, throughput, schedule, ports; TWO loaders,
 │   │                         #   the probe's left untouched so it cannot fail-fast mid-capture
-│   ├── probe.ts              # built · probe cycle (read-only)
-│   ├── reconMain.ts          # built · probe entry; deleted when the probe ends (T072)
+│   ├── probe.ts              # built · probe cycle (read-only). `runProbeCycle` has had no
+│   │                         #   production caller since T072; kept deliberately (T078).
+│   │                         #   `RawOffer` lives here and IS used throughout the bot
+│   │                         # reconMain.ts — DELETED by T072 (the probe's entry point)
 │   ├── types.ts              # built · shared vocabulary (DC-2), TYPE-ONLY — the coverage
 │   │                         #   gate excludes **/types.ts, so no runtime member may live here
 │   ├── outcomePolicy.ts      # built · NOT IN THE ORIGINAL PLAN — the runtime half of
@@ -237,11 +243,21 @@ src/
 │   ├── logger.ts             # built · own logger (the XTM one is bound to AppConfig)
 │   ├── pollCycle.ts          # built · fetch → diff → gate → act → persist → notify (DC-3)
 │   ├── main.ts               # built · long-running entry + composition root, supervised
-│   ├── reconcile.ts          # not built (T053) · portal's assigned work vs our record
-│   ├── trackingSink.ts       # not built (T052) · Straker's own tracking file
-│   ├── notifier.ts           # not built (T054/T055) · own announcement channel + alerts
-│   ├── combinedSummary.ts    # not built (T060) · reads BOTH portals at reporting time only
-│   └── winRateReport.ts      # not built (T056) · ops script
+│   ├── reconcile.ts          # built · portal's assigned work vs our record; also RELEASES
+│   │                         #   finished work back to the ledger (T056b)
+│   ├── trackingSink.ts       # built · Straker's own tracking file
+│   ├── notifier.ts           # built · own announcement channel + alerts
+│   ├── dispatcher.ts         # built · NOT IN THE ORIGINAL PLAN — the drain: outbox rows to
+│   │                         #   their senders, one interface written before the senders
+│   ├── combinedSummary.ts    # built · reads BOTH portals at reporting time only, read-only
+│   │                         #   handles; also renders the win-rate row (T076)
+│   ├── winRate.ts            # built · NOT IN THE ORIGINAL PLAN — pure win-rate computation
+│   │                         #   (FR-017), split from the script so the report can use it
+│   ├── winRateReport.ts      # built · ops script — npm run straker:win-rate
+│   ├── requeue.ts            # built · NOT IN THE ORIGINAL PLAN — ops script; dead outbox
+│   │                         #   rows back to pending (npm run straker:outbox:requeue)
+│   └── unbar.ts              # built · NOT IN THE ORIGINAL PLAN — ops script; lifts the
+│                             #   durable claiming bar after a 403 (T073, npm run straker:unbar)
 
    NOTE: rate limiting, backoff and session renewal are NOT separate modules —
    DC-4 puts every request-issuing and request-pacing concern inside httpClient.ts.
@@ -258,7 +274,8 @@ src/
 tests/
 ├── unit/straker/             # pure logic, test-first
 ├── integration/straker/      # stub transport; failure-mode suite
-└── live/straker/             # behind the live flag, never in CI — not created yet (T069)
+└── live/straker/             # behind the live flag, never in CI — smoke.test.ts (T069),
+                              #   5 tests, skipped unless the flag is set
 ```
 
 **Structure Decision**: extend the existing `src/straker/` package that the capture probe already created — its transport, sign-in, offer reader and sighting tracker are carried into the bot rather than rewritten, rather than introducing `packages/`. This keeps the diff additive, keeps the live XTM bot untouched, and leaves the monorepo move as a clean, separate, mechanical change later. DC-4 is already satisfied — all transport lives in `httpClient.ts` — and DC-3 is expressed by naming `pollCycle.ts`'s steps to match the XTM loop exactly.

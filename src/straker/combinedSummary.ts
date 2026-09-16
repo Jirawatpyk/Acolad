@@ -106,6 +106,7 @@ import type { CardRow } from '../reporting/chatCard.js';
 import { STRAKER_EFFORT_UNIT } from './outcomePolicy.js';
 import { STRAKER_DB_FILENAME, StrakerStore, type StrakerDB } from './strakerStore.js';
 import { STRAKER_LOG_NAME } from './logger.js';
+import { WEAK_SIGNAL_BELOW, computeWinRate } from './winRate.js';
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -805,6 +806,71 @@ export function readStrakerWorkload(spec: StrakerReadSpec): PortalResult {
   }
 }
 
+/**
+ * The Straker win rate as one row of the 09:00 report (T076, SC-004).
+ *
+ * SC-004 asks for the win rate to be "measured and reported **continuously**". It was
+ * measured — `computeWinRate` is correct and covered — but its only caller was
+ * `npm run straker:win-rate`, a command somebody has to remember to type. The gap that
+ * mattered was never a missing number: SC-004 sets a target only after roughly two weeks of
+ * baseline, and a baseline nobody is shown is a baseline nobody reads, which leaves the
+ * polling rhythm untuned for want of a figure the bot already knew.
+ *
+ * Deliberately **not** part of the combined view. That machinery exists to decide when two
+ * portals' numbers may be added together, and a win rate is not combinable: XTM has no
+ * equivalent, and averaging one portal's rate with nothing would invent a figure. So this is
+ * a Straker-only row appended beside the combined ones, not a third column in them.
+ *
+ * Three things it refuses to do, each a way the number could mislead:
+ * - report a bare percentage — the counts travel with it, because at 2-3 offers a day "33%"
+ *   invites a decision the sample cannot support;
+ * - report `0%` when nothing was winnable — FR-017's only exclusion is work the team's own
+ *   rules turned away, and a day of those is not a day of losing;
+ * - go quiet when the record cannot be read — an absent row reads as "no races", which is
+ *   the one thing an unreadable record does not say.
+ *
+ * Never throws: `combinedReportRows` promises the report still goes out, and a win rate is
+ * the least important thing on it.
+ */
+export function strakerWinRateRow(period: SummaryPeriod, stateDir: string): CardRow {
+  const label = 'Straker win rate';
+  const source = join(stateDir, STRAKER_DB_FILENAME);
+
+  let db: Database.Database;
+  try {
+    db = openRecordReadOnly(source);
+  } catch (err) {
+    return { emoji: '⚠️', label, value: `record unreadable — ${describe(err)}` };
+  }
+
+  try {
+    const events = new StrakerStore(db as unknown as StrakerDB).listEvents();
+    const rate = computeWinRate(events, { fromMs: period.fromMs, toMs: period.toMs });
+
+    if (rate.ratePct === null) {
+      return {
+        label,
+        value: `n/a — no genuinely winnable offers in ${period.label}`,
+      };
+    }
+
+    const caveat =
+      rate.winnable < WEAK_SIGNAL_BELOW
+        ? ` (weak signal — fewer than ${String(WEAK_SIGNAL_BELOW)} winnable)`
+        : '';
+    return {
+      label,
+      value:
+        `${rate.ratePct.toFixed(1)}% — ${String(rate.won)} won of ` +
+        `${String(rate.winnable)} winnable in ${period.label}${caveat}`,
+    };
+  } catch (err) {
+    return { emoji: '⚠️', label, value: `record unreadable — ${describe(err)}` };
+  } finally {
+    db.close();
+  }
+}
+
 function readStrakerRetries(db: Database.Database, period: SummaryPeriod): Measured<number> {
   try {
     const rows = db.prepare('SELECT attempts, created_at_ms FROM straker_outbox').all() as {
@@ -1050,7 +1116,7 @@ export function combinedReportRows(spec: CombinedRowsSpec): CardRow[] {
         dayOf: spec.xtm.dayOf,
       }),
     ]);
-    return combinedRowsOf(view);
+    return [...combinedRowsOf(view), strakerWinRateRow(period, strakerStateDir)];
   } catch (err) {
     // The last line of defence, and it should never be reached: both readers already turn
     // their own failures into a stated `PortalResult`. If it IS reached, something changed
