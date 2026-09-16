@@ -47,6 +47,75 @@ export function dueDailyReport(
 }
 
 /**
+ * Is there anything in today's report worth putting in front of the team?
+ *
+ * The XTM bot has held no jobs since 2026-07-15 (`specs/003-straker-offer-race/xtm-baseline.md`),
+ * so every working day at 09:00 it has posted a card reading "0 words · No jobs in progress"
+ * and nothing else. A notification that is always identical trains people not to open it, and
+ * the cost of that is paid by the next card — the one that does say something.
+ *
+ * **Liveness is not a reason to keep sending it.** That is the heartbeat's job (Constitution IV,
+ * SC-010), and it is the better instrument: it pages when the bot goes silent, where a daily
+ * card only ever told you the bot was alive at 09:00 and said nothing for the other 23 hours.
+ *
+ * Two things count as worth saying:
+ *
+ * 1. **The team holds work.** Then the report is doing what it exists for.
+ * 2. **A companion row says anything other than "0 committed".** The combined two-portal
+ *    section (FR-018) degrades
+ *    to rows that *state* a gap rather than going quiet — an unreadable record, a total that
+ *    cannot be shown because the portals measure in different units. Those rows are what makes
+ *    the section trustworthy, and suppressing them would make "no report" mean both "nothing to
+ *    do" and "something is broken", which are the two things an operator most needs to tell
+ *    apart. A warning is identified structurally, by the row carrying an emoji, rather than by
+ *    matching its text.
+ *
+ * **Known limitation, and the reason for it.** Work held by *Straker* alone does not keep the
+ * report alive: this function can only see what the caller has, and the caller cannot ask
+ * Straker directly. The R11 bulkhead permits exactly one import from `src/runtime/` into
+ * `src/straker/` — `xtmPollLoop → combinedReportRows` — and that exception is pinned by name in
+ * `tests/integration/straker/isolation.test.ts`, so a second one to ask "do you hold anything?"
+ * would fail that guard. The practical cost is small: Straker announces every win individually
+ * and immediately on its own channel, so its work is never silent, only unsummarised. Closing
+ * it properly means `combinedReportRows` reporting whether either portal committed anything,
+ * which is a change to that module rather than to this one.
+ *
+ * Biased toward sending. An unnecessary card costs a glance; a wrongly suppressed one hides
+ * work, so anything that is not plainly nothing goes out.
+ */
+export function reportWorthSending(
+  held: readonly XtmJobState[],
+  companion: readonly CardRow[],
+): boolean {
+  if (held.length > 0) return true;
+  // Suppress only when EVERY companion row is recognisably nothing. The test is an allowlist,
+  // not a denylist, so an unfamiliar row — a retry count, something added later — counts as
+  // content and the report goes out.
+  return !companion.every((row) => SAYS_NOTHING.some((pattern) => pattern.test(row.value ?? '')));
+}
+
+/**
+ * The companion rows that say nothing happened.
+ *
+ * Anchored and exact on purpose. A loose `includes('0')` would match "10 words committed", and
+ * a loose "is this row interesting" test would have to be updated every time the combined
+ * section gains a row — silently, in the direction of suppressing more. This way the failure
+ * mode of an unrecognised row is an extra card, never a hidden one.
+ */
+const SAYS_NOTHING: readonly RegExp[] = [
+  // "0 words committed" — a portal, or the combined line, holding nothing.
+  /^0 \S+ committed$/,
+  // The win-rate row with no races in it. Added when T076 put that row in the card and this
+  // rule stopped suppressing anything — which is the allowlist behaving as designed: it failed
+  // toward SENDING, and the test pinned against `combinedReportRows`'s real output caught it on
+  // the first run rather than letting the feature quietly switch itself off.
+  //
+  // A rate with actual races in it is NOT matched, and that is deliberate: `12.5% — 1 won of 8`
+  // is a fortnightly figure worth putting in front of someone even on a day with no work.
+  /^n\/a — no genuinely winnable offers in .+ · 0 turned away by our own rules$/,
+];
+
+/**
  * Builds the Google Chat cardsV2 payload for the daily in-progress jobs report.
  *
  * Layout:

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, type DB } from '../../src/state/db.js';
@@ -1290,5 +1290,144 @@ describe('auto-yield', () => {
 
     await loop.runOnce();
     expect(new MetaStore(db).lastAuthSuccessMs).toBeGreaterThan(0); // written when enabled (yield reads it)
+  });
+});
+
+describe('XtmPollLoop — an empty daily report is not sent', () => {
+  /**
+   * The XTM bot has held no jobs since 2026-07-15, so the 09:00 card has been identical every
+   * working day. A notification that never varies trains people not to open it.
+   *
+   * `STRAKER_STATE_DIR` is pinned in every test here rather than left to the environment. The
+   * loop does not pass one, so `combinedReportRows` falls back to the real `state/straker` —
+   * which exists on the dev host and does not on CI, and the difference decides whether the
+   * companion section carries a warning. Left unpinned these tests would pass locally and mean
+   * the opposite on CI.
+   */
+  const previousStateDir = process.env['STRAKER_STATE_DIR'];
+  afterEach(() => {
+    if (previousStateDir === undefined) delete process.env['STRAKER_STATE_DIR'];
+    else process.env['STRAKER_STATE_DIR'] = previousStateDir;
+  });
+
+  /** The temporary directory `fresh()` just created, captured before any other helper pushes. */
+  function freshXtmDir(): string {
+    fresh();
+    const dir = dirs[dirs.length - 1];
+    if (dir === undefined) throw new Error('fresh() pushed no directory');
+    return dir;
+  }
+
+  /** A Straker record that exists and holds nothing — the live situation. */
+  async function emptyStrakerRecord(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), 'acolad-straker-'));
+    dirs.push(dir);
+    const stateDir = join(dir, 'straker');
+    mkdirSync(stateDir, { recursive: true });
+    const { openStrakerDatabase } = await import('../../src/straker/strakerStore.js');
+    openStrakerDatabase(stateDir, Date.parse(NOW)).db.close();
+    return stateDir;
+  }
+
+  /**
+   * STATE_DIR matters here in a way it never did before. The shared `cfg()` helper omits it, so
+   * `readXtmWorkload` has always read `undefined/acolad.db` and reported the XTM record as
+   * unreadable — an extra warning row in the card that no existing test asserted on. Now that
+   * row decides whether the report is sent at all, so it is passed explicitly.
+   *
+   * Explicitly, and not as `dirs[dirs.length - 1]`: `emptyStrakerRecord()` pushes to `dirs` too,
+   * so the last entry is whichever helper ran most recently.
+   */
+  function loopAt10(
+    xtmDir: string,
+    heartbeat: { ok: ReturnType<typeof vi.fn>; fail: ReturnType<typeof vi.fn> },
+  ) {
+    const clockAt10 = { nowMs: () => BKK_10_00, nowIso: () => new Date(BKK_10_00).toISOString() };
+    return new XtmPollLoop(
+      db,
+      new StubClient(),
+      cfg({
+        XTM_ACOLAD_OFFERS_URL: 'https://xtm.example.com',
+        STATE_DIR: xtmDir,
+      } as Partial<AppConfig>),
+      noopLogger,
+      clockAt10,
+      { chatSender: okChat, sheetSender: new CapturingSheet(), heartbeat },
+    );
+  }
+  const dailyRows = (): unknown[] =>
+    db.prepare("SELECT * FROM outbox WHERE channel = 'team' AND event_id LIKE 'daily:%'").all();
+
+  it('sends nothing when no work is held and the other portal is readable and empty', async () => {
+    const xtmDir = freshXtmDir();
+    process.env['STRAKER_STATE_DIR'] = await emptyStrakerRecord();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    await loopAt10(xtmDir, heartbeat).runOnce();
+
+    expect(dailyRows()).toHaveLength(0);
+  });
+
+  it('still pings the heartbeat on the day it stays quiet', async () => {
+    // The load-bearing one. An early `return` from `runOnce` would skip the dispatcher flush
+    // AND the heartbeat, so the bot would go silent to Healthchecks every working day at 09:00
+    // and page the team six minutes later — a noise fix that becomes a daily false alarm.
+    // TypeScript caught it (runOnce returns Promise<boolean>); this keeps it caught.
+    const xtmDir = freshXtmDir();
+    process.env['STRAKER_STATE_DIR'] = await emptyStrakerRecord();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    await loopAt10(xtmDir, heartbeat).runOnce();
+
+    expect(heartbeat.ok).toHaveBeenCalled();
+    expect(heartbeat.fail).not.toHaveBeenCalled();
+  });
+
+  it('records the day as decided, so it does not re-ask every cycle until midnight', async () => {
+    // Without this the loop re-reads the job store and reopens Straker's database on every
+    // cycle for the rest of the day — and a job accepted at 15:00 would fire a "daily" report
+    // in the afternoon, which is not what a 09:00 summary is.
+    const xtmDir = freshXtmDir();
+    process.env['STRAKER_STATE_DIR'] = await emptyStrakerRecord();
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    await loopAt10(xtmDir, heartbeat).runOnce();
+
+    const meta = db.prepare("SELECT value FROM meta WHERE key = 'last_daily_report_date'").get() as
+      | { value: string }
+      | undefined;
+    expect(meta?.value).toBe('2026-06-25');
+  });
+
+  it('still sends when there IS work, which is the whole point of the report', async () => {
+    const xtmDir = freshXtmDir();
+    process.env['STRAKER_STATE_DIR'] = await emptyStrakerRecord();
+    seedAcceptedJob(db, {
+      jobKey: 'J-X1',
+      projectName: 'Gamma',
+      fileName: 'g.xlf',
+      dueDate: '2026-06-25T15:00:00+07:00',
+      words: 300,
+    });
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    await loopAt10(xtmDir, heartbeat).runOnce();
+
+    expect(dailyRows()).toHaveLength(1);
+  });
+
+  it('still sends when the companion carries a warning, because a fault is not silence', async () => {
+    // A Straker record that cannot be read produces a ⚠️ row. Suppressing that would make "no
+    // report" mean both "nothing to do" and "something is broken" — the two states an operator
+    // most needs to tell apart.
+    const xtmDir = freshXtmDir();
+    const missing = mkdtempSync(join(tmpdir(), 'acolad-straker-gone-'));
+    dirs.push(missing);
+    process.env['STRAKER_STATE_DIR'] = join(missing, 'never-existed');
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    await loopAt10(xtmDir, heartbeat).runOnce();
+
+    expect(dailyRows()).toHaveLength(1);
   });
 });
