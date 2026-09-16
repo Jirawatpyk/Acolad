@@ -88,6 +88,7 @@ npm run deploy          # รัน 24/7: build + restart แบบ single-insta
 # ห้าม `pm2 restart acolad-bot` ด้วยมือ — มัน skip stop-and-wait แล้วทิ้ง orphan/ชน lock
 npm run outbox:requeue  # ops: คืนรายการแจ้งเตือน dead → pending (ฐานข้อมูล XTM)
 npm run straker:outbox:requeue  # ops: อันเดียวกันสำหรับ Straker — คนละ db คนละสคริปต์ (R11)
+npm run straker:unbar           # ops: ปลดล็อกหลังพอร์ทัลแบนบัญชี (403) — ต้องรันมือเท่านั้น
 npm run straker:win-rate        # ops: win rate ของ Straker (FR-017) — อ่านอย่างเดียว
 npm run report:combined         # ops: workload สองพอร์ทัลรวมกัน (FR-018) — อ่านอย่างเดียว
 npm run report:latency  # สรุป p95 จาก log สำหรับตรวจรับ SC-001/SC-002
@@ -270,7 +271,13 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
 - **reboot survival**: `pm2-windows-startup` ปลุก PM2 หลัง logon — ต้องเปิด auto-logon
   (`scripts/setup-autologon.ps1` ผ่าน Sysinternals Autologon/LSA) + `pm2 save`. ถ้า reboot
   แล้ว heartbeat ไม่กลับใน 5 นาที → เช็ค auto-logon (password rotation/Windows Update boot) ก่อน
-- **Healthchecks**: ตั้ง period 60s / grace 300s — บอทหยุดหรือ lock refuse จะ page ใน ~5 นาที
+- **Healthchecks**: ตั้ง period 60s / grace 300s — บอทหยุดหรือ lock refuse จะ page ใน ~5 นาที.
+  **แต่ละบอทมี check ของตัวเอง** (XTM = `HEALTHCHECKS_PING_URL`, Straker = `STRAKER_HEALTHCHECKS_PING_URL`)
+  และ **integration ของ Google Chat ต้องติ๊กเปิดในแต่ละ check แยกกัน** — check ที่เพิ่งสร้างใหม่จะรับ ping
+  ผ่านหมดแต่ไม่ page ใคร เพราะ integration ไม่ได้สืบทอดมาจาก check เดิม (ดู V-HC ใน quickstart ของ 003)
+- **Straker โดนแบน (403)**: บอทจะ **หยุดกดรับถาวร** (เก็บใน `straker_meta` — restart ไม่ล้าง) แต่ยัง
+  อ่าน/บันทึก/reconcile ต่อ. alert `account_barred` เด้งครั้งเดียวตอนเจอ. ปลดล็อกด้วย
+  `npm run straker:unbar` **เท่านั้น** — ไม่มี auto-recovery เพราะบัญชีที่ login ได้ก็โดนแบนพร้อมกันได้
 - PowerShell 5.1 เป็น shell หลักของเครื่องนี้ (ไม่มี `&&` — ใช้ `;`)
 - จังหวะเรียก portal มีเพดานเข้มงวด (กันบัญชีถูกระงับ): ห้ามลด interval
   ต่ำกว่า 20s หรือเพิ่มความถี่คำขอโดยไม่แก้ FR-011 ใน spec ก่อน

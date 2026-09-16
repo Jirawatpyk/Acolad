@@ -266,7 +266,12 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       // Read once, before the loop: `re_authenticate` below clears `session`, and a claim
       // that reached for it afterwards would be aiming at nothing.
       const { vendorId } = session;
-      let stopClaiming: ClaimFollowUp | null = null;
+      // Read from the STORE, not from a variable that dies with this call. Contract §4a says
+      // a barred account means stop claiming and never retry around it; a flag local to one
+      // `runOnce()` made "stop" last ten seconds (T073). Nothing clears this but a human —
+      // see `StrakerStore.clearBar` for why no observable signal is safe to clear it on.
+      let stopClaiming: ClaimFollowUp | null =
+        deps.store.barredSinceMs() === null ? null : 'stop_claiming';
       for (const decision of decisions) {
         if (decision.action !== 'claim') continue;
         if (stopClaiming !== null) {
@@ -295,6 +300,24 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
         // would meet the same 401, each would classify as a fault, and one dead session
         // would arrive as a burst of alerts about unrelated offers. Stopping here costs
         // one cycle and the next one signs in fresh.
+        if (attempt.followUp === 'stop_claiming') {
+          // `barAccount` answers true only the first time, so the alert fires on the
+          // DISCOVERY rather than on every cycle that finds the bar still in place. A
+          // condition that does not self-heal must not page on a ten-second rhythm.
+          if (deps.store.barAccount(atMs)) {
+            enqueue(deps, 'alerts', `account_barred:${String(atMs)}`, atMs, {
+              kind: 'system',
+              condition: 'account_barred',
+              subsystem: 'Straker claiming',
+              occurredAtMs: atMs,
+              consecutiveFailures: 1,
+              failingSinceMs: atMs,
+              detail:
+                'the portal answered a claim with 403. Claiming is stopped until someone ' +
+                'runs `npm run straker:unbar`; reading and reconciliation continue',
+            } satisfies StrakerSystemAlert);
+          }
+        }
         if (attempt.followUp !== 'none') stopClaiming = attempt.followUp;
         if (attempt.followUp === 're_authenticate') session = null;
       }
@@ -311,7 +334,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
             passedOver: halted.length,
           },
           stopClaiming === 'stop_claiming'
-            ? 'the portal has barred this account — stopped claiming for this cycle, and it will not self-heal'
+            ? 'the portal has barred this account — claiming is stopped until `npm run straker:unbar`, and it will not self-heal'
             : 'the session expired mid-cycle — stopped claiming, and the next cycle signs in fresh',
         );
       }

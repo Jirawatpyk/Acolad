@@ -773,12 +773,24 @@ describe('failure mode: the account itself is barred (T063, contract §4a)', () 
     expect(callsTo(portal, 'claim')).toHaveLength(1);
     // Immediately: queued inside the same transaction as the claim record and drained by
     // the end of the cycle, not on some later pass.
-    expect(bot.senders.got.alerts).toHaveLength(1);
-    expect(bot.senders.got.alerts[0]).toMatchObject({
-      kind: 'offer',
-      condition: 'claim_failed',
-      objId: first().obj_id,
-    });
+    // TWO alerts, saying two different things, and contract §4a wants both.
+    //
+    // The offer-scoped one names the claim that failed. The system-scoped one says the
+    // ACCOUNT is barred and claiming has stopped until a human runs `npm run straker:unbar`
+    // — which is the part an operator has to act on, and which "claim_failed on offer-1"
+    // does not convey. `sign_in_refused` sits beside per-request failures for exactly this
+    // reason. The system alert fires on the DISCOVERY only; see the next test.
+    expect(bot.senders.got.alerts).toHaveLength(2);
+    expect(bot.senders.got.alerts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'offer',
+          condition: 'claim_failed',
+          objId: first().obj_id,
+        }),
+        expect.objectContaining({ kind: 'system', condition: 'account_barred' }),
+      ]),
+    );
     // The offer it never attempted is still recorded, with the halt as its reason — FR-010,
     // and FR-017's denominator, which a barred account would otherwise inflate.
     expect(
@@ -824,32 +836,27 @@ describe('failure mode: the account itself is barred (T063, contract §4a)', () 
     expect(bot.assembly.store.heldWork()).toEqual([]);
   });
 
-  it('halts for the CYCLE, not for the account — the next cycle claims again at a barred portal', async () => {
+  it('halts for the ACCOUNT, not for the cycle — the next cycle claims nothing (T073)', async () => {
     /**
-     * Recorded as current behaviour, and flagged as a gap rather than endorsed.
+     * This test previously asserted the opposite, and said so: it recorded "the next cycle
+     * claims again at a barred portal" as a known gap, and ended "if a persisted bar is ever
+     * added, this test is what it changes". T073 added one, so this is that change.
      *
-     * Contract §4a says a barred rejection "must alert immediately and **stop claiming**;
-     * it must never be retried around as though it were transient". `stopClaiming` in
-     * `pollCycle.ts` is a local of one `runOnce()`, and nothing persists "this account is
-     * barred" — so the next cycle, ten seconds later, sends a fresh claim at a portal that
-     * has already refused the account.
-     *
-     * The blast radius is bounded rather than unbounded, which is why this is a gap and not
-     * an incident: `claimedObjIds()` excludes every offer already attempted, so the bot
-     * makes one claim per *new* offer, not one per cycle, and the alert de-duplicates on
-     * offer identity. At 2–3 offers a day that is a handful of refused claims. But "stopped
-     * claiming" is not what the bot does once the cycle ends, and this is the test that
-     * says so. If a persisted bar is ever added, this test is what it changes.
+     * Contract §4a: a barred rejection "must alert immediately and **stop claiming**; it
+     * must never be retried around as though it were transient". The bar now lives in
+     * `straker_meta`, so it outlives the `runOnce()` that discovered it AND the process —
+     * a restart does not launder it. Nothing in the bot lifts it; `npm run straker:unbar`
+     * does, and `StrakerStore.clearBar` records why no automatic trigger is safe.
      */
     const { portal } = await twoOffers(barred, 2);
 
-    expect(callsTo(portal, 'claim')).toHaveLength(2);
-    expect(callsTo(portal, 'claim').map((c) => c.path.split('/')[5])).toEqual([
-      first().obj_id,
-      second().obj_id,
-    ]);
-    // What DOES hold across cycles: the second claim is a different offer, not a retry of
-    // the first. R7 is enforced on `claimedObjIds()`, and being barred does not weaken it.
+    // One claim across two cycles: the first offer met the 403, the second was never
+    // attempted. Kills a regression to the cycle-local flag, which produced two.
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
+    expect(callsTo(portal, 'claim').map((c) => c.path.split('/')[5])).toEqual([first().obj_id]);
+    // Only claiming stops. Sign-in continues at the healthy rate, because reading,
+    // tracking and reconciliation must carry on — a barred account that also went blind
+    // would lose the record it is going to be audited against.
     const control = await twoOffers(accepted, 2);
     expect(callsTo(portal, 'login')).toHaveLength(callsTo(control.portal, 'login').length);
   });

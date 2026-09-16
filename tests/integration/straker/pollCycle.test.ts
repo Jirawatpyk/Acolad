@@ -297,8 +297,20 @@ describe('an offer the halt passed over is still recorded (FR-010)', () => {
 
     await h.cycle.runOnce();
 
+    // TWO alerts, and the number is the point: it is constant in the number of offers
+    // passed over, not one per offer. Four eligible offers, one claim attempted, two alerts.
+    //
+    // They say different things and both are wanted. The offer-scoped one names the claim
+    // that failed; the system-scoped one says claiming is now stopped and will not resume
+    // without a human (T073). `sign_in_refused` sits beside per-request failures for the
+    // same reason. Adding a fifth offer must not add a third alert — that is the property.
     const alerts = h.queued.filter((q) => q.channel === 'alerts');
-    expect(alerts).toHaveLength(1);
-    expect(alerts[0]?.eventId).toBe('claim:a:failed');
+    // Asserted as a SET, not a sequence. The system alert is raised the moment the 403
+    // arrives and the offer alert in the later persist phase, so their order is an artefact
+    // of where each is raised rather than anything the design promises.
+    expect(alerts).toHaveLength(2);
+    const ids = alerts.map((a) => a.eventId);
+    expect(ids).toContain('claim:a:failed');
+    expect(ids.some((id) => id.startsWith('account_barred:'))).toBe(true);
   });
 });

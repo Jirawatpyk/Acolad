@@ -163,6 +163,7 @@ export const SYSTEM_ALERT_CONDITIONS = [
   'reconcile_failing',
   'db_quarantined',
   'sign_in_refused',
+  'account_barred',
 ] as const;
 export type SystemAlertCondition = (typeof SYSTEM_ALERT_CONDITIONS)[number];
 
@@ -341,6 +342,14 @@ const ALERT_SPECS: Readonly<Record<StrakerAlertCondition, AlertSpec>> = {
       'The record of work the team already holds went with the old file, so the daily ceiling now reads as ZERO committed capacity and every offer will fit — the bot will over-claim until reconciliation restores the held set',
     action:
       'Stop the bot if the ceiling matters today. Keep the quarantined copy: it is the only record of what was held. Reconciliation rebuilds the held set from the portal within fifteen minutes of the next start',
+  },
+  account_barred: {
+    severity: 'critical',
+    title: 'Account Barred From Claiming',
+    impact:
+      'The portal refused a claim with 403, which contract §4a reads as the account being barred. Claiming is now stopped DURABLY — across cycles and across restarts — so the bot will not keep offering claims to a portal that has already refused. Reading, tracking and reconciliation continue, so the record stays complete while this is sorted out',
+    action:
+      'Find out from Straker why the account was refused, because nothing the bot can observe tells it that the bar has been lifted — an account can be signed in and barred at the same time. Once claiming is permitted again, clear the flag with `npm run straker:unbar`. It is deliberately a human action and there is no automatic recovery',
   },
   sign_in_refused: {
     severity: 'critical',

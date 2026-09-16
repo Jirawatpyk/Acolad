@@ -44,6 +44,10 @@ export const STRAKER_DB_FILENAME = 'straker.db';
 
 const SCHEMA_VERSION = 1;
 
+/** The one `straker_meta` key in use (T073). A literal rather than a bound parameter
+ *  because it is interpolated into prepared SQL that takes no user input. */
+const BARRED_KEY = 'account_barred_since_ms';
+
 // ---------------------------------------------------------------------------
 // Vocabulary (data-model §3 / §4) — the event types an offer can produce
 // ---------------------------------------------------------------------------
@@ -200,6 +204,17 @@ CREATE TABLE IF NOT EXISTS held_work (
   deadline_ms INTEGER,
   held_since_ms INTEGER NOT NULL,
   released_at_ms INTEGER
+);
+
+-- Durable flags that must outlive a process, of which there is exactly one today: the
+-- barred account (T073, contract §4a). A key-value table rather than a column on some
+-- other row because the fact is about the ACCOUNT, not about any offer, and there is no
+-- existing row it belongs to. Purely additive, so CREATE TABLE IF NOT EXISTS brings an
+-- already-live database up to date on its next open with no version bump.
+CREATE TABLE IF NOT EXISTS straker_meta (
+  key TEXT PRIMARY KEY CHECK (key <> ''),
+  value TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS straker_outbox (
@@ -752,6 +767,52 @@ export class StrakerStore {
         'UPDATE held_work SET released_at_ms = ? WHERE obj_id = ? AND released_at_ms IS NULL',
       )
       .run(atMs, requireIdentity(objId, 'a release'));
+    return res.changes > 0;
+  }
+
+  /**
+   * When the portal barred this account, or null while it has not (T073, contract §4a).
+   *
+   * Durable on purpose. The previous flag lived in one `runOnce()`, so "stop claiming"
+   * lasted ten seconds and the bot went back to a portal that had already refused — which
+   * is how a suspension becomes permanent rather than temporary.
+   */
+  barredSinceMs(): number | null {
+    const row = this.db
+      .prepare(`SELECT value FROM straker_meta WHERE key = '${BARRED_KEY}'`)
+      .get() as { value: string } | undefined;
+    if (row === undefined) return null;
+    const ms = Number(row.value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  /**
+   * Record that the portal barred this account. Answers **true only the first time**, so
+   * the caller can alert on the discovery rather than on every cycle that finds it still
+   * true — a condition that does not self-heal must not page on a ten-second rhythm.
+   */
+  barAccount(atMs: number): boolean {
+    const res = this.db
+      .prepare(
+        `INSERT INTO straker_meta (key, value, updated_at_ms) VALUES ('${BARRED_KEY}', ?, ?)
+         ON CONFLICT (key) DO NOTHING`,
+      )
+      .run(String(atMs), atMs);
+    return res.changes > 0;
+  }
+
+  /**
+   * Lift the bar. **Nothing in the bot calls this** — it is `npm run straker:unbar`, and
+   * that is the decision T073 left open rather than an omission.
+   *
+   * A successful sign-in is the obvious automatic trigger and is the wrong one: an account
+   * can be signed in and barred at the same time, so clearing on sign-in would resume
+   * claiming against a portal that never stopped refusing. Every other observable signal
+   * has the same defect, because the bot cannot see the thing that actually changed — a
+   * human at the other end deciding the account may claim again. So a human clears it.
+   */
+  clearBar(): boolean {
+    const res = this.db.prepare(`DELETE FROM straker_meta WHERE key = '${BARRED_KEY}'`).run();
     return res.changes > 0;
   }
 

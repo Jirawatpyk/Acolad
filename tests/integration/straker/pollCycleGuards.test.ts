@@ -614,3 +614,76 @@ describe('the tracking record carries what the gate decided on (A1, C1)', () => 
     });
   });
 });
+
+describe('a barred account stops claiming for good, not for one cycle (T073, contract §4a)', () => {
+  // Contract §4a says a barred account means "alert immediately and STOP CLAIMING", and
+  // never retry around it. The flag that implemented "stop" lived in one `runOnce()`, so
+  // ten seconds later the bot claimed again at a portal that had already refused — which
+  // is how a suspension becomes permanent.
+
+  it('does not claim again on the next cycle after a 403', async () => {
+    let offers = [raw('offer-1')];
+    const h = harness({
+      get offers() {
+        return offers;
+      },
+      extract: (rs) => rs.map((r) => eligible(r.obj_id)),
+      claim: () => ({ status: 403 }),
+    });
+
+    await h.cycle.runOnce();
+    expect(h.claimed).toEqual(['offer-1']);
+
+    // A brand-new offer on the next cycle. Nothing about it is barred — the ACCOUNT is.
+    offers = [raw('offer-2')];
+    await h.cycle.runOnce();
+
+    // The load-bearing assertion: no second attempt. Kills the mutation that makes the
+    // stop local to one cycle, which is exactly what the code did.
+    expect(h.claimed).toEqual(['offer-1']);
+  });
+
+  it('keeps reading and recording while barred, because only claiming is barred', async () => {
+    // Stopping the cycle outright would be the wrong cure: reconciliation and tracking must
+    // continue, or a barred account also blinds the record it will be audited against.
+    let offers = [raw('offer-1')];
+    const h = harness({
+      get offers() {
+        return offers;
+      },
+      extract: (rs) => rs.map((r) => eligible(r.obj_id)),
+      claim: () => ({ status: 403 }),
+    });
+
+    await h.cycle.runOnce();
+    offers = [raw('offer-2')];
+    const ok = await h.cycle.runOnce();
+
+    // The offer was still seen and still reached a row, it simply was not claimed.
+    expect(h.events.some((e) => e['objId'] === 'offer-2')).toBe(true);
+    expect(ok).toBe(true);
+  });
+
+  it('alerts once when the bar is discovered, not once per cycle', async () => {
+    // A condition that does not self-heal must not page on a ten-second rhythm.
+    let offers = [raw('offer-1')];
+    const h = harness({
+      get offers() {
+        return offers;
+      },
+      extract: (rs) => rs.map((r) => eligible(r.obj_id)),
+      claim: () => ({ status: 403 }),
+    });
+
+    await h.cycle.runOnce();
+    offers = [raw('offer-2')];
+    await h.cycle.runOnce();
+    offers = [raw('offer-3')];
+    await h.cycle.runOnce();
+
+    const barredAlerts = h.queued.filter(
+      (q) => q.channel === 'alerts' && JSON.stringify(q.payload).includes('account_barred'),
+    );
+    expect(barredAlerts).toHaveLength(1);
+  });
+});

@@ -380,7 +380,7 @@ export type ReconcileStore = Pick<
   StrakerStore,
   'transaction' | 'recordEvent' | 'heldWork' | 'sightingsOf'
 >;
-export type ReconcileLedger = Pick<StrakerLedger, 'hold'>;
+export type ReconcileLedger = Pick<StrakerLedger, 'hold' | 'release'>;
 export type ReconcileOutbox = Pick<StrakerOutbox, 'enqueue'>;
 
 export interface ReconcileDeps {
@@ -406,6 +406,11 @@ export type ReconcileOutcome =
       readonly assigned: number;
       /** Identities added to the record by this pass. */
       readonly recovered: readonly string[];
+      /**
+       * Identities this pass gave back to the ledger (T056b) — held work the portal
+       * **positively reported as finished**. Never work the read merely omitted.
+       */
+      readonly released: readonly string[];
       readonly consecutiveFailures: 0;
     }
   | {
@@ -560,6 +565,8 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
     consecutiveFailures = 0;
     streakStartedAtMs = null;
 
+    const released = releaseFinished(work, held, atMs);
+
     deps.logger.info(
       {
         module: 'reconcile',
@@ -567,10 +574,60 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         outcome: 'ok',
         assigned: outstanding.length,
         recovered: recovered.length,
+        released: released.length,
       },
       'reconciled the portal assigned list against our record',
     );
-    return { ran: true, ok: true, assigned: outstanding.length, recovered, consecutiveFailures: 0 };
+    return {
+      ran: true,
+      ok: true,
+      assigned: outstanding.length,
+      recovered,
+      released,
+      consecutiveFailures: 0,
+    };
+  }
+
+  /**
+   * Give back the budget for work the portal says is done (T056b, FR-016d).
+   *
+   * **Positive evidence only, and that is the whole safety argument.** T053 left this
+   * direction unbuilt because "a partial read would free capacity for work the team
+   * genuinely holds" — true of a rule phrased as "release what the read does not mention",
+   * and not true of this one. Only an item **present in the read** and **recognised as
+   * finished** releases anything, so a truncated page, a paginated response or a portal
+   * that answered with half its list can only ever release *less*. Absence is not evidence.
+   *
+   * `isFinished` supplies the second half of that guard: it is "recognised AND not
+   * outstanding", so a status this bot has never seen keeps the work held rather than
+   * handing back a ceiling on a word it cannot read. That is the same asymmetry recovery
+   * already uses, pointed the other way.
+   *
+   * Failures are per item and never fail the pass. The cost of a missed release is an
+   * offer the bot passes over; the cost of failing the pass would be the recoveries that
+   * already succeeded looking like they did not.
+   */
+  function releaseFinished(
+    work: readonly AssignedWork[],
+    held: ReadonlySet<string>,
+    atMs: number,
+  ): string[] {
+    const released: string[] = [];
+    for (const item of work) {
+      if (!isFinished(item.status) || !held.has(item.objId)) continue;
+      try {
+        // `release` answers false when the row is already released, which is the normal
+        // steady state: the portal keeps reporting a delivered job every fifteen minutes.
+        // Only a state CHANGE is reported, so a repeat pass is silent rather than noisy.
+        if (deps.ledger.release(item.objId, atMs)) released.push(item.objId);
+      } catch (err) {
+        deps.logger.error(
+          { module: 'reconcile', action: 'release', outcome: 'failed', objId: item.objId },
+          message(err),
+        );
+      }
+    }
+    return released;
   }
 
   /**

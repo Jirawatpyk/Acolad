@@ -103,7 +103,23 @@ export function harness(opts: HarnessOptions): Harness {
     },
   };
 
+  // The barred flag is REAL in-memory state here, not a stub returning a constant: what
+  // T073 is about is the state surviving from one `runOnce()` to the next, and a stub that
+  // always answered null would make the test that proves it vacuous.
+  let barredSinceMs: number | null = null;
+
   const store = {
+    barredSinceMs: (): number | null => barredSinceMs,
+    barAccount: (atMs: number): boolean => {
+      if (barredSinceMs !== null) return false;
+      barredSinceMs = atMs;
+      return true;
+    },
+    clearBar: (): boolean => {
+      const was = barredSinceMs !== null;
+      barredSinceMs = null;
+      return was;
+    },
     transaction: <T>(fn: () => T): T => {
       trace.push('tx:begin');
       try {

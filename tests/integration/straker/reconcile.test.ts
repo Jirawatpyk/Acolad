@@ -1218,3 +1218,107 @@ describe('runIfDue keeps its never-throws promise (S3)', () => {
     expect(second).toMatchObject({ ran: true, ok: true });
   });
 });
+
+describe('finished work gives its budget back (T056b, FR-016d)', () => {
+  // The subtractive direction, which T053 deliberately left unbuilt because "a partial read
+  // would free capacity for work the team genuinely holds". The rule that makes it safe is
+  // POSITIVE EVIDENCE ONLY: release what this read *shows* as finished, never what it omits.
+  // Absence therefore cannot release anything, which is what makes a partial or paginated
+  // read harmless here rather than catastrophic.
+
+  it('releases held work the portal reports as delivered, and the ceiling recovers', async () => {
+    const f = fixture({ ceiling: 150 });
+
+    // The team holds 100 words for the deadline day. Recovered through reconciliation, so
+    // the hold is made by the same path production uses.
+    f.setAssigned([assignedWork('job-1')]);
+    f.setNow(NOW_MS);
+    await f.reconciler.runIfDue();
+    expect(f.store.heldWork()).toHaveLength(1);
+
+    // A second 100-word offer for the same day does not fit under a 150 ceiling.
+    const before = f.ledger.checkCapacity(
+      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS },
+      NOW_MS,
+    );
+    expect(before.fits).toBe(false);
+
+    // The portal now reports job-1 delivered.
+    f.setAssigned([assignedWork('job-1', { status: 'delivered' })]);
+    f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, released: ['job-1'] });
+    expect(f.store.heldWork()).toHaveLength(0);
+
+    // The load-bearing assertion: the budget came back, so the day can be claimed against
+    // again. Kills a mutation that marks the row released without the ledger noticing.
+    const after = f.ledger.checkCapacity(
+      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS },
+      NOW_MS + RECONCILE_INTERVAL_MS,
+    );
+    expect(after.fits).toBe(true);
+  });
+
+  it('never releases work the read simply did not mention', async () => {
+    // The partial-read safety property, and the reason the rule is phrased positively.
+    // A truncated page looks exactly like "the job is gone" — and treating it that way
+    // would free capacity for work the team still owes.
+    const f = fixture();
+
+    f.setAssigned([assignedWork('job-1'), assignedWork('job-2')]);
+    f.setNow(NOW_MS);
+    await f.reconciler.runIfDue();
+    expect(f.store.heldWork()).toHaveLength(2);
+
+    // Page 2 never arrived: job-2 is absent, not finished.
+    f.setAssigned([assignedWork('job-1')]);
+    f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, released: [] });
+    expect(
+      f.store
+        .heldWork()
+        .map((w) => w.objId)
+        .sort(),
+    ).toEqual(['job-1', 'job-2']);
+  });
+
+  it('never releases on a status it does not recognise', async () => {
+    // `isFinished` is "recognised AND not outstanding", so an unknown word falls on the side
+    // that keeps the work — the same asymmetry recovery already uses. A portal that renames
+    // 'delivered' must not silently hand the ceiling back.
+    const f = fixture();
+
+    f.setAssigned([assignedWork('job-1')]);
+    f.setNow(NOW_MS);
+    await f.reconciler.runIfDue();
+
+    f.setAssigned([assignedWork('job-1', { status: 'completed_v2' })]);
+    f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, released: [] });
+    expect(f.store.heldWork()).toHaveLength(1);
+  });
+
+  it('releasing twice is not an error, and the second pass reports nothing released', async () => {
+    // Reconciliation runs every fifteen minutes against a portal that keeps reporting the
+    // same delivered job. The second pass must be a no-op, not a repeated event.
+    const f = fixture();
+
+    f.setAssigned([assignedWork('job-1')]);
+    f.setNow(NOW_MS);
+    await f.reconciler.runIfDue();
+
+    f.setAssigned([assignedWork('job-1', { status: 'delivered' })]);
+    f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    const first = await f.reconciler.runIfDue();
+    f.setNow(NOW_MS + 2 * RECONCILE_INTERVAL_MS);
+    const second = await f.reconciler.runIfDue();
+
+    expect(first).toMatchObject({ released: ['job-1'] });
+    expect(second).toMatchObject({ ran: true, ok: true, released: [] });
+  });
+});
