@@ -52,6 +52,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import ts from 'typescript';
 import type { AppConfig } from '../../../src/config/index.js';
 import type { XtmJobSnapshot, XtmRawJob } from '../../../src/detection/types.js';
 import type { LogoutKind } from '../../../src/portal/errors.js';
@@ -718,3 +719,411 @@ function firstCapturedOffer(): RawOffer & Record<string, unknown> {
   return JSON.parse(readFileSync(join(OFFERS_DIR, first), 'utf8')) as RawOffer &
     Record<string, unknown>;
 }
+
+// ===========================================================================================
+// T077 / FR-030 (DC-4) — transport lives in ONE file, and now something enforces that
+// ===========================================================================================
+
+/**
+ * These rules ask the TypeScript **type checker** what a name binds to. Two earlier cuts did
+ * not, and both were taken apart by review, which is worth recording because the failures are
+ * the interesting part of this guard.
+ *
+ * *Regex.* A stripper removed comments and string literals before matching, and was
+ * desynchronised by apostrophes in prose — "a portal's daily ceiling" in a template literal is
+ * enough, and a mis-paired quote swallows real code to the next one. That left **114** measured
+ * places in `src/straker` where a genuine `fetch(url)` compiled, ran, and the guard stayed
+ * green. The comment defending it claimed a crude stripper "can only make this guard stricter,
+ * never laxer", which is backwards: offenders are found by MATCHING text, so removing more text
+ * finds fewer of them.
+ *
+ * *Syntax.* Matching identifiers named `fetch` on the AST fixed the stripping but decided
+ * membership by spelling, and spelling is not what a binding is. It missed `const g =
+ * globalThis; g.fetch(u)` and `globalThis['fetch'](u)`, and — worse, because it fails the build
+ * on correct code — it reported `typeof globalThis.fetch`, `interface P { fetch(u): … }`, a
+ * parameter named `fetch` and `const fetch = 1` as uses of the global.
+ *
+ * *Semantics.* The checker resolves each occurrence to a symbol and asks where that symbol was
+ * declared. A reference to the global resolves into TypeScript's own `lib.*.d.ts`; a local
+ * binding, a parameter, or a member of somebody's interface does not. All seven cases above
+ * come out right, and they do so for the reason that makes them right rather than by a pattern
+ * that happens to cover them.
+ */
+let cachedProgram: ts.Program | null = null;
+
+/**
+ * Compiler options for the guard's programs — deliberately NOT the project's tsconfig.
+ *
+ * The full options took 8 s locally and **81 s on CI**, where the test timed out at 60 s. The
+ * cost was `types`: unset, it pulls in every package under `@types`, and `googleapis` alone
+ * dominates. All this guard needs is the ambient platform globals, so `types: ['node']` with a
+ * minimal `lib` resolves `fetch` identically in about 450 ms — the same answer, eighteen times
+ * faster.
+ *
+ * What keeps the shortcut honest is the positive control below: if this set ever stopped
+ * resolving `fetch` the way the real build does, the rule that says `httpClient.ts` must
+ * contain a use of the global would fail immediately. That is precisely how the earlier
+ * `lib.*.d.ts` mistake was caught.
+ */
+const GUARD_OPTIONS: ts.CompilerOptions = {
+  target: ts.ScriptTarget.ES2022,
+  lib: ['lib.es2022.d.ts'],
+  types: ['node'],
+  skipLibCheck: true,
+  noEmit: true,
+};
+
+function strakerProgram(): ts.Program {
+  // Built once for the whole block: the cost is in creating it, not in querying it.
+  cachedProgram ??= ts.createProgram(sourcesUnder(join(SRC, 'straker')), GUARD_OPTIONS);
+  return cachedProgram;
+}
+
+/**
+ * True when every declaration of a symbol is an ambient one from outside `src/` — i.e. the
+ * name belongs to the platform rather than to this codebase.
+ *
+ * Matching `lib.*.d.ts` alone was the obvious rule and it was wrong here: this project sets
+ * `lib: ["lib.es2022.d.ts"]` with no DOM, so `fetch` is declared by
+ * `@types/node/web-globals/fetch.d.ts`. The positive control caught that immediately — it
+ * found zero uses of the global in the one file that certainly uses it, which is exactly the
+ * job a positive control exists to do.
+ */
+/**
+ * This project's own `src/`, normalised. `!file.includes('/src/')` was the first spelling and it
+ * matches any published `src` segment too — `node_modules/googleapis/build/src/*.d.ts` is a real
+ * example in this tree. Fail-open and unreachable for `fetch`, but the intent is "outside THIS
+ * project", so it says that.
+ */
+const PROJECT_SRC = SRC.replace(/\\/g, '/') + '/';
+
+function isPlatformGlobal(symbol: ts.Symbol | undefined): boolean {
+  const declarations = symbol?.declarations ?? [];
+  return (
+    declarations.length > 0 &&
+    declarations.every((d) => {
+      const file = d.getSourceFile().fileName.replace(/\\/g, '/');
+      return file.endsWith('.d.ts') && !file.startsWith(PROJECT_SRC);
+    })
+  );
+}
+
+/**
+ * Every reference to the **global** `fetch` in a value position, resolved rather than matched.
+ *
+ * Type positions are excluded for the reason R11 excludes `import type`: an annotation erases
+ * at compile time, so it cannot open a connection, spend the request budget, or exist at
+ * runtime. The form matters too, because `httpClient.ts` does not call `fetch(...)` at all — it
+ * writes `options.fetchImpl ?? fetch`, taking the global as a fallback for an injected port, so
+ * a detector looking only for call sites would have found nothing anywhere and passed happily
+ * over a codebase in which every file did the same.
+ */
+function globalFetchUsesIn(sourceFile: ts.SourceFile, checker: ts.TypeChecker): string[] {
+  const found: string[] = [];
+
+  /**
+   * `const { fetch } = globalThis` — the shorthand destructure.
+   *
+   * A review found this walking past the rule while the renamed form `{ fetch: f }` was caught,
+   * and the asymmetry is instructive: in the renamed form the identifier `fetch` IS the property
+   * name, so it resolves to the global. In the shorthand it is the *binding*, and resolves to
+   * the new local — declared in a `.ts` under `src/`, so not a platform symbol. The later
+   * `fetch(u)` then resolves to that local too, and nothing in the file looks global at all.
+   *
+   * So the property has to be looked up on the type being destructured, rather than on the name.
+   */
+  const shorthandTakesTheGlobal = (node: ts.Identifier): boolean => {
+    const element = node.parent;
+    if (
+      element === undefined ||
+      !ts.isBindingElement(element) ||
+      element.name !== node ||
+      element.propertyName !== undefined
+    ) {
+      return false;
+    }
+    const declaration = element.parent.parent;
+    if (!ts.isVariableDeclaration(declaration) || declaration.initializer === undefined) {
+      return false;
+    }
+    const source = checker.getTypeAtLocation(declaration.initializer);
+    return isPlatformGlobal(source.getProperty('fetch'));
+  };
+
+  const visit = (node: ts.Node): void => {
+    const named =
+      (ts.isIdentifier(node) && node.text === 'fetch') ||
+      // `globalThis['fetch']` — the name is a string, not an identifier.
+      (ts.isStringLiteral(node) &&
+        node.text === 'fetch' &&
+        node.parent !== undefined &&
+        ts.isElementAccessExpression(node.parent));
+    if (named) {
+      const inTypePosition =
+        ts.findAncestor(node, (a) => ts.isTypeQueryNode(a) || ts.isTypeNode(a)) !== undefined;
+      // `typeof fetch === 'function'` — the RUNTIME operator, not the type query. It reads a
+      // binding without calling it, so like a type annotation it cannot open a connection or
+      // spend the request budget. Excluded deliberately, and recorded here because an earlier
+      // cut excluded it, the rewrite dropped the exclusion silently, and a review noticed.
+      // A bare `fetch` elsewhere in the same expression is still caught on its own.
+      const isFeatureDetect = node.parent !== undefined && ts.isTypeOfExpression(node.parent);
+      if (inTypePosition || isFeatureDetect) {
+        ts.forEachChild(node, visit);
+        return;
+      }
+      if (isPlatformGlobal(checker.getSymbolAtLocation(node))) {
+        found.push(node.getText());
+      } else if (ts.isIdentifier(node) && shorthandTakesTheGlobal(node)) {
+        found.push('{ fetch }');
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
+/**
+ * Every module specifier a file imports, in all the spellings that reach the runtime, each
+ * marked with whether it is **type-only**.
+ *
+ * The flag is carried rather than dropped because the two rules below need different things.
+ * The package allowlist counts every specifier — a dependency is a dependency. The area pin
+ * counts only VALUE edges, since `import type` erases at compile time and cannot reach code;
+ * R11's one recorded exception (`outcomePolicy.ts -> state`) is exactly such an edge, and a
+ * walk that ignored the flag would report it as a bulkhead breach.
+ */
+interface ModuleEdge {
+  readonly spec: string;
+  readonly typeOnly: boolean;
+}
+
+function moduleSpecifiersIn(file: string, source: string): ModuleEdge[] {
+  const found: ModuleEdge[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      found.push({
+        spec: node.moduleSpecifier.text,
+        typeOnly: node.importClause?.isTypeOnly === true,
+      });
+    }
+    if (
+      ts.isExportDeclaration(node) &&
+      node.moduleSpecifier !== undefined &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      found.push({ spec: node.moduleSpecifier.text, typeOnly: node.isTypeOnly });
+    }
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const dynamic =
+        callee.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(callee) && callee.text === 'require');
+      const first = node.arguments[0];
+      // A dynamic import is always a runtime load — that is the whole concern.
+      if (dynamic && first !== undefined && ts.isStringLiteral(first)) {
+        found.push({ spec: first.text, typeOnly: false });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true));
+  return found;
+}
+
+/**
+ * The complete set of packages `src/straker` and `src/shared` may depend on — an ALLOWLIST.
+ *
+ * A denylist of known HTTP clients was the first attempt and it is the wrong shape: it missed
+ * `import https from 'https'` (valid, idiomatic, and nothing in the lint config requires the
+ * `node:` prefix), `node:http2`, `node:net`, and every client nobody thought to name. An
+ * allowlist inverts the burden — a new dependency fails here until someone adds it deliberately.
+ */
+const ALLOWED_PACKAGES = new Set([
+  'better-sqlite3',
+  'dotenv',
+  'node:fs',
+  'node:path',
+  'zod',
+  // Reaches the network, and allowed on purpose: DC-4 is about the Straker PORTAL transport —
+  // everything between a claim decision and the wire. The Sheets client is a reporting
+  // destination on the delivery path, governed by the outbox rather than by FR-019's pacing.
+  'googleapis',
+  // `src/shared` is on this list too, so its dependencies belong here.
+  'pino',
+  'pino-roll',
+]);
+
+/**
+ * The first-party areas `src/straker` reaches by VALUE, pinned by name.
+ *
+ * A relative import is not a package, so the allowlist above cannot see an edge into another
+ * area. This does not *close* that hole — two pinned areas already contain live transport
+ * (`reporting/googleChat.ts` and `monitoring/heartbeat.ts` both call the global `fetch`), and
+ * `src/straker` value-imports `reporting`. What it does is make a NEW edge deliberate. Walking the whole transitive closure was considered and rejected — it reaches nine
+ * areas and would fail this test whenever any unrelated part of the XTM bot gained a dependency.
+ * Pinning the boundary instead means a NEW edge has to be added here deliberately, which is the
+ * one that matters: `src/portal/` would bring Playwright, an HTTP-capable stack, and would have
+ * to be argued for on this line first.
+ */
+const STRAKER_VALUE_AREAS = ['monitoring', 'reporting', 'runtime', 'schedule', 'shared'];
+
+describe('FR-030 (DC-4) — everything between the decision and the wire lives in httpClient.ts', () => {
+  /**
+   * The invariant held when this guard was written; nothing enforced it. Its sibling R11 has had
+   * a walking test since T066, and that asymmetry is what made this worth closing. The hazard is
+   * named in `httpClient.ts` itself: a *racing* read added through `getJson` silently joins the
+   * `deferrable` class and is shed below 120 remaining (FR-019), so the hot path loses its
+   * budget priority with nothing failing and nothing logged.
+   */
+  const TRANSPORT_FILE = 'src/straker/httpClient.ts';
+  const rel = (p: string): string => p.replace(/.*\/src\//, 'src/');
+  const read = (f: string): string => readFileSync(f, 'utf8');
+
+  /**
+   * Resolve a batch of snippets through the same checker the rules use.
+   *
+   * One program for all of them, not one each: creating a program is what costs — nine
+   * separate ones took four seconds, a single multi-file one takes under half of that in
+   * total. Querying it is free by comparison.
+   */
+  function usesInSnippets(snippets: Readonly<Record<string, string>>): Record<string, string[]> {
+    const names = Object.keys(snippets).map((k) => `${k}.ts`);
+    const host = ts.createCompilerHost({});
+    const original = host.getSourceFile.bind(host);
+    const sourceOf = (name: string): string | undefined =>
+      snippets[name.replace(/\.ts$/, '').replace(/^.*\//, '')];
+    host.getSourceFile = (name, lang, ...rest): ts.SourceFile | undefined => {
+      const src = sourceOf(name);
+      return src === undefined
+        ? original(name, lang, ...rest)
+        : ts.createSourceFile(name, src, lang, true);
+    };
+    host.fileExists = (name): boolean => sourceOf(name) !== undefined || ts.sys.fileExists(name);
+    host.readFile = (name): string | undefined => sourceOf(name) ?? ts.sys.readFile(name);
+
+    const program = ts.createProgram(names, GUARD_OPTIONS, host);
+    const checker = program.getTypeChecker();
+    const out: Record<string, string[]> = {};
+    for (const key of Object.keys(snippets)) {
+      const sf = program.getSourceFile(`${key}.ts`);
+      out[key] = sf === undefined ? ['<snippet did not parse>'] : globalFetchUsesIn(sf, checker);
+    }
+    return out;
+  }
+
+  it('resolves bindings rather than matching names, so neither a bypass nor a false alarm gets through', () => {
+    // Guard the guard, and every case here is one an earlier cut of this rule got WRONG — the
+    // first four were walked straight past, the next four failed the build on correct code, and
+    // the last two are what the regex version could not survive.
+    expect(sourcesUnder(join(SRC, 'straker')).length).toBeGreaterThan(20);
+
+    const got = usesInSnippets({
+      fallback: 'export const d = (o: { f?: typeof fetch }) => o.f ?? fetch;',
+      direct: 'export const r = async (u: string) => fetch(u);',
+      alias: 'const g = globalThis; export const r = async (u: string) => g.fetch(u);',
+      elementAccess: "export const r = async () => globalThis['fetch']('u');",
+      typeOfGlobal: 'export interface D { readonly fetchImpl: typeof globalThis.fetch }',
+      interfaceMember: 'export interface P { fetch(u: string): Promise<string> }',
+      parameter: 'export function make(fetch: number) { return fetch; }',
+      localConst: 'const fetch = 1; export default fetch;',
+      stringLiteral: "export const x = { action: 'fetch' };",
+      apostropheInProse: "// a portal's ceiling\nexport const y = 1;",
+      // Found by a review AFTER the checker rewrite: the renamed form was caught and the
+      // shorthand was not, because in the shorthand `fetch` is the BINDING, not the property.
+      shorthandDestructure:
+        'const { fetch } = globalThis; export const r = (u: string) => fetch(u);',
+      renamedDestructure: 'const { fetch: f } = globalThis; export const r = (u: string) => f(u);',
+      // And the exclusion the rewrite dropped by accident.
+      featureDetect: "export const ok = typeof fetch === 'function';",
+    });
+
+    // Uses of the global.
+    expect(got['fallback']).toEqual(['fetch']);
+    expect(got['direct']).toEqual(['fetch']);
+    expect(got['alias']).toEqual(['fetch']);
+    expect(got['elementAccess']).toEqual(["'fetch'"]);
+    // NOT uses of the global — a rule that fails the build on these is worse than no rule,
+    // because the idiom it rejects is the one the transport port is meant to be written in.
+    expect(got['typeOfGlobal']).toEqual([]);
+    expect(got['interfaceMember']).toEqual([]);
+    expect(got['parameter']).toEqual([]);
+    expect(got['localConst']).toEqual([]);
+    expect(got['stringLiteral']).toEqual([]);
+    expect(got['apostropheInProse']).toEqual([]);
+    expect(got['shorthandDestructure']).toEqual(['{ fetch }']);
+    expect(got['renamedDestructure']).toEqual(['fetch']);
+    // A feature detect reads the binding without calling it — it can no more spend the request
+    // budget than a type annotation can, which is the line this rule actually draws.
+    expect(got['featureDetect']).toEqual([]);
+  });
+
+  it('finds the transport where DC-4 says it is, which proves the rule is not passing by accident', () => {
+    // If httpClient.ts ever stopped matching, every rule below would pass on an empty set and
+    // DC-4 would read as satisfied by a codebase that issues no requests at all.
+    const program = strakerProgram();
+    const sf = program.getSourceFile(join(SRC, 'straker/httpClient.ts'));
+    expect(sf).toBeDefined();
+    expect(globalFetchUsesIn(sf as ts.SourceFile, program.getTypeChecker()).length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it('lets no file under src/straker reach the global fetch except httpClient.ts', () => {
+    const program = strakerProgram();
+    const checker = program.getTypeChecker();
+    const offenders = program
+      .getSourceFiles()
+      .filter((sf) => sf.fileName.replace(/\\/g, '/').includes('/src/straker/'))
+      .filter((sf) => rel(sf.fileName.replace(/\\/g, '/')) !== TRANSPORT_FILE)
+      .flatMap((sf) =>
+        globalFetchUsesIn(sf, checker).map(
+          (how) => `${rel(sf.fileName.replace(/\\/g, '/'))} -> ${how}`,
+        ),
+      );
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('lets src/straker and src/shared depend only on the packages they are recorded as using', () => {
+    // A second HTTP client would obey none of FR-019's pacing, and the budget it spent would be
+    // invisible to the one that does — so a new package has to be argued for here first.
+    const offenders = [...sourcesUnder(join(SRC, 'straker')), ...sourcesUnder(join(SRC, 'shared'))]
+      .flatMap((f) =>
+        moduleSpecifiersIn(f, read(f))
+          .map((edge) => edge.spec)
+          .filter((spec) => !spec.startsWith('.') && !ALLOWED_PACKAGES.has(spec))
+          .map((spec) => `${rel(f)} -> ${spec}`),
+      )
+      .sort();
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('pins which first-party areas src/straker reaches by value, so a new edge is deliberate', () => {
+    // The package allowlist cannot see a relative import, so an HTTP client reached THROUGH
+    // another area would pass it. This is the rule that would catch that: `src/portal/` carries
+    // Playwright, and adding an edge to it has to be argued for on this line before it compiles.
+    // Uses the SAME parser as the package rule above. An earlier cut walked only
+    // `ts.isImportDeclaration`, so `export { x } from '../portal/y.js'`, `await import(...)`
+    // and `require(...)` — all value edges — were invisible to it, twenty lines below a helper
+    // that already handled all three.
+    const areas = new Set<string>();
+    for (const file of sourcesUnder(join(SRC, 'straker'))) {
+      for (const { spec, typeOnly } of moduleSpecifiersIn(file, read(file))) {
+        // Type-only edges erase; R11 permits exactly one and it is recorded above.
+        if (typeOnly || !spec.startsWith('.')) continue;
+        const resolved = resolve(dirname(file), spec).replace(/\\/g, '/');
+        if (!resolved.startsWith(PROJECT_SRC)) continue;
+        const rest = resolved.slice(PROJECT_SRC.length);
+        // A file directly under `src/` (`src/clock.ts`) belongs to no area. Counting it as one
+        // rather than skipping it means such an edge cannot go silently uncounted, which the
+        // previous `/src/([^/]+)/` match would have done.
+        const area = rest.includes('/') ? rest.slice(0, rest.indexOf('/')) : 'src (root)';
+        if (area !== 'straker') areas.add(area);
+      }
+    }
+
+    expect([...areas].sort()).toEqual(STRAKER_VALUE_AREAS);
+  });
+});

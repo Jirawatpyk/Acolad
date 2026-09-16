@@ -34,17 +34,10 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { config as loadDotenv } from 'dotenv';
 import { STRAKER_DB_FILENAME, StrakerStore } from './strakerStore.js';
-import { computeWinRate, type WinRate, type WinRateWindow } from './winRate.js';
+import { WEAK_SIGNAL_BELOW, computeWinRate, type WinRate, type WinRateWindow } from './winRate.js';
 
 /** Must match `STRAKER_STATE_DIR`'s default in `config.ts`. */
 const DEFAULT_STATE_DIR = 'state/straker';
-
-/**
- * Below this many winnable offers the figure is a weak signal. SC-004 sets a target only
- * after roughly two weeks of baseline, which at the stated 2–3 offers a day is about thirty
- * offers; ten is the point below which a single race moves the rate by ten points or more.
- */
-const WEAK_SIGNAL_BELOW = 10;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 

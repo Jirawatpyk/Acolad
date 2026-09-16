@@ -212,6 +212,17 @@ export type OfferStanding =
   | { readonly kind: 'undecided' };
 
 /**
+ * Below this many winnable offers the figure is a weak signal. SC-004 sets a target only
+ * after roughly two weeks of baseline, which at the stated 2-3 offers a day is about thirty
+ * offers; ten is the point below which a single race moves the rate by ten points or more.
+ *
+ * Lives here rather than in either consumer because two places now render a win rate — the
+ * ops script and the 09:00 report (T076) — and a threshold that could differ between them
+ * would let the same figure be called a weak signal in one and a result in the other.
+ */
+export const WEAK_SIGNAL_BELOW = 10;
+
+/**
  * A measurement period, applied to `occurredAtMs`. Half-open — `fromMs` inclusive, `toMs`
  * exclusive — so two adjacent periods can never count the same event twice.
  */
