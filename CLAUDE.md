@@ -293,6 +293,51 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
   (deadline day)** ที่ budget คำเต็มจริง (dedup `daily_cap_reached:<วันDL>` — 2 วัน DL ล้นในวัน
   Bangkok เดียวกันได้ 2 alert; PR #15); ไม่ใช่งานเดี่ยวใหญ่เกิน cap (อันนั้น = "accept manually").
 
+## jobcatch-straker (live 2026-09-16 — runbook)
+
+บอทตัวที่สอง **HTTP ล้วน ไม่มี browser**: อ่านรายการงานเปิดที่ `vendr.straker.ai`
+ทุก 10 วินาที → ตัดสิน → **ยิง claim แข่งกับเวนเดอร์เจ้าอื่น**. ต่างจาก XTM ตรงที่
+การคว้างาน**ย้อนกลับไม่ได้** ดีไซน์เลยเอียงไปทาง "ไม่คว้า" เสมอเมื่อไม่แน่ใจ.
+
+**พฤติกรรมที่ดูเหมือน bug แต่ตั้งใจ — อ่านก่อนแจ้งว่าพัง:**
+
+- **แพ้การแข่งแล้ว alert ทุกครั้ง** — `CONFIRMED_LOST_RACE_SIGNALS` ใน `claimOutcome.ts`
+  **จงใจว่างเปล่า** จนกว่า RP-4 จะยืนยันสัญญาณจริงจากพอร์ทัล. ระหว่างนี้ทุกการถูกปฏิเสธ
+  ถูกจัดเป็น `failed` ซึ่งเป็นฝั่งที่ปลอดภัย (FR-005a) แต่เสียงดัง. **ปิดเคสนี้ = เติมค่า
+  เดียวลง array นั้น** หลังเห็นของจริงหนึ่งครั้ง (SC-007 ติดป้าย conditional ไว้แล้ว)
+- **เพดาน 50 คำ/วัน ต่ำผิดปกติ** — ตั้งใจ ระหว่าง RP-4 ยังเปิด. งานที่เคยเห็นมี 2-4 คำ
+  จึงยังรับได้หลายงาน แต่ถ้ามีงานอ้างว่า 500 คำโผล่มาจะถูกปฏิเสธ + alert ซึ่งคือ
+  สัญญาณที่อยากได้พอดี (แปลว่า `words` อาจไม่ใช่หน่วย effort ที่เราเข้าใจ).
+  `STRAKER_THROUGHPUT_WORDS_PER_HOUR=389` **pin ไว้** ไม่ให้ derive จากเพดานต่ำ ๆ
+- **โดน 403 = หยุดกดรับถาวร** ข้ามรอบและข้าม restart (เก็บใน `straker_meta`).
+  ปลดด้วย `npm run straker:unbar` **เท่านั้น** — ไม่มี auto-recovery เพราะบัญชีที่
+  login ได้ก็โดนแบนพร้อมกันได้. ระหว่างโดนแบนยัง **อ่าน/บันทึก/reconcile ต่อ**
+- **claim ไม่เคย retry** ไม่ว่ากรณีใด (R7/FR-019c) — ผลลัพธ์ที่ไม่รู้จะถูกปิดโดย
+  reconcile ทุก 15 นาทีแทน ไม่ใช่ยิงซ้ำ
+
+**"ทำไมบอทไม่คว้างาน X":** เปิด Google Sheet (`NZTC Tracking` → แท็บ
+`Straker_Tracking`) → คอลัมน์ **Skip reason** บอกเหตุผลตรง ๆ; ถ้าไม่มีแถวเลย
+แปลว่าบอทไม่เคย*เห็น*งานนั้น → ดู log `module:pollCycle action:cycle` ว่ารอบนั้น
+`offers` เป็นเท่าไร. เหตุผลที่เจอบ่อย: เกินเพดานวันนั้น · ทำไม่ทันในเวลาทำงานก่อน DL ·
+DL ตรงวันหยุด · อ่าน effort/deadline ไม่ได้ (อันนี้ alert ด้วย — FR-023a)
+
+**คำสั่ง ops (อ่านอย่างเดียวทั้งหมด ยกเว้น unbar/requeue):**
+
+```powershell
+npm run straker:win-rate        # won / winnable — FR-017; ทั้ง record ถ้าไม่ใส่ --days
+npm run report:combined         # workload สองพอร์ทัลรวม + retries + uptime
+npm run straker:outbox:requeue  # dead -> pending (รันหลังแก้ปลายทางแล้วเท่านั้น)
+npm run straker:unbar           # ปลดล็อกหลัง 403 — ต้องมีคนตัดสินใจ
+```
+
+**หยุดบอท:** `pm2 stop jobcatch-straker` (XTM ไม่กระทบ — คนละ process คนละ port).
+ยังไม่มี kill-switch แบบ `ACCEPT_ENABLED=0` ของ XTM — ถ้าอยากให้อ่านอย่างเดียว
+ต้องหยุดทั้งตัว
+
+**ยังค้าง (งานของเจ้าของ):** RP-1 rotate รหัสผ่าน · RP-2 อ่าน portal terms แล้วบันทึก
+ข้อสรุปพร้อมชื่อ · RP-4 เฝ้าดูงานจริง 1 งาน. ทั้งสามอยู่ใน
+`specs/003-straker-offer-race/release-preconditions.md`
+
 ## ข้อควรระวังเฉพาะโปรเจกต์
 
 - **Secrets อยู่ใน `.env` เท่านั้น** (gitignored): portal credentials,
@@ -324,9 +369,8 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
     ดูเขียวสวย แต่ไม่ page ใคร เพราะ integration ไม่สืบทอดจาก check เดิม
   - **ชื่อ check สำคัญ**: ข้อความที่เข้า Google Chat ใช้ชื่อ check เป็นตัวบอกว่าบอทไหนตาย
     (ชื่อเดิมคือ `My First Check` ซึ่งตอนตีสองบอกอะไรไม่ได้เลย)
-- **Straker โดนแบน (403)**: บอทจะ **หยุดกดรับถาวร** (เก็บใน `straker_meta` — restart ไม่ล้าง) แต่ยัง
-  อ่าน/บันทึก/reconcile ต่อ. alert `account_barred` เด้งครั้งเดียวตอนเจอ. ปลดล็อกด้วย
-  `npm run straker:unbar` **เท่านั้น** — ไม่มี auto-recovery เพราะบัญชีที่ login ได้ก็โดนแบนพร้อมกันได้
+- **Straker โดนแบน (403)** และพฤติกรรมอื่นที่ดูเหมือน bug แต่ตั้งใจ — ดูหัวข้อ
+  **jobcatch-straker (runbook)** ด้านบน
 - PowerShell 5.1 เป็น shell หลักของเครื่องนี้ (ไม่มี `&&` — ใช้ `;`)
 - จังหวะเรียก portal มีเพดานเข้มงวด (กันบัญชีถูกระงับ): ห้ามลด interval
   ต่ำกว่า 20s หรือเพิ่มความถี่คำขอโดยไม่แก้ FR-011 ใน spec ก่อน
