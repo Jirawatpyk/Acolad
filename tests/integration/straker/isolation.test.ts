@@ -751,21 +751,31 @@ function firstCapturedOffer(): RawOffer & Record<string, unknown> {
  */
 let cachedProgram: ts.Program | null = null;
 
-function projectOptions(): ts.CompilerOptions {
-  const root = join(SRC, '..');
-  const raw = ts.readConfigFile(join(root, 'tsconfig.json'), ts.sys.readFile);
-  return { ...ts.parseJsonConfigFileContent(raw.config ?? {}, ts.sys, root).options, noEmit: true };
-}
+/**
+ * Compiler options for the guard's programs — deliberately NOT the project's tsconfig.
+ *
+ * The full options took 8 s locally and **81 s on CI**, where the test timed out at 60 s. The
+ * cost was `types`: unset, it pulls in every package under `@types`, and `googleapis` alone
+ * dominates. All this guard needs is the ambient platform globals, so `types: ['node']` with a
+ * minimal `lib` resolves `fetch` identically in about 450 ms — the same answer, eighteen times
+ * faster.
+ *
+ * What keeps the shortcut honest is the positive control below: if this set ever stopped
+ * resolving `fetch` the way the real build does, the rule that says `httpClient.ts` must
+ * contain a use of the global would fail immediately. That is precisely how the earlier
+ * `lib.*.d.ts` mistake was caught.
+ */
+const GUARD_OPTIONS: ts.CompilerOptions = {
+  target: ts.ScriptTarget.ES2022,
+  lib: ['lib.es2022.d.ts'],
+  types: ['node'],
+  skipLibCheck: true,
+  noEmit: true,
+};
 
 function strakerProgram(): ts.Program {
-  if (cachedProgram !== null) return cachedProgram;
-  const parsed = { options: projectOptions() };
-  // Only the files the rule is about. The checker still pulls in everything they import, which
-  // is what lets it resolve `fetch` to the lib declaration rather than to nothing.
-  cachedProgram = ts.createProgram(sourcesUnder(join(SRC, 'straker')), {
-    ...parsed.options,
-    noEmit: true,
-  });
+  // Built once for the whole block: the cost is in creating it, not in querying it.
+  cachedProgram ??= ts.createProgram(sourcesUnder(join(SRC, 'straker')), GUARD_OPTIONS);
   return cachedProgram;
 }
 
@@ -896,55 +906,70 @@ describe('FR-030 (DC-4) — everything between the decision and the wire lives i
   const rel = (p: string): string => p.replace(/.*\/src\//, 'src/');
   const read = (f: string): string => readFileSync(f, 'utf8');
 
-  /** Resolve a snippet through the same checker the rules use, by parsing it in isolation. */
-  function usesInSnippet(source: string): string[] {
-    // The project's own compiler options, not a hand-picked set: `fetch` resolves differently
-    // under `lib.dom` than under this repo's `lib: ["lib.es2022.d.ts"]` plus @types/node, and a
-    // probe resolving it differently from the real rule would be testing something else.
-    const program = ts.createProgram(['__probe.ts'], projectOptions(), probeHost(source));
-    const sf = program.getSourceFile('__probe.ts');
-    return sf === undefined ? [] : globalFetchUsesIn(sf, program.getTypeChecker());
-  }
-
-  function probeHost(source: string): ts.CompilerHost {
+  /**
+   * Resolve a batch of snippets through the same checker the rules use.
+   *
+   * One program for all of them, not one each: creating a program is what costs — nine
+   * separate ones took four seconds, a single multi-file one takes under half of that in
+   * total. Querying it is free by comparison.
+   */
+  function usesInSnippets(snippets: Readonly<Record<string, string>>): Record<string, string[]> {
+    const names = Object.keys(snippets).map((k) => `${k}.ts`);
     const host = ts.createCompilerHost({});
     const original = host.getSourceFile.bind(host);
-    host.getSourceFile = (name, lang, ...rest): ts.SourceFile | undefined =>
-      name === '__probe.ts'
-        ? ts.createSourceFile(name, source, lang, true)
-        : original(name, lang, ...rest);
-    host.fileExists = (name): boolean => name === '__probe.ts' || ts.sys.fileExists(name);
-    host.readFile = (name): string | undefined =>
-      name === '__probe.ts' ? source : ts.sys.readFile(name);
-    return host;
+    const sourceOf = (name: string): string | undefined =>
+      snippets[name.replace(/\.ts$/, '').replace(/^.*\//, '')];
+    host.getSourceFile = (name, lang, ...rest): ts.SourceFile | undefined => {
+      const src = sourceOf(name);
+      return src === undefined
+        ? original(name, lang, ...rest)
+        : ts.createSourceFile(name, src, lang, true);
+    };
+    host.fileExists = (name): boolean => sourceOf(name) !== undefined || ts.sys.fileExists(name);
+    host.readFile = (name): string | undefined => sourceOf(name) ?? ts.sys.readFile(name);
+
+    const program = ts.createProgram(names, GUARD_OPTIONS, host);
+    const checker = program.getTypeChecker();
+    const out: Record<string, string[]> = {};
+    for (const key of Object.keys(snippets)) {
+      const sf = program.getSourceFile(`${key}.ts`);
+      out[key] = sf === undefined ? ['<snippet did not parse>'] : globalFetchUsesIn(sf, checker);
+    }
+    return out;
   }
 
   it('resolves bindings rather than matching names, so neither a bypass nor a false alarm gets through', () => {
-    // Guard the guard, and every case here is one an earlier cut of this rule got WRONG.
+    // Guard the guard, and every case here is one an earlier cut of this rule got WRONG — the
+    // first four were walked straight past, the next four failed the build on correct code, and
+    // the last two are what the regex version could not survive.
     expect(sourcesUnder(join(SRC, 'straker')).length).toBeGreaterThan(20);
 
-    // Uses of the global, including the two spellings the syntax version walked straight past.
-    expect(usesInSnippet('export const d = (o: { f?: typeof fetch }) => o.f ?? fetch;')).toEqual([
-      'fetch',
-    ]);
-    expect(usesInSnippet('export const r = async (u: string) => fetch(u);')).toEqual(['fetch']);
-    expect(
-      usesInSnippet('const g = globalThis; export const r = async (u: string) => g.fetch(u);'),
-    ).toEqual(['fetch']);
-    expect(usesInSnippet("export const r = async () => globalThis['fetch']('u');")).toEqual([
-      "'fetch'",
-    ]);
+    const got = usesInSnippets({
+      fallback: 'export const d = (o: { f?: typeof fetch }) => o.f ?? fetch;',
+      direct: 'export const r = async (u: string) => fetch(u);',
+      alias: 'const g = globalThis; export const r = async (u: string) => g.fetch(u);',
+      elementAccess: "export const r = async () => globalThis['fetch']('u');",
+      typeOfGlobal: 'export interface D { readonly fetchImpl: typeof globalThis.fetch }',
+      interfaceMember: 'export interface P { fetch(u: string): Promise<string> }',
+      parameter: 'export function make(fetch: number) { return fetch; }',
+      localConst: 'const fetch = 1; export default fetch;',
+      stringLiteral: "export const x = { action: 'fetch' };",
+      apostropheInProse: "// a portal's ceiling\nexport const y = 1;",
+    });
 
-    // NOT uses of the global — the four the syntax version failed the build on.
-    expect(
-      usesInSnippet('export interface D { readonly fetchImpl: typeof globalThis.fetch }'),
-    ).toEqual([]);
-    expect(usesInSnippet('export interface P { fetch(u: string): Promise<string> }')).toEqual([]);
-    expect(usesInSnippet('export function make(fetch: number) { return fetch; }')).toEqual([]);
-    expect(usesInSnippet('const fetch = 1; export default fetch;')).toEqual([]);
-    // And the two the regex version failed on.
-    expect(usesInSnippet("export const x = { action: 'fetch' };")).toEqual([]);
-    expect(usesInSnippet("// a portal's ceiling\nexport const y = 1;")).toEqual([]);
+    // Uses of the global.
+    expect(got['fallback']).toEqual(['fetch']);
+    expect(got['direct']).toEqual(['fetch']);
+    expect(got['alias']).toEqual(['fetch']);
+    expect(got['elementAccess']).toEqual(["'fetch'"]);
+    // NOT uses of the global — a rule that fails the build on these is worse than no rule,
+    // because the idiom it rejects is the one the transport port is meant to be written in.
+    expect(got['typeOfGlobal']).toEqual([]);
+    expect(got['interfaceMember']).toEqual([]);
+    expect(got['parameter']).toEqual([]);
+    expect(got['localConst']).toEqual([]);
+    expect(got['stringLiteral']).toEqual([]);
+    expect(got['apostropheInProse']).toEqual([]);
   });
 
   it('finds the transport where DC-4 says it is, which proves the rule is not passing by accident', () => {
