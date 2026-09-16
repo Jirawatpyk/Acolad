@@ -315,3 +315,17 @@ SC-000 gate ──> T032, T033, T041, T042, T043, T044 only   [lifted 2026-09-15
 **Where that leaves the work**: Phase 4 is now the critical path, and its absence is load-bearing rather than cosmetic — outcomes are written durably and nothing drains the queue, so a win today would be recorded and never announced. The release preconditions (RP-1..RP-5) are all still open, and RP-4 in particular gates the claim path's four unconfirmed guesses.
 
 **If a Track A task turns out to depend on offer shape after all, move it to Track B rather than patching it in place** — that dependency is the signal the split was drawn in the wrong spot, and redrawing it costs less than discovering it after release.
+
+---
+
+## Phase 7: Convergence
+
+Appended by `/speckit-converge` on 2026-09-16, after Phases 0–6 were complete and the bot
+was live. Zero CRITICAL, zero `missing` — the specified scope is built. What remains is one
+success criterion only half met, one invariant that holds but is unguarded, code the spec no
+longer calls for, and a stale structure block.
+
+- [ ] T076 Report the Straker win rate automatically instead of only on demand, per SC-004 (partial) — `computeWinRate` has exactly one caller, `winRateReport.ts`, which is the manual `npm run straker:win-rate`. The 09:00 combined report already carries workload, retries and uptime, so it is the obvious home. The consequence of leaving it is not a missing number but a missing *habit*: SC-004 sets a target only after two weeks of baseline, and a baseline nobody is shown is a baseline nobody reads. Note the report is in the XTM bot's path (`dailyReport.ts`), so this must go through `combinedSummary.ts` like FR-018 did, and must keep `combinedReportRows`'s never-throws property.
+- [ ] T077 Guard FR-030 (DC-4) with a walking test the way R11 is guarded, per FR-030 (partial) — the invariant currently HOLDS: no `fetch(` exists in `src/straker/` outside `httpClient.ts`. Nothing enforces it. R11's equivalent is enforced at `tests/integration/straker/isolation.test.ts:652`, and `httpClient.ts` names the exact failure this would catch — a *racing* read added through `getJson` silently joins the deferrable class and gets shed below 120 remaining, which is the hot path quietly losing its budget priority. Walk `src/straker/**` and fail on any request-issuing call outside the one file; assert the guard is not vacuous (a deliberate violation must fail it).
+- [ ] T078 Decide whether the probe's stranded core stays or goes, per T072/RP-5 (unrequested) — `CaptureStore` (`src/straker/captureStore.ts`) and `runProbeCycle` (`src/straker/probe.ts`) have had no production caller since T072 removed the probe entry point; only their tests reach them. RP-5 recorded keeping them deliberately, because "Straker's payload shape is confirmed on two jobs and resurrecting evidence collection should be cheap". That reasoning may well still hold — this task is to make it a decision with a date rather than drift, and to record the outcome either way. `probe.ts` itself must stay regardless: `RawOffer` is used throughout the bot.
+- [ ] T079 Bring `plan.md`'s Source Code block in line with the tree, per plan: Source Code structure (contradicts) — it still lists `reconMain.ts`, which T072 deleted, and omits four files that shipped since: `dispatcher.ts` (Phase 4), `requeue.ts` and `winRate.ts` (review-fix waves), `unbar.ts` (T073). Documentation-only; no code changes.
