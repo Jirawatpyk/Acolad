@@ -86,7 +86,10 @@ npm run test:coverage   # gate ≥ 80% บน detection/state/reporting/schedule
 npm run poll:once       # รันรอบเดียวจบ (smoke) — เพิ่ม $env:LIVE_PORTAL='1' สำหรับ portal จริง
 npm run deploy          # รัน 24/7: build + restart แบบ single-instance-safe + verify (ใช้อันนี้เสมอ)
 # ห้าม `pm2 restart acolad-bot` ด้วยมือ — มัน skip stop-and-wait แล้วทิ้ง orphan/ชน lock
-npm run outbox:requeue  # ops: คืนรายการแจ้งเตือน dead → pending
+npm run outbox:requeue  # ops: คืนรายการแจ้งเตือน dead → pending (ฐานข้อมูล XTM)
+npm run straker:outbox:requeue  # ops: อันเดียวกันสำหรับ Straker — คนละ db คนละสคริปต์ (R11)
+npm run straker:win-rate        # ops: win rate ของ Straker (FR-017) — อ่านอย่างเดียว
+npm run report:combined         # ops: workload สองพอร์ทัลรวมกัน (FR-018) — อ่านอย่างเดียว
 npm run report:latency  # สรุป p95 จาก log สำหรับตรวจรับ SC-001/SC-002
 npm run report:catch-rate  # สรุปอัตราจับงานทันใน <1 นาที (snatch window)
 npm run xtm:recon       # รัน live recon เก็บ evidence โครงสร้าง XTM (ต้องตั้ง .env)
