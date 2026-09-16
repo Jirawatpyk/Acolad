@@ -30,7 +30,7 @@ Required before anything runs:
 - [ ] **RP-2** Portal terms on automated claiming read, **and the conclusion written down** — a named person, a date, a finding. "Someone looked at it" is not a record.
 - [x] **RP-3** Seven-day XTM baseline captured and stored (SC-005a) — **done 2026-09-16**, at [`xtm-baseline.md`](./xtm-baseline.md). It found the XTM bot has seen no jobs since 2026-07-15, which makes SC-005's check 2 unusable as written; the baseline records why and what checks 1 and 3 compare against.
 - [ ] **RP-4** Lost-race signal confirmed against one real offer, under supervision (FR-005a).
-- [ ] **RP-5** Capture probe stopped before the bot starts — they must never share the request budget. **Code removed 2026-09-16 (T072)**; one command left, `pm2 delete jobcatch-straker-recon`, which must run before the next `npm run build`. See [`release-preconditions.md`](./release-preconditions.md).
+- [x] **RP-5** Capture probe stopped before the bot starts — they must never share the request budget. **Done 2026-09-16 (T072)** — code removed and `pm2 delete jobcatch-straker-recon` run, before RP-1 deliberately: the probe restarted every 5 s on a refused sign-in, so rotating the password while it ran would have offered the old one ~17,000 times a day. See [`release-preconditions.md`](./release-preconditions.md).
 
 ---
 

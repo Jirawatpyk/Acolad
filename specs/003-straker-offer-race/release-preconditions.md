@@ -10,7 +10,7 @@ named person, a date, a finding. "Someone looked at it" is not a record.
 | RP-2 | Portal terms on automated claiming read, conclusion written down | ⬜ **owner** |
 | RP-3 | Seven-day XTM baseline captured (SC-005a) | ✅ **done 2026-09-16** |
 | RP-4 | Lost-race signal confirmed against one real offer, under supervision | ⬜ **owner — gates four guesses** |
-| RP-5 | Capture probe stopped before the bot starts | ◐ **code removed; one command left** |
+| RP-5 | Capture probe stopped before the bot starts | ✅ **done 2026-09-16** |
 
 ---
 
@@ -104,7 +104,7 @@ pages someone every time.
 
 ---
 
-## RP-5 — stop the capture probe ◐
+## RP-5 — stop the capture probe ✅
 
 **Why**: the two must never share the request budget. The probe polls the same account the
 bot will, so with both running the pacing rules in `httpClient.ts` govern only half the
@@ -114,29 +114,33 @@ traffic and the portal's remainder falls faster than either bot can account for.
 `straker:recon` script are removed. `fixtures/straker/offers/` is **kept**: those three
 payloads are the parser's test data and the suite reads them off disk.
 
-**Left, and it is the owner's** — one command, which must run **before** the next
-`npm run build`:
+**Done 2026-09-16**, on the owner's instruction and before RP-1, which is the order that
+matters:
 
-```powershell
-pm2 delete jobcatch-straker-recon
-pm2 save
+```
+pm2 delete jobcatch-straker-recon   ✓
+pm2 save                            ✓
 ```
 
-The order matters. The probe runs from `dist/straker/reconMain.js`; removing the source did
-not stop it and cannot. But the next build deletes that compiled file, and PM2 would then
-keep restarting an app whose script is gone.
+`acolad-bot` was untouched — still online, four days up, zero restarts.
 
-### Two things to weigh before running it
+**Why this had to precede RP-1.** The probe signed in **outside** its loop
+(`reconMain.ts`, `main().catch(...)`) with `autorestart: true, restart_delay: 5000`. A
+refused sign-in therefore killed the process and PM2 restarted it five seconds later — so
+rotating the password while it ran would have offered the old credential roughly **17,000
+times a day** to an account whose lockout policy is unknown and whose password is being
+rotated precisely because it leaked.
 
-**The probe is currently the only thing watching Straker.** It is still capturing payloads,
-and the parser is built on **two independent jobs** (three files, of which two are one job
-split across two languages). Every further offer it captures is evidence the parser is
-currently guessing at. Between `pm2 delete` and the bot's first start, nothing observes the
-portal at all.
+### The cost this incurred, now live
 
-**The reason to stop it is the shared budget**, and that only bites once the bot starts. So
-the two commands naturally belong together: delete the probe and release the bot in the same
-sitting, rather than leaving a gap.
+**Nothing is watching Straker.** The probe was the only observer, and the parser stands on
+**two independent jobs** (three files, of which two are one job split across two languages).
+Every offer that arrives between now and the bot's first start is evidence nobody collects —
+and `offerParse.ts` is deliberately brittle about anything it has not seen, so that evidence
+is the difference between a parser that is right and one that has not been contradicted yet.
+
+That argues for keeping the gap short: RP-1, RP-2 and RP-4 done in one sitting and the bot
+released, rather than the portal going unobserved for days.
 
 **What the removal stranded**: `src/straker/captureStore.ts` and `runProbeCycle` in
 `src/straker/probe.ts` now have **no production caller** — only their tests. They are the
@@ -145,4 +149,4 @@ shape is confirmed on two jobs and resurrecting evidence collection should be ch
 stops being worth it, deleting them is the follow-up; `probe.ts` itself must stay regardless,
 since `RawOffer` is used throughout the bot.
 
-> Probe deleted by: ______________  Date: ____________
+> Probe deleted: **2026-09-16**, on the owner's instruction. Password rotation (RP-1) is now safe to perform.
