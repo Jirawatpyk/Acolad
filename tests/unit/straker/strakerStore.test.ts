@@ -1091,3 +1091,45 @@ describe('OfferEvent — the shape refuses the rows the schema refuses (type des
     expect([skipThatWon, claimWithAReason, claimWithNoOutcome, skipWithNoReason]).toHaveLength(4);
   });
 });
+
+describe('listEvents(window) — the bound the 09:00 report reads through', () => {
+  /**
+   * Half-open, matching `WinRateWindow`: `fromMs` inclusive, `toMs` exclusive, so two adjacent
+   * windows can never count one event twice. The claim was only asserted in a comment — change
+   * `>=` to `>` and exactly one event, the one landing on `fromMs`, disappears from a reported
+   * figure with nothing failing. Boundaries are where that kind of edit hides.
+   */
+  const at = (objId: string, occurredAtMs: number) => ({
+    objId,
+    occurredAtMs,
+    eventType: 'sighting' as const,
+    effortWords: 4,
+    deadlineMs: null,
+  });
+
+  it('includes fromMs, excludes toMs, and drops what falls outside', () => {
+    const { store } = freshStore();
+    for (const [id, ms] of [
+      ['before', 999],
+      ['on-from', 1_000],
+      ['inside', 1_500],
+      ['on-to', 2_000],
+      ['after', 2_001],
+    ] as const) {
+      store.recordEvent(at(id, ms));
+    }
+
+    const ids = store.listEvents({ fromMs: 1_000, toMs: 2_000 }).map((e) => e.objId);
+
+    expect(ids.sort()).toEqual(['inside', 'on-from']);
+  });
+
+  it('returns everything when no window is given, which is what the ops script relies on', () => {
+    // `winRateReport.ts` calls `listEvents()` bare and measures the whole record.
+    const { store } = freshStore();
+    store.recordEvent(at('old', 1));
+    store.recordEvent(at('new', 10_000_000));
+
+    expect(store.listEvents()).toHaveLength(2);
+  });
+});

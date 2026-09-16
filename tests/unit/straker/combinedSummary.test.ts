@@ -1212,9 +1212,6 @@ describe('combinedReportRows — the rows the XTM 09:00 report renders (T060a, F
 // ===========================================================================================
 // T076 / SC-004 — the win rate has to reach the report, not wait for someone to run a script
 // ===========================================================================================
-// ===========================================================================================
-// T076 / SC-004 — the win rate has to reach the report, not wait for someone to run a script
-// ===========================================================================================
 
 describe('T076 — the Straker win rate reaches the 09:00 report (SC-004)', () => {
   /**
@@ -1391,6 +1388,18 @@ describe('T076 — the Straker win rate reaches the 09:00 report (SC-004)', () =
     expect(WIN_RATE_WINDOW_DAYS).toBe(14);
   });
 
+  it('keeps the whole FR-018 section when the record is healthy', async () => {
+    // The assertion the consolidation dropped: against a GOOD record the section is not merely
+    // present, it is full — both portals, the combined line, and the win rate.
+    const stateDir = await strakerRecord([claim('a', 'won')]);
+
+    const rows = reportRows(stateDir);
+
+    expect(rows.length).toBeGreaterThan(3);
+    expect(rows.filter((r) => r.label === 'Both portals')).toHaveLength(1);
+    expect(winRateRowOf(rows)).toBeDefined();
+  });
+
   it('keeps the whole FR-018 section when the Straker record cannot be read', async () => {
     // The composition property that IS reachable. `combinedReportRows`'s outer catch REPLACES
     // every row with one "unavailable" line, so anything that throws late destroys the XTM
@@ -1401,15 +1410,42 @@ describe('T076 — the Straker win rate reaches the 09:00 report (SC-004)', () =
     expect(rows.some((r) => (r.value ?? '').includes('combined view unavailable'))).toBe(false);
   });
 
+  it('still reports the win rate when held_work is broken but the events read fine', async () => {
+    /**
+     * The case the suppression fix exists for, and it had no test — reverting the fix left the
+     * whole suite green, which a review demonstrated.
+     *
+     * `readStrakerWorkload` calls `heldWork()`, so a fault in `held_work` alone makes the PORTAL
+     * row report the record unreadable. An earlier cut suppressed the win-rate row whenever that
+     * happened — discarding a figure that is perfectly computable, because `offer_events` is a
+     * different table and reads fine. That is the "going quiet on an unreadable record" this
+     * row's own docstring refuses to do.
+     */
+    const stateDir = await strakerRecord([claim('a', 'won'), claim('b', 'lost')]);
+    const db = new Database(join(stateDir, 'straker.db'));
+    db.exec('ALTER TABLE held_work RENAME TO held_work_broken');
+    db.close();
+
+    const rows = reportRows(stateDir);
+
+    // The portal row admits the fault …
+    expect(rows.some((r) => r.label === 'Straker' && (r.value ?? '').includes('unreadable'))).toBe(
+      true,
+    );
+    // … and the win rate is still reported, because nothing about it was unreadable.
+    expect(winRateRowOf(rows)?.value).toContain('50.0%');
+  });
+
   it('does not say the same thing twice when the record is unreadable', async () => {
     // One fault, one line. The portal row already reports an unreadable record in the same words.
     const rows = reportRows(join(tempDir(), 'never-existed'));
 
-    // Scoped to Straker's own rows: the XTM record in this fixture is an empty directory too,
-    // so it legitimately reports unreadable as well. What must not appear twice is Straker.
-    const straker = rows.filter(
-      (r) => r.label.startsWith('Straker') && (r.value ?? '').includes('record unreadable'),
-    );
-    expect(straker.map((r) => r.label)).toEqual(['Straker']);
+    // Asserts the PROPERTY — no win-rate row — rather than filtering on the same
+    // 'record unreadable' string the production predicate matches. Filtering on that string
+    // meant rewording the message would stop the suppression AND stop this test noticing,
+    // because the extra row would no longer match the filter either.
+    expect(winRateRowOf(rows)).toBeUndefined();
+    // And the portal row still says it, so the fault is reported exactly once.
+    expect(rows.filter((r) => (r.value ?? '').includes('record unreadable'))).not.toHaveLength(0);
   });
 });
