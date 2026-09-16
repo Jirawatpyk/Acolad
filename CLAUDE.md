@@ -271,10 +271,20 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
 - **reboot survival**: `pm2-windows-startup` ปลุก PM2 หลัง logon — ต้องเปิด auto-logon
   (`scripts/setup-autologon.ps1` ผ่าน Sysinternals Autologon/LSA) + `pm2 save`. ถ้า reboot
   แล้ว heartbeat ไม่กลับใน 5 นาที → เช็ค auto-logon (password rotation/Windows Update boot) ก่อน
-- **Healthchecks**: ตั้ง period 60s / grace 300s — บอทหยุดหรือ lock refuse จะ page ใน ~5 นาที.
-  **แต่ละบอทมี check ของตัวเอง** (XTM = `HEALTHCHECKS_PING_URL`, Straker = `STRAKER_HEALTHCHECKS_PING_URL`)
-  และ **integration ของ Google Chat ต้องติ๊กเปิดในแต่ละ check แยกกัน** — check ที่เพิ่งสร้างใหม่จะรับ ping
-  ผ่านหมดแต่ไม่ page ใคร เพราะ integration ไม่ได้สืบทอดมาจาก check เดิม (ดู V-HC ใน quickstart ของ 003)
+- **Healthchecks — ตั้ง period 60s / grace 300s ทั้งสอง check** (ตรวจครบแล้ว 2026-09-16, ดู V-HC
+  ใน `specs/003-straker-offer-race/quickstart.md`). ก่อนหน้านั้น**ของจริงเป็น 5 นาที/5 นาทีทั้งคู่**
+  ซึ่งทำให้ detect ที่ 10 นาทีพอดี = หลุดขอบ SC-010 ("within 10 minutes") — บรรทัดนี้เคยเขียน
+  มาตรฐานไว้โดยที่ไม่มีอะไรบังคับให้ตรง
+  - **Period กับ Grace ทำคนละหน้าที่ อย่าตั้งเท่ากันเพราะเข้าใจผิด**: ping ที่ช้ากว่า *Period* แค่ทำให้
+    check เป็นสถานะ `late` (เงียบ) — จะ **page ก็ต่อเมื่อเงียบเกิน `Period + Grace`** ดังนั้น 60s+300s
+    = ต้องไม่มี ping 6 นาทีเต็ม. หลักฐานว่าปลอดภัย: XTM 7 วัน 26,558 รอบ ช่องว่างแย่สุด 51 วินาที
+    เกิน 60s = 0 ครั้ง. **ลด Period ได้ detection เร็วขึ้นฟรี ไม่แลกกับ false alarm**
+  - **แต่ละบอทมี check ของตัวเอง** — XTM = `HEALTHCHECKS_PING_URL` (`acolad-bot (XTM)`),
+    Straker = `STRAKER_HEALTHCHECKS_PING_URL` (`jobcatch-straker`)
+  - **integration ของ Google Chat ต้องติ๊กในแต่ละ check แยกกัน** — check ใหม่จะรับ ping ผ่านหมด
+    ดูเขียวสวย แต่ไม่ page ใคร เพราะ integration ไม่สืบทอดจาก check เดิม
+  - **ชื่อ check สำคัญ**: ข้อความที่เข้า Google Chat ใช้ชื่อ check เป็นตัวบอกว่าบอทไหนตาย
+    (ชื่อเดิมคือ `My First Check` ซึ่งตอนตีสองบอกอะไรไม่ได้เลย)
 - **Straker โดนแบน (403)**: บอทจะ **หยุดกดรับถาวร** (เก็บใน `straker_meta` — restart ไม่ล้าง) แต่ยัง
   อ่าน/บันทึก/reconcile ต่อ. alert `account_barred` เด้งครั้งเดียวตอนเจอ. ปลดล็อกด้วย
   `npm run straker:unbar` **เท่านั้น** — ไม่มี auto-recovery เพราะบัญชีที่ login ได้ก็โดนแบนพร้อมกันได้
