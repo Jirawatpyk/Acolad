@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createOfferExtractor } from '../../../src/straker/offerParse.js';
 import { loadStrakerBotConfig } from '../../../src/straker/config.js';
 import {
+  isBudgetSuspended,
   type StrakerHttpClient,
   type StrakerTransportWarning,
 } from '../../../src/straker/httpClient.js';
@@ -288,5 +289,110 @@ describe('the portal hands the cycle a claim door, not a client (FR-002, V32)', 
     // The type above is the assertion; `npm run typecheck` is what enforces it.
     const lock: _PortalClientIsClaimOnly = true;
     expect(lock).toBe(true);
+  });
+});
+
+describe('the composition root paces its requests (FR-019, SC-003, T065)', () => {
+  /**
+   * The third capability-unreachable guard in this file, and it exists because the first two
+   * were not hypothetical: the retrying read door and the request deadline were each built,
+   * tested and left with no production caller because the composition root never passed the
+   * option that switches them on.
+   *
+   * Pacing is opt-in for the same reason those were — the live capture probe builds its
+   * client with `{ baseUrl }` alone and must keep behaving exactly as it does. Which means
+   * the bot getting paced is a fact about `createStrakerPortal`, provable nowhere else.
+   */
+  it('hands the transport a pacing policy, so the budget rules govern the running bot', async () => {
+    // Driven through the real portal against a fetch that reports a budget already under
+    // the deferrable floor. The reconciliation read goes through `getJson`, which is the
+    // deferrable door, so a paced client must refuse it rather than spend the allowance.
+    // The envelope shape `assigned-jobs` actually returns — a bare array is refused by the
+    // read's own guard before pacing could ever be reached, which is how this test first
+    // failed for the wrong reason.
+    const lowBudget: typeof fetch = () =>
+      Promise.resolve(
+        new Response('{"items":[],"total":0}', {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            'x-ratelimit-limit': '300',
+            'x-ratelimit-remaining': '5',
+            'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 30),
+          },
+        }),
+      );
+    const portal = createStrakerPortal(loadStrakerBotConfig(ENV), silentLogger(), {
+      fetchImpl: lowBudget,
+    });
+
+    // First read primes the budget from the reply; the second must be refused.
+    await portal.listAssignedWork('vendor-1').catch(() => undefined);
+
+    await expect(portal.listAssignedWork('vendor-1')).rejects.toSatisfy(isBudgetSuspended);
+  });
+
+  it('does not pace the claim, because an offer given up to save a request is not recoverable', async () => {
+    // `essential` is the exception the policy names, and it has to reach the claim path:
+    // shedding a claim to protect the allowance trades the irreversible thing for the
+    // renewable one.
+    const lowBudget: typeof fetch = () =>
+      Promise.resolve(
+        new Response('{}', {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            'x-ratelimit-limit': '300',
+            'x-ratelimit-remaining': '5',
+            'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 30),
+          },
+        }),
+      );
+    const portal = createStrakerPortal(loadStrakerBotConfig(ENV), silentLogger(), {
+      fetchImpl: lowBudget,
+    });
+
+    await portal.listAssignedWork('vendor-1').catch(() => undefined);
+
+    await expect(portal.client.postJson('/api/vendors/v/job-offers/o/claim', {})).resolves.toEqual(
+      {},
+    );
+  });
+});
+
+describe('signing in is never shed to protect the budget', () => {
+  it('opens a session while the budget is below the deferrable floor', async () => {
+    // `/auth/me` came through `getJson`, which pacing classifies as deferrable — so a bot
+    // whose session expired exactly when the allowance ran low could not renew it, and
+    // would stay blind for up to a window. The failure is safe but it is self-inflicted:
+    // sign-in is what every other request depends on, so it belongs with the claim on the
+    // essential side.
+    const replies: Record<string, string> = {
+      '/api/vendor/auth/login': '{"token":"t"}',
+      '/api/vendor/auth/me': '{"member_obj_id":"vendor-1"}',
+    };
+    const lowBudget: typeof fetch = (input) => {
+      const url = new URL(String(input));
+      return Promise.resolve(
+        new Response(replies[url.pathname] ?? '{}', {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            'x-ratelimit-limit': '300',
+            'x-ratelimit-remaining': '5',
+            'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 30),
+          },
+        }),
+      );
+    };
+    const portal = createStrakerPortal(loadStrakerBotConfig(ENV), silentLogger(), {
+      fetchImpl: lowBudget,
+    });
+
+    // Twice: the first primes the budget from the reply, the second would be shed if
+    // sign-in went through the deferrable door.
+    await portal.signIn();
+
+    await expect(portal.signIn()).resolves.toMatchObject({ vendorId: 'vendor-1' });
   });
 });

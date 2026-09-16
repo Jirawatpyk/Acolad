@@ -1,13 +1,21 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createHttpClient,
+  DEFAULT_PACING_POLICY,
+  isBudgetSuspended,
   isIndeterminateStatus,
   isSessionExpired,
+  StrakerBudgetSuspendedError,
   StrakerHttpError,
   StrakerRetryExhaustedError,
   StrakerTimeoutError,
 } from '../../../src/straker/httpClient.js';
-import type { StrakerHttpClient } from '../../../src/straker/httpClient.js';
+import type {
+  PacingPolicy,
+  StrakerHttpClient,
+  StrakerPacedHttpClient,
+  StrakerPacingEvent,
+} from '../../../src/straker/httpClient.js';
 
 function jsonResponse(body: unknown, init: { status?: number; headers?: Headers } = {}): Response {
   const headers = init.headers ?? new Headers();
@@ -992,5 +1000,632 @@ describe('reading the portal status codes — translated here, at the edge (DC-1
     for (const status of [400, 401, 403, 404, 409, 422, 429]) {
       expect(isIndeterminateStatus(status)).toBe(false);
     }
+  });
+});
+
+// =========================================================================================
+// T064 — the graduated budget response (FR-019, SC-003, quickstart V15 and V29)
+// =========================================================================================
+
+/**
+ * FR-019 asks for **steps**, not a single cliff, and SC-003 is the outer bound on all of
+ * them: never more than 300 requests in a minute, and never a reported remainder below 60.
+ *
+ * Three things are pinned below, and they fail differently:
+ *
+ * 1. **Opt-in.** A client built the way the capture probe builds one — `{ baseUrl }` and
+ *    nothing else — must issue requests exactly as it does today. The probe is running
+ *    against the live portal while these tests exist.
+ * 2. **The steps themselves.** Below 120 remaining, deferrable work stops; below 60,
+ *    reading pauses until the budget resets.
+ * 3. **The hard ceiling**, which holds when the headers are missing or unbelievable —
+ *    because an unreadable budget means *unknown*, and unknown must be governed rather
+ *    than read as unlimited.
+ *
+ * The clock is injected, so a minute of pacing is asserted in a millisecond.
+ */
+
+/** A real reset stamp off the live probe log: epoch SECONDS, on a whole-minute boundary. */
+const RESET_AT_SEC = 1789522440;
+const MINUTE_MS = 60_000;
+/** Ten seconds into the minute that stamp closes, so "until the reset" is 50 seconds. */
+const NOW_MS = (RESET_AT_SEC - 60) * 1_000 + 10_000;
+
+const ME_PATH = '/api/vendor/auth/me';
+const ASSIGNED_PATH = '/api/vendors/v1/assigned-jobs?limit=100&offset=0';
+const CLAIM_PATH = '/api/vendors/v1/job-offers/off-1/claim';
+
+/**
+ * A clock the test drives, whose `sleep` advances it by exactly what it was asked to wait.
+ * That is the property the whole suite rests on: the pacer's own waits are what move time
+ * forward, so the sliding window ages exactly as it would in production and a test that
+ * would otherwise take a minute takes none.
+ */
+interface FakeClock {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+  advance(ms: number): void;
+  readonly waits: number[];
+}
+
+function fakeClock(startMs: number = NOW_MS): FakeClock {
+  let t = startMs;
+  const waits: number[] = [];
+  return {
+    waits,
+    now: () => t,
+    advance: (ms: number) => {
+      t += ms;
+    },
+    sleep: async (ms: number): Promise<void> => {
+      waits.push(ms);
+      t += ms;
+    },
+  };
+}
+
+/** A reply carrying the budget recon measured: 300 a minute, resetting on the minute. */
+function budgetReply(remaining: number, resetAtSec: number = RESET_AT_SEC): Response {
+  return jsonResponse([], {
+    headers: new Headers({
+      'x-ratelimit-limit': '300',
+      'x-ratelimit-remaining': String(remaining),
+      'x-ratelimit-reset': String(resetAtSec),
+    }),
+  });
+}
+
+interface PacedHarness {
+  readonly client: StrakerPacedHttpClient;
+  readonly clock: FakeClock;
+  readonly fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>;
+  readonly events: StrakerPacingEvent[];
+}
+
+/**
+ * Small numbers where the thresholds are not what is under test: a ceiling of five makes
+ * "the sixth request waits" three lines long instead of two hundred and forty-one.
+ */
+const TEST_PACING: PacingPolicy = {
+  maxRequestsPerWindow: 5,
+  windowMs: MINUTE_MS,
+  suspendDeferrableBelow: 120,
+  pauseReadingBelow: 60,
+};
+
+function paced(
+  reply: () => Response,
+  pacing: Partial<PacingPolicy> = TEST_PACING,
+  clock: FakeClock = fakeClock(),
+): PacedHarness {
+  const fetchImpl = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(reply()));
+  const events: StrakerPacingEvent[] = [];
+  const client = createHttpClient({
+    baseUrl: 'https://portal.test',
+    fetchImpl,
+    pacing,
+    now: clock.now,
+    sleep: clock.sleep,
+    onPacing: (event) => events.push(event),
+  });
+  return { client, clock, fetchImpl, events };
+}
+
+describe('createHttpClient — pacing is opt-in, so the running capture probe is unchanged', () => {
+  it('holds nothing back when no pacing policy is configured, however alarming the budget', async () => {
+    // One remaining is the most alarming reading the portal can send, and four hundred
+    // requests is far past any ceiling. With no policy configured none of it applies: the
+    // probe collecting the SC-000 evidence must behave as it did before T065 existed.
+    const clock = fakeClock();
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(() => Promise.resolve(budgetReply(1)));
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    for (let i = 0; i < 400; i += 1) await client.getJson(OFFERS_PATH);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(400);
+    expect(clock.waits).toEqual([]);
+  });
+
+  it('does not even read the clock when pacing is off, so there is no pacer to misbehave', async () => {
+    const now = vi.fn(() => NOW_MS);
+    const sleep = vi.fn(async () => undefined);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(() => Promise.resolve(budgetReply(5)));
+    const client = createHttpClient({ baseUrl: 'https://portal.test', fetchImpl, now, sleep });
+
+    await client.getJson(OFFERS_PATH);
+    await client.postJson(CLAIM_PATH, {});
+    await client.getJsonWithBackoff(OFFERS_PATH);
+
+    // A pacer that quietly keeps a window while claiming to be off is one edit away from
+    // acting on it. Off means inert: no clock, no waits, no state.
+    expect(now).not.toHaveBeenCalled();
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('adds no scheduling tick when pacing is off — an await on an inert path is not inert', async () => {
+    const order: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(() => {
+      order.push('fetch');
+      return Promise.resolve(jsonResponse([]));
+    });
+    const client = createHttpClient({ baseUrl: 'https://portal.test', fetchImpl });
+
+    const call = client.getJson(OFFERS_PATH);
+    await Promise.resolve();
+    order.push('tick');
+    await call;
+
+    // Written as a bare `await pace(...)`, a pacer that does nothing still costs a
+    // microtask, the request slips behind one turn of the loop, and two ordering
+    // assertions in `failureModes.test.ts` fail — which is how this was found. Unchanged
+    // has to mean the scheduling too, not only the bytes.
+    expect(order).toEqual(['fetch', 'tick']);
+  });
+
+  it('sends the probe-shaped request unchanged — same method, same headers, nothing added', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse([]));
+    const client = createHttpClient({ baseUrl: 'https://portal.test', fetchImpl });
+
+    await client.getJson(OFFERS_PATH);
+
+    const [url, init] = fetchImpl.mock.calls[0] ?? [];
+    expect(url).toBe(`https://portal.test${OFFERS_PATH}`);
+    // Byte-for-byte: the init the probe's transport puts on the wire carries a method and
+    // headers and nothing else — no signal, and nothing pacing might have wanted to add.
+    expect(Object.keys(init ?? {}).sort()).toEqual(['headers', 'method']);
+    expect(new Headers(init?.headers).get('origin')).toBe('https://portal.test');
+  });
+});
+
+describe('createHttpClient — below 120 remaining, deferrable work stops (FR-019, V29)', () => {
+  it('refuses a deferrable request once the reported remainder is below 120', async () => {
+    const h = paced(() => budgetReply(119));
+
+    await h.client.essential.getJson(ME_PATH);
+    const error: unknown = await h.client.getJson(ASSIGNED_PATH).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(StrakerBudgetSuspendedError);
+    // Suspended means not sent. A request that goes out and is thrown away afterwards has
+    // spent exactly the thing the step exists to preserve.
+    expect(h.fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets deferrable work through at exactly 120 — the step is "below", not "at"', async () => {
+    const h = paced(() => budgetReply(120));
+
+    await h.client.essential.getJson(ME_PATH);
+
+    await expect(h.client.getJson(ASSIGNED_PATH)).resolves.toEqual([]);
+  });
+
+  it('keeps reading and claiming going while deferrable work is suspended', async () => {
+    const h = paced(() => budgetReply(100));
+
+    await h.client.essential.getJson(ME_PATH);
+
+    // FR-019's own words: below 120 it suspends deferrable work "and continues only
+    // reading and claiming". A step that stopped everything would lose the race the bot
+    // exists to run, at the moment it is most likely to be running one.
+    await expect(h.client.getJsonWithBackoff(OFFERS_PATH)).resolves.toEqual([]);
+    await expect(h.client.postJson(CLAIM_PATH, {})).resolves.toEqual([]);
+    expect(h.clock.waits).toEqual([]);
+  });
+
+  it('names the suspension as its own failure, never as something the portal said', async () => {
+    const h = paced(() => budgetReply(50));
+
+    await h.client.essential.getJson(ME_PATH);
+    const error: unknown = await h.client.getJson(ASSIGNED_PATH).catch((e: unknown) => e);
+
+    // Caught as a StrakerHttpError it would read as a portal refusal, and reconciliation's
+    // "three consecutive failures" would eventually alert about a portal that is fine.
+    expect(error).not.toBeInstanceOf(StrakerHttpError);
+    expect(isBudgetSuspended(error)).toBe(true);
+    expect(error).toMatchObject({ path: ASSIGNED_PATH, reason: 'budget_low', remaining: 50 });
+  });
+
+  it('is false for anything that is not a suspension, rather than throwing on it', () => {
+    expect(isBudgetSuspended(new StrakerHttpError(429, '/offers', 'slow down'))).toBe(false);
+    expect(isBudgetSuspended(undefined)).toBe(false);
+  });
+
+  it('says out loud that it shed deferrable work, which is otherwise invisible', async () => {
+    const h = paced(() => budgetReply(90));
+
+    await h.client.essential.getJson(ME_PATH);
+    await h.client.getJson(ASSIGNED_PATH).catch(() => undefined);
+
+    expect(h.events).toHaveLength(1);
+    expect(h.events[0]).toMatchObject({
+      kind: 'deferrable_suspended',
+      cause: 'budget_low',
+      path: ASSIGNED_PATH,
+      remaining: 90,
+      waitedMs: 0,
+    });
+  });
+});
+
+describe('createHttpClient — below 60 remaining, reading pauses until the budget resets', () => {
+  it('pauses the offer read until the reported reset, then reads', async () => {
+    const h = paced(() => budgetReply(59));
+
+    await h.client.essential.getJson(ME_PATH);
+    await h.client.getJsonWithBackoff(OFFERS_PATH);
+
+    // Ten seconds into the minute the stamp closes, so the wait is the fifty that are left
+    // of it — not a guessed interval, and not nothing.
+    expect(h.clock.waits).toEqual([50_000]);
+    expect(h.fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not pause at exactly 60 — the floor is the number it must not go below', async () => {
+    const h = paced(() => budgetReply(60));
+
+    await h.client.essential.getJson(ME_PATH);
+    await h.client.getJsonWithBackoff(OFFERS_PATH);
+
+    expect(h.clock.waits).toEqual([]);
+  });
+
+  it('does not pause a claim: an offer forfeited to save a request cannot be reclaimed', async () => {
+    const h = paced(() => budgetReply(3));
+
+    await h.client.essential.getJson(ME_PATH);
+    await h.client.postJson(CLAIM_PATH, {});
+
+    // FR-019 pauses *reading*. Pausing the claim would spend the only irreversible thing
+    // the bot has — a race it already won by seeing the offer first.
+    expect(h.clock.waits).toEqual([]);
+    expect(h.fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('caps the pause at one window, so a reset stamp far in the future cannot park the bot', async () => {
+    const h = paced(() => budgetReply(10, RESET_AT_SEC + 3_600));
+
+    await h.client.essential.getJson(ME_PATH);
+    await h.client.getJsonWithBackoff(OFFERS_PATH);
+
+    // An hour-long sleep inside the transport is indistinguishable from a hung bot, and a
+    // budget window is a minute: nothing the portal can say justifies waiting longer.
+    expect(h.clock.waits).toEqual([MINUTE_MS]);
+  });
+
+  it('does not wait on a reset stamp that has already passed', async () => {
+    const h = paced(() => budgetReply(10, RESET_AT_SEC - 600));
+
+    await h.client.essential.getJson(ME_PATH);
+    await h.client.getJsonWithBackoff(OFFERS_PATH);
+
+    // A stale or skewed stamp must not become a negative wait, and must not wedge the read
+    // either: one pause per request, never a loop waiting for a reading that only a reply
+    // can refresh.
+    expect(h.clock.waits).toEqual([]);
+  });
+
+  it('still refuses deferrable work below 60 — the lower step does not undo the higher one', async () => {
+    const h = paced(() => budgetReply(10));
+
+    await h.client.essential.getJson(ME_PATH);
+
+    await expect(h.client.getJson(ASSIGNED_PATH)).rejects.toBeInstanceOf(
+      StrakerBudgetSuspendedError,
+    );
+  });
+
+  it('says how long it paused, so a slow cycle is explainable afterwards', async () => {
+    const h = paced(() => budgetReply(59));
+
+    await h.client.essential.getJson(ME_PATH);
+    await h.client.getJsonWithBackoff(OFFERS_PATH);
+
+    expect(h.events).toHaveLength(1);
+    expect(h.events[0]).toMatchObject({
+      kind: 'request_delayed',
+      cause: 'budget_low',
+      waitedMs: 50_000,
+      remaining: 59,
+    });
+  });
+});
+
+describe('createHttpClient — the hard ceiling holds when the budget cannot be read', () => {
+  it('delays the request that would breach the ceiling until the oldest slot ages out', async () => {
+    // No budget headers at all: the portal has stopped saying, which is the case the
+    // ceiling exists for. Unknown is not unlimited.
+    const h = paced(() => jsonResponse([]));
+
+    for (let i = 0; i < 5; i += 1) await h.client.getJsonWithBackoff(OFFERS_PATH);
+    expect(h.clock.waits).toEqual([]);
+
+    await h.client.getJsonWithBackoff(OFFERS_PATH);
+
+    expect(h.clock.waits).toEqual([MINUTE_MS]);
+    expect(h.fetchImpl).toHaveBeenCalledTimes(6);
+  });
+
+  it('applies the ceiling to a budget that arrived and could not be believed', async () => {
+    const h = paced(
+      () =>
+        jsonResponse([], {
+          headers: new Headers({ ...SANE_BUDGET, 'x-ratelimit-remaining': '-5' }),
+        }),
+      { ...TEST_PACING, maxRequestsPerWindow: 1 },
+    );
+
+    await h.client.getJsonWithBackoff(OFFERS_PATH);
+    await h.client.getJsonWithBackoff(OFFERS_PATH);
+
+    expect(h.clock.waits).toEqual([MINUTE_MS]);
+  });
+
+  it('lets the window slide rather than counting for ever', async () => {
+    const h = paced(() => jsonResponse([]));
+
+    for (let i = 0; i < 5; i += 1) await h.client.getJsonWithBackoff(OFFERS_PATH);
+    h.clock.advance(MINUTE_MS + 1);
+    await h.client.getJsonWithBackoff(OFFERS_PATH);
+
+    expect(h.clock.waits).toEqual([]);
+    expect(h.fetchImpl).toHaveBeenCalledTimes(6);
+  });
+
+  it('counts every attempt that reaches the wire, retries included', async () => {
+    const clock = fakeClock();
+    const fetchImpl = alwaysFailing(500);
+    const events: StrakerPacingEvent[] = [];
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      retry: { maxAttempts: 3, baseDelayMs: 100, factor: 2, maxDelayMs: 1_000 },
+      pacing: { ...TEST_PACING, maxRequestsPerWindow: 2 },
+      now: clock.now,
+      sleep: clock.sleep,
+      random: () => 1,
+      onPacing: (event) => events.push(event),
+    });
+
+    await client.getJsonWithBackoff(OFFERS_PATH).catch(() => undefined);
+
+    // A pacer attached to the call rather than to the attempt counts one request where the
+    // portal saw three — which is how a retry storm walks straight through a ceiling. The
+    // first two waits are the backoff's; the third is the ceiling holding the third attempt
+    // back until the first slot, taken 300ms ago, ages out.
+    expect(clock.waits).toEqual([100, 200, MINUTE_MS - 300]);
+    expect(events.map((event) => event.cause)).toEqual(['ceiling_reached']);
+  });
+
+  it('refuses, rather than delays, a deferrable request at the ceiling', async () => {
+    const h = paced(() => jsonResponse([]), { ...TEST_PACING, maxRequestsPerWindow: 2 });
+
+    await h.client.essential.getJson(ME_PATH);
+    await h.client.essential.getJson(ME_PATH);
+    const error: unknown = await h.client.getJson(ASSIGNED_PATH).catch((e: unknown) => e);
+
+    // Reconciliation runs on a fifteen-minute cadence of its own: holding the process for a
+    // minute to make a request whose next chance is a quarter of an hour away buys nothing
+    // and blocks the cycle that is racing.
+    expect(error).toBeInstanceOf(StrakerBudgetSuspendedError);
+    expect(error).toMatchObject({ reason: 'ceiling_reached' });
+    expect(h.clock.waits).toEqual([]);
+  });
+
+  it('keeps deferrable work running while the budget is merely unknown', async () => {
+    const h = paced(() => jsonResponse([]));
+
+    // The contract's answer for a portal that stopped reporting is "fall back to the hard
+    // ceiling and warn" — not "assume the worst and shed reconciliation for ever". Unknown
+    // governs by the ceiling; it is not evidence of being below 120.
+    await expect(h.client.getJson(ASSIGNED_PATH)).resolves.toEqual([]);
+  });
+
+  it('defaults the ceiling to the allowance minus the floor SC-003 forbids crossing', () => {
+    // 300 measured, minus the 60 the remainder must never fall below, leaves 240. That
+    // arithmetic is the whole reason a blind client still satisfies both halves of SC-003.
+    expect(DEFAULT_PACING_POLICY).toEqual({
+      maxRequestsPerWindow: 240,
+      windowMs: MINUTE_MS,
+      suspendDeferrableBelow: 120,
+      pauseReadingBelow: 60,
+    });
+  });
+});
+
+describe('createHttpClient — a 429 is the portal saying the ceiling was wrong', () => {
+  it('parks reading for a window after a 429 that carries no budget headers', async () => {
+    const h = paced(() => jsonResponse({ detail: 'too many requests' }, { status: 429 }), {
+      ...TEST_PACING,
+      maxRequestsPerWindow: 100,
+    });
+
+    await h.client.getJsonWithBackoff(OFFERS_PATH).catch(() => undefined);
+    await h.client.getJsonWithBackoff(OFFERS_PATH).catch(() => undefined);
+
+    // Without this, a 429 carrying no headers leaves the budget "unknown" and the client
+    // reads on at the ceiling — arguing with a portal that has just said no.
+    expect(h.clock.waits).toEqual([MINUTE_MS]);
+  });
+
+  it('suspends deferrable work while parked', async () => {
+    const h = paced(() => jsonResponse({ detail: 'too many requests' }, { status: 429 }), {
+      ...TEST_PACING,
+      maxRequestsPerWindow: 100,
+    });
+
+    await h.client.getJsonWithBackoff(OFFERS_PATH).catch(() => undefined);
+
+    await expect(h.client.getJson(ASSIGNED_PATH)).rejects.toBeInstanceOf(
+      StrakerBudgetSuspendedError,
+    );
+  });
+});
+
+describe('createHttpClient — the essential door, so shedding load cannot lock the bot out', () => {
+  it('re-opens a session while deferrable work is suspended', async () => {
+    const h = paced(() => budgetReply(70));
+
+    await h.client.getJsonWithBackoff(OFFERS_PATH);
+
+    // `/auth/me` comes through the plain GET door, which is deferrable by default — and a
+    // bot that cannot sign in can neither read nor claim, which is precisely what FR-019
+    // says must continue. The essential door is how a caller says so.
+    await expect(h.client.essential.getJson(ME_PATH)).resolves.toEqual([]);
+    await expect(h.client.essential.postJson('/api/vendor/auth/login', {})).resolves.toEqual([]);
+  });
+
+  it('is still counted by the hard ceiling — essential is not exempt from the account', async () => {
+    const h = paced(() => jsonResponse([]), { ...TEST_PACING, maxRequestsPerWindow: 1 });
+
+    await h.client.essential.getJson(ME_PATH);
+    await h.client.essential.getJson(ME_PATH);
+
+    expect(h.clock.waits).toEqual([MINUTE_MS]);
+  });
+
+  it('is one attempt, like the plain door it re-labels', async () => {
+    const h = paced(() => jsonResponse({}, { status: 500 }));
+
+    await expect(h.client.essential.getJson(ME_PATH)).rejects.toBeInstanceOf(StrakerHttpError);
+
+    expect(h.fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createHttpClient — a pacing policy that would misbehave is refused at construction', () => {
+  const build = (pacing: Partial<PacingPolicy>): (() => unknown) => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse([]));
+    return () => createHttpClient({ baseUrl: 'https://portal.test', fetchImpl, pacing });
+  };
+
+  it('refuses a ceiling of zero, which would stop every request for ever', () => {
+    expect(build({ maxRequestsPerWindow: 0 })).toThrow(/maxRequestsPerWindow/);
+  });
+
+  it('refuses a window of zero, in which no request can ever age out', () => {
+    expect(build({ windowMs: 0 })).toThrow(/windowMs/);
+  });
+
+  it('refuses steps in the wrong order, where the pause would fire before the suspension', () => {
+    // Inverted, the graduated response stops being graduated: reading would pause while
+    // deferrable work carried on, which is the opposite of what FR-019 asks for.
+    expect(build({ suspendDeferrableBelow: 60, pauseReadingBelow: 120 })).toThrow(
+      /pauseReadingBelow/,
+    );
+  });
+
+  it('refuses a negative threshold, which no remainder can ever fall below', () => {
+    expect(build({ pauseReadingBelow: -1 })).toThrow(/pauseReadingBelow/);
+  });
+});
+
+describe('createHttpClient — the pacing sink cannot break the request it reports on', () => {
+  it('keeps a good read alive when the pacing sink throws', async () => {
+    const clock = fakeClock();
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(() => Promise.resolve(budgetReply(59)));
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      pacing: TEST_PACING,
+      now: clock.now,
+      sleep: clock.sleep,
+      onPacing: () => {
+        throw new Error('log transport is down');
+      },
+    });
+
+    await client.essential.getJson(ME_PATH);
+
+    // Same rule as the budget warning: an observability hook rides the success path and
+    // must never be able to turn a good read into a failed one.
+    await expect(client.getJsonWithBackoff(OFFERS_PATH)).resolves.toEqual([]);
+    expect(clock.waits).toEqual([50_000]);
+  });
+});
+
+/**
+ * SC-003 / V15 end to end: a simulated portal keeping the budget recon measured — 300 a
+ * minute, resetting on the minute — read as hard as the client will allow for several
+ * simulated minutes.
+ */
+function simulatedPortal(
+  clock: FakeClock,
+  allowance: number,
+): { impl: typeof fetch; perMinute: Map<number, number> } {
+  const perMinute = new Map<number, number>();
+  let windowStartSec = Math.floor(clock.now() / MINUTE_MS) * 60;
+  let used = 0;
+  return {
+    perMinute,
+    impl: () => {
+      const minuteSec = Math.floor(clock.now() / MINUTE_MS) * 60;
+      if (minuteSec !== windowStartSec) {
+        windowStartSec = minuteSec;
+        used = 0;
+      }
+      used += 1;
+      perMinute.set(minuteSec, (perMinute.get(minuteSec) ?? 0) + 1);
+      const remaining = allowance - used;
+      if (remaining < 0) {
+        return Promise.resolve(jsonResponse({ detail: 'rate limited' }, { status: 429 }));
+      }
+      return Promise.resolve(budgetReply(remaining, windowStartSec + 60));
+    },
+  };
+}
+
+async function sustainedRead(
+  maxRequestsPerWindow: number,
+  reads: number,
+): Promise<{ remainders: number[]; perMinute: Map<number, number> }> {
+  const clock = fakeClock();
+  const portal = simulatedPortal(clock, 300);
+  const client = createHttpClient({
+    baseUrl: 'https://portal.test',
+    fetchImpl: portal.impl,
+    pacing: { maxRequestsPerWindow },
+    now: clock.now,
+    sleep: clock.sleep,
+  });
+
+  const remainders: number[] = [];
+  for (let i = 0; i < reads; i += 1) {
+    await client.getJsonWithBackoff(OFFERS_PATH).catch(() => undefined);
+    const seen = client.lastRateLimit();
+    if (seen !== null) remainders.push(seen.remaining);
+  }
+  return { remainders, perMinute: portal.perMinute };
+}
+
+describe('createHttpClient — SC-003 over a sustained run (V15)', () => {
+  it('never exceeds 300 in a minute and never drives the remainder below 60', async () => {
+    const { remainders, perMinute } = await sustainedRead(
+      DEFAULT_PACING_POLICY.maxRequestsPerWindow,
+      1_000,
+    );
+
+    expect(Math.max(...perMinute.values())).toBeLessThanOrEqual(300);
+    expect(Math.min(...remainders)).toBeGreaterThanOrEqual(60);
+  });
+
+  it('shows why the ceiling is 240: the pause alone cannot keep the remainder above 60', async () => {
+    const { remainders } = await sustainedRead(300, 1_000);
+
+    // The remainder is learnt only from a reply, so a client ceilinged at the full
+    // allowance discovers it is at 59 by having already spent it. The pause is a floor the
+    // client stops AT, never one it cannot cross — only a ceiling set below the allowance
+    // makes SC-003's second half structurally true. This test exists so that raising the
+    // default back to 300 fails here rather than in production.
+    expect(Math.min(...remainders)).toBeLessThan(60);
   });
 });

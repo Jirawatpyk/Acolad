@@ -3,7 +3,7 @@
  * vendor the session belongs to, nothing else.
  */
 
-import type { StrakerHttpClient } from './httpClient.js';
+import type { EssentialDoor } from './httpClient.js';
 
 export interface StrakerCredentials {
   readonly loginId: string;
@@ -22,7 +22,13 @@ export interface StrakerSession {
  * and a stale id would silently poll somebody else's offer list.
  */
 export async function openSession(
-  client: StrakerHttpClient,
+  // Narrowed to the **essential** door, the same way `ClaimDoor` narrows the claim path —
+  // and here the narrowing carries a behaviour, not only a guarantee. Pacing classifies a
+  // request by the door it came through, and `/auth/me` used to arrive on the deferrable
+  // one: a session that expired exactly when the request allowance ran low could then not
+  // be renewed, leaving the bot blind for up to a window for want of one request. Sign-in
+  // is what every other request depends on, so it belongs beside the claim.
+  client: EssentialDoor,
   credentials: StrakerCredentials,
 ): Promise<StrakerSession> {
   const body: Record<string, string> = {

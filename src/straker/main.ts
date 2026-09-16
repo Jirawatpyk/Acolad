@@ -282,6 +282,24 @@ export function createStrakerPortal(
     // happened once in this feature with the retrying read door; the wiring is asserted in
     // `tests/integration/straker/botWiring.test.ts` so it cannot happen a third time.
     timeoutMs: REQUEST_TIMEOUT_MS,
+    // FR-019 / SC-003. Opt-in, exactly as the deadline and the retry door are, and for the
+    // same reason: the live capture probe builds its client with `{ baseUrl }` alone and
+    // must keep behaving as it does. Which makes this line the whole of the bot's pacing —
+    // and `botWiring.test.ts` asserts it, because the two capabilities before this one were
+    // each built, tested and left with no caller.
+    //
+    // `{}` takes every default: a hard ceiling of 240/minute (the measured 300 allowance
+    // minus SC-003's 60 floor, so a client that cannot read the budget headers at all still
+    // satisfies both halves of SC-003), deferrable work shed below 120 remaining, reading
+    // paused below 60.
+    pacing: {},
+    onPacing: (event) =>
+      report(() =>
+        logger.warn(
+          { module: 'httpClient', action: event.kind, outcome: event.cause, ...event },
+          event.detail,
+        ),
+      ),
     // Both hooks come from `notifier.ts` (T055), which throttles them before they reach the
     // queue. They have to be throttled somewhere: neither carries an offer identity, so
     // FR-019a's "once per identity per outcome" has nothing to key on, and at a ten-second
@@ -312,7 +330,7 @@ export function createStrakerPortal(
   return {
     client,
     signIn: () =>
-      openSession(client, {
+      openSession(client.essential, {
         loginId: cfg.loginId,
         password: cfg.password,
         ...(cfg.totpCode === undefined ? {} : { totpCode: cfg.totpCode }),

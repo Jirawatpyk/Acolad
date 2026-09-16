@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Logger } from '../../../src/monitoring/logger.js';
-import { StrakerHttpError } from '../../../src/straker/httpClient.js';
+import { StrakerBudgetSuspendedError, StrakerHttpError } from '../../../src/straker/httpClient.js';
 import { StrakerLedger } from '../../../src/straker/ledger.js';
 import { StrakerOutbox } from '../../../src/straker/outbox.js';
 import {
@@ -170,9 +170,12 @@ function fixture(opts: FixtureOptions = {}): Fixture {
   const reconciler = createStrakerReconciler({
     portal: {
       signIn: async () => {
+        // Counted before the refusal, not after: what these tests measure is how many times
+        // the bot POSTed the credentials, and a rejected attempt is still an attempt at a
+        // portal that may be counting them towards a lockout.
+        signIns += 1;
         const failure = opts.signInFails?.();
         if (failure !== null && failure !== undefined) throw failure;
-        signIns += 1;
         return { vendorId: 'vendor-1' };
       },
       listAssignedWork: async (vendorId: string) => {
@@ -1050,5 +1053,109 @@ describe('reading the portal assigned-work list (contract 5)', () => {
     const work = await readAssignedWork(c, 'v1');
 
     expect(work[0]?.deadlineMs).toBeNull();
+  });
+});
+
+describe('a pass shed to protect the request budget is not a failure (FR-019 vs FR-016c)', () => {
+  /**
+   * Reconciliation reads through the **deferrable** door on purpose — it is the one read
+   * this bot can afford to skip, and FR-019 sheds it below 120 remaining. But being shed
+   * and failing are different events with opposite responses: one is the bot obeying a rule
+   * correctly, the other is work going unrecorded.
+   *
+   * Counted together, three shed passes — forty-five minutes of a busy portal — raise
+   * FR-016c's "reconciliation has failed three times running" against a portal that is
+   * perfectly healthy. That alert is the one an operator is meant to act on, and a version
+   * of it that cries wolf during normal budget pressure is worse than none.
+   */
+  /** Local copy: the one above is scoped to another describe. `from` lets a second run
+   *  continue the clock rather than restart it. */
+  async function runPasses(f: Fixture, n: number, from = 0): Promise<ReconcileOutcome[]> {
+    const out: ReconcileOutcome[] = [];
+    for (let i = 0; i < n; i += 1) {
+      f.setNow(NOW_MS + (from + i) * RECONCILE_INTERVAL_MS);
+      out.push(await f.reconciler.runIfDue());
+    }
+    return out;
+  }
+
+  it('does not count a budget shed toward the three-strike alert', async () => {
+    const f = fixture({
+      readFails: () =>
+        new StrakerBudgetSuspendedError(
+          '/api/vendors/v/assigned-jobs',
+          'budget_low',
+          5,
+          'deferrable work is suspended below 120 remaining',
+        ),
+    });
+
+    const results = await runPasses(f, RECONCILE_FAILURE_ALERT_THRESHOLD + 1);
+
+    expect(f.queued.filter((q) => q.payload['condition'] === 'reconcile_failing')).toEqual([]);
+    expect(results[results.length - 1]).toMatchObject({ consecutiveFailures: 0 });
+  });
+
+  it('still counts a genuine failure that follows a shed, rather than losing the streak', async () => {
+    // The shed must be invisible to the counter, not a reset of it: a portal that is both
+    // busy and broken should still reach the alert.
+    let shed = true;
+    const f = fixture({
+      readFails: () =>
+        shed
+          ? new StrakerBudgetSuspendedError(
+              '/api/vendors/v/assigned-jobs',
+              'budget_low',
+              5,
+              'suspended',
+            )
+          : new Error('portal down'),
+    });
+
+    await runPasses(f, 1);
+    shed = false;
+    await runPasses(f, RECONCILE_FAILURE_ALERT_THRESHOLD, 1);
+
+    expect(f.queued.filter((q) => q.payload['condition'] === 'reconcile_failing')).toHaveLength(1);
+  });
+});
+
+describe('a rejected sign-in is not retried as though the session had expired', () => {
+  /**
+   * The expiry retry exists because this pass runs only every fifteen minutes, so losing one
+   * to an ordinary expiry costs a whole window. But the guard wrapped **both** calls — the
+   * sign-in and the read — and a 401 from the login POST itself is indistinguishable from a
+   * 401 on the read. So a wrong password was posted, read as "the session expired", and
+   * posted again immediately.
+   *
+   * That matters more here than it looks. RP-1 records that this account's password was
+   * shared over chat and is to be treated as compromised, and the portal's lockout policy is
+   * unknown — contract §4a exists precisely because a bot that argues with a refusal is how
+   * an account earns a permanent block rather than recovers from one. Doubling the failed
+   * logins is the wrong direction to be wrong in.
+   */
+  it('attempts the login once when the credentials themselves are refused', async () => {
+    const f = fixture({ signInFails: () => new StrakerHttpError(401, '/auth/login', 'bad creds') });
+
+    f.setNow(NOW_MS);
+    await f.reconciler.runIfDue();
+
+    expect(f.signIns()).toBe(1);
+  });
+
+  it('still retries once when the session expires on the read, which is what the retry is for', async () => {
+    let first = true;
+    const f = fixture({
+      readFails: () => {
+        if (!first) return null;
+        first = false;
+        return new StrakerHttpError(401, '/assigned-jobs', 'expired');
+      },
+    });
+
+    f.setNow(NOW_MS);
+    await f.reconciler.runIfDue();
+
+    expect(f.signIns()).toBe(2);
   });
 });

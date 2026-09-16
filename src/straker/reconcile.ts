@@ -71,7 +71,7 @@
  */
 
 import { formatLanguageDirection } from './eligibility.js';
-import { isSessionExpired, type StrakerHttpClient } from './httpClient.js';
+import { isBudgetSuspended, isSessionExpired, type StrakerHttpClient } from './httpClient.js';
 import type { HoldResult, StrakerLedger } from './ledger.js';
 import type { Logger } from '../monitoring/logger.js';
 import { STRAKER_DEADLINE_ZONE, type DeadlineZone } from './offerParse.js';
@@ -418,6 +418,19 @@ export type ReconcileOutcome =
       readonly consecutiveFailures: number;
       /** Whether this pass crossed the threshold and queued an alert (FR-016c). */
       readonly alerted: boolean;
+    }
+  /**
+   * The pass was due and the transport held it back to protect the request budget
+   * (FR-019). Its own variant rather than a flag on the failure above, because the two
+   * call for opposite responses: this one means the bot obeyed a rule, and the streak that
+   * feeds FR-016c's alert is deliberately left untouched by it.
+   */
+  | {
+      readonly ran: true;
+      readonly ok: false;
+      readonly shed: true;
+      readonly recovered: readonly string[];
+      readonly consecutiveFailures: number;
     };
 
 export interface StrakerReconciler {
@@ -559,10 +572,23 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    * has already said no is how a suspension becomes a sign-in storm (contract 4a).
    */
   async function read(): Promise<readonly AssignedWork[]> {
+    // The sign-in is OUTSIDE the guard on purpose. It used to be inside it, and a 401 from
+    // the login POST itself is indistinguishable from a 401 on the read — so a refused
+    // password was posted, read as "the session expired", and posted again immediately.
+    //
+    // RP-1 records that this account's password was shared over chat and is to be treated
+    // as compromised, and the portal's lockout policy is unknown. Doubling the failed
+    // logins is the wrong direction to be wrong in, and it is the same mistake contract §4a
+    // forbids on the claim path: a bot that argues with a refusal is how an account earns a
+    // permanent block rather than recovers from one.
+    session ??= await deps.portal.signIn();
+    const vendorId = session.vendorId;
     try {
-      session ??= await deps.portal.signIn();
-      return await deps.portal.listAssignedWork(session.vendorId);
+      return await deps.portal.listAssignedWork(vendorId);
     } catch (err) {
+      // Only the READ's 401 means the session expired, and only that is worth one retry:
+      // the next pass is fifteen minutes away, so losing one to an ordinary expiry costs a
+      // whole window. `isSessionExpired` is narrow (401 only) — a 403 is a barred account.
       if (!isSessionExpired(err)) throw err;
       session = null;
       session = await deps.portal.signIn();
@@ -688,6 +714,23 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
     recovered: readonly string[],
     atMs: number,
   ): ReconcileOutcome {
+    // Being **shed** is not failing. This read goes through the deferrable door on purpose
+    // — it is the one read the bot can afford to skip — and FR-019 suspends it below 120
+    // remaining. Counting that toward FR-016c would raise "reconciliation has failed three
+    // times running" after forty-five minutes of a *busy* portal, which is the bot obeying
+    // a rule correctly. The alert an operator is meant to act on must not cry wolf during
+    // normal budget pressure.
+    //
+    // The streak is left untouched rather than reset, so a portal that is both busy and
+    // broken still reaches the alert on its genuine failures.
+    if (isBudgetSuspended(err)) {
+      deps.logger.info(
+        { module: 'reconcile', action: 'pass', outcome: 'shed', stage, consecutiveFailures },
+        'reconciliation skipped this pass to protect the request budget (FR-019) — not a failure, and the next pass is due as usual',
+      );
+      return { ran: true, ok: false, shed: true, consecutiveFailures, recovered, alerted: false };
+    }
+
     consecutiveFailures += 1;
     streakStartedAtMs ??= atMs;
     const detail = message(err);

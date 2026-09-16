@@ -1,10 +1,13 @@
 /**
  * Straker transport, deliberately confined to ONE file (brief DC-4, FR-030): the cookie
  * jar, the browser-shaped headers, the rate-limit headers, the JSON plumbing, the
- * per-attempt deadline of Constitution VI and the retry-with-backoff of FR-019b all live
- * here, so a future portal in the same family can copy this file and change the base URL.
- * Nothing that issues or paces a request may live outside it — a separate rate-limiter or
- * retry module would be the first thing to break that rule.
+ * per-attempt deadline of Constitution VI, the retry-with-backoff of FR-019b and the
+ * graduated budget response of FR-019 all live here, so a future portal in the same family
+ * can copy this file and change the base URL. Nothing that issues or paces a request may
+ * live outside it — a separate rate-limiter or retry module would be the first thing to
+ * break that rule. The XTM bot's `src/runtime/rateLimiter.ts` is the same problem solved
+ * for a different portal (a per-hour cap, consulted by its caller); it is read for its
+ * shape and deliberately not imported.
  *
  * Node's global fetch has no cookie jar, and the Straker session is an HttpOnly cookie
  * (recon note §2), so the jar below is not optional.
@@ -25,6 +28,28 @@
  * The default is therefore today's behaviour: a client built without a retry policy, and
  * every call that is not `getJsonWithBackoff`, behaves byte-for-byte as it did before this
  * was added — which is what keeps the running capture probe untouched.
+ *
+ * ## Which door a request comes through is now also its priority (FR-019, T056c)
+ *
+ * FR-019 sheds "deferrable work" below 120 remaining, and nothing in the transport could
+ * tell a deferrable request from a racing one. Rather than a `deferrable: true` flag a
+ * caller has to remember — the same defect as a capability nobody calls — the three doors
+ * that already exist carry the classification, and the DEFAULT is the restrained one:
+ *
+ * | Door | Class | Below 120 | Below 60 | At the hard ceiling |
+ * |---|---|---|---|---|
+ * | `getJson` | `deferrable` | refused | refused | refused |
+ * | `getJsonWithBackoff` | `read` | continues | paused until reset | delayed |
+ * | `postJson`, `essential.*` | `essential` | continues | continues | delayed |
+ *
+ * So reconciliation — which already comes through `getJson` — is shed with no call-site
+ * change at all, and there is nothing for a caller to omit. What a caller *can* do is claim
+ * an exemption through {@link StrakerPacedHttpClient.essential}, and forgetting that makes a
+ * request more restrained rather than less: the omission surfaces as a loud, named
+ * {@link StrakerBudgetSuspendedError}, never as silent unrestrained polling.
+ *
+ * The corollary is worth stating: adding a *racing* read through `getJson` would now put the
+ * hot path in the deferrable class. The hot path's door is `getJsonWithBackoff`.
  */
 
 /**
@@ -86,6 +111,46 @@ export class StrakerTimeoutError extends Error {
   }
 }
 
+/** Why a deferrable request was not sent at all. */
+export type BudgetSuspensionReason =
+  /** The portal's reported remainder is below the step, or it just answered 429. */
+  | 'budget_low'
+  /** Our own hard per-minute ceiling is full — the restraint that holds with no headers. */
+  | 'ceiling_reached';
+
+/**
+ * Thrown instead of sending a **deferrable** request while the budget is being protected
+ * (FR-019). Its own type, and deliberately not a {@link StrakerHttpError}: nothing reached
+ * the portal, so reading this as a portal refusal would blame a portal that is fine — and
+ * reconciliation's "three consecutive failures" (FR-016c) would eventually alert about it.
+ *
+ * A caller that schedules its own retry — reconciliation is the one that does — should
+ * treat this as **skipped, not failed**: {@link isBudgetSuspended} is the test for it, and
+ * the next scheduled pass is the answer, because the budget window is a minute and will
+ * have turned over long before then.
+ */
+export class StrakerBudgetSuspendedError extends Error {
+  constructor(
+    readonly path: string,
+    readonly reason: BudgetSuspensionReason,
+    /** What the portal last reported, or `null` when there is no usable reading. */
+    readonly remaining: number | null,
+    detail: string,
+  ) {
+    super(`Straker ${path} was not sent — ${detail}`);
+    this.name = 'StrakerBudgetSuspendedError';
+  }
+}
+
+/**
+ * "The transport held this back to protect the budget", asked at the edge in our own
+ * vocabulary (DC-1) rather than by `instanceof` at a call site — the same shape as
+ * {@link isSessionExpired}, and for the same reason.
+ */
+export function isBudgetSuspended(error: unknown): boolean {
+  return error instanceof StrakerBudgetSuspendedError;
+}
+
 /** What the transport asks an operator to look at. Today it raises exactly one kind. */
 export interface StrakerTransportAlert {
   readonly kind: 'read_retries_exhausted';
@@ -131,11 +196,102 @@ export const DEFAULT_READ_RETRY_POLICY: RetryPolicy = {
   maxDelayMs: 4_000,
 };
 
+/**
+ * The graduated budget response of FR-019, as four numbers.
+ *
+ * Two of them are steps read off what the portal reports; the third is the restraint that
+ * holds when it reports nothing believable, and the fourth is the span that ceiling is
+ * quoted over.
+ */
+export interface PacingPolicy {
+  /**
+   * The hard ceiling: how many requests may be issued inside one window, whatever the
+   * headers say or fail to say.
+   */
+  readonly maxRequestsPerWindow: number;
+  /** The span the ceiling is counted over. A minute — the unit the portal quotes. */
+  readonly windowMs: number;
+  /** Below this reported remainder, deferrable work stops (FR-019). */
+  readonly suspendDeferrableBelow: number;
+  /** Below this reported remainder, reading pauses until the budget resets (FR-019). */
+  readonly pauseReadingBelow: number;
+}
+
+/**
+ * **240, and the arithmetic matters.** SC-003 asks for two things at once: never more than
+ * 300 requests in a minute, and never a reported remainder below 60. The portal's measured
+ * allowance is 300 (recon, confirmed by the probe), so a client that issues at most
+ * `300 − 60` in a minute satisfies *both* halves **without reading a single header** —
+ * which is the case the ceiling exists for.
+ *
+ * The steps cannot do that on their own, and it is worth being exact about why: a remainder
+ * is learnt only from a reply, so a client ceilinged at the full 300 discovers it is at 59
+ * by having already spent it. The pause is a floor the client stops **at**, not one it
+ * cannot cross; only a ceiling below the allowance makes the second half structurally true.
+ * `tests/unit/straker/httpClient.test.ts` pins both directions of that.
+ *
+ * At the bot's ten-second rhythm — a handful of requests a minute — this ceiling never
+ * fires. It is an emergency brake, and a brake that engages in normal driving is set wrong.
+ *
+ * **What it cannot promise**: the count is of requests *this client* issued. The capture
+ * probe polls the same account on the same allowance, so our count is a lower bound on what
+ * the account is spending. The reported remainder is the only figure that sees everything,
+ * which is why the steps exist alongside the ceiling rather than instead of it.
+ */
+export const DEFAULT_PACING_POLICY: PacingPolicy = {
+  maxRequestsPerWindow: 240,
+  windowMs: 60_000,
+  suspendDeferrableBelow: 120,
+  pauseReadingBelow: 60,
+};
+
+/**
+ * What a request is *for*, which decides how much restraint it is owed. Not a parameter a
+ * caller passes — it is the door they came through (see the table in the module docstring),
+ * so there is nothing to forget and no flag to get wrong.
+ */
+export type RequestClass =
+  /** Reconciliation, enrichment: valuable, and has its own next chance. Shed first. */
+  | 'deferrable'
+  /** The offer-list read. The race path — shed only when the budget is nearly gone. */
+  | 'read'
+  /** The claim, and signing in so a claim is possible at all. Never shed. */
+  | 'essential';
+
+/** Something the pacer did to a request. Reported so a slow cycle is explainable. */
+export interface StrakerPacingEvent {
+  readonly kind: 'deferrable_suspended' | 'request_delayed';
+  readonly cause: BudgetSuspensionReason;
+  readonly path: string;
+  /** How long the request was held. Zero for a suspension — it was not held, it was dropped. */
+  readonly waitedMs: number;
+  readonly remaining: number | null;
+  /** Plain-language "what happened and why", ready to be logged as-is. */
+  readonly detail: string;
+}
+
 export interface HttpClientOptions {
   readonly baseUrl: string;
   readonly fetchImpl?: typeof fetch;
   /** Overrides for the READ backoff (FR-019b). Absent fields keep the defaults above. */
   readonly retry?: Partial<RetryPolicy>;
+  /**
+   * The graduated budget response (FR-019, SC-003). Absent fields keep
+   * {@link DEFAULT_PACING_POLICY}; **an absent object means no pacing at all**.
+   *
+   * **Opt-in, and unset by default on purpose** — the same precedent as `timeoutMs` and the
+   * retry policy, for the same reason. The capture probe builds its client with
+   * `{ baseUrl }` alone while it collects the SC-000 evidence; with this field absent the
+   * pacer is inert, never reads the clock, keeps no window and holds nothing back, so the
+   * probe's behaviour is byte-for-byte what it was. The bot must pass it — and a bot that
+   * does not has no ceiling at all, which is the state this option exists to end.
+   */
+  readonly pacing?: Partial<PacingPolicy>;
+  /**
+   * The clock the pacer reads, injectable for the same reason as `sleep`: a test that waits
+   * out a real minute is a test nobody runs. Real callers omit it.
+   */
+  readonly now?: () => number;
   /**
    * Deadline for a single attempt, in milliseconds (Constitution VI). Applied at the one
    * seam every request passes through, so reads, retried reads, sign-in and claims are all
@@ -171,6 +327,19 @@ export interface HttpClientOptions {
    * event. Two hooks because they are two conditions, not one with two severities.
    */
   readonly onWarning?: (warning: StrakerTransportWarning) => void;
+  /**
+   * Raised when the pacer holds a request back or drops a deferrable one (FR-019).
+   *
+   * A third hook rather than a third `kind` on {@link StrakerTransportWarning}, for a
+   * structural reason: `notifier.ts` keeps a totality map over that union so a new kind
+   * fails the typecheck rather than arriving under the wrong condition name. Pacing is a
+   * *normal* operating action — the bot is working exactly as asked — so it does not belong
+   * in a union whose every member is a card posted to the operations channel.
+   *
+   * Unwired it is silent, and a sixty-second pause nobody can see is indistinguishable from
+   * a hung bot: the composition root should log it, the way it already logs `onWarning`.
+   */
+  readonly onPacing?: (event: StrakerPacingEvent) => void;
 }
 
 /** Server-reported request budget; recon measured limit=300 per minute. */
@@ -218,7 +387,12 @@ export interface StrakerTransportWarning {
 }
 
 export interface StrakerHttpClient {
-  /** One attempt. No retry — this is the door the reconciliation read comes through. */
+  /**
+   * One attempt. No retry — this is the door the reconciliation read comes through, and
+   * therefore the **deferrable** door: below 120 remaining it is refused rather than sent
+   * (FR-019). A request that must survive a low budget — signing in, above all — belongs on
+   * {@link StrakerPacedHttpClient.essential} instead.
+   */
   getJson<T>(path: string): Promise<T>;
   /**
    * The offer-list read, and only it (FR-019b): retried with exponential backoff plus
@@ -239,6 +413,32 @@ export interface StrakerHttpClient {
   lastRateLimit(): RateLimitSnapshot | null;
 }
 
+/** The plain doors again, re-labelled: exempt from the graduated steps, never from the ceiling. */
+export type EssentialDoor = Pick<StrakerHttpClient, 'getJson' | 'postJson'>;
+
+/**
+ * What {@link createHttpClient} actually returns: the client above, plus the one exemption
+ * the default-deferrable rule needs.
+ *
+ * A wider return type rather than a wider {@link StrakerHttpClient}, deliberately. Adding a
+ * member to the interface would break every hand-built double typed as it — and, worse, it
+ * would let a caller who wants the exemption get it by *changing a type annotation*, which
+ * is not a decision anyone reviews. This way the exemption is reachable only from the real
+ * transport, by naming it.
+ */
+export interface StrakerPacedHttpClient extends StrakerHttpClient {
+  /**
+   * For requests without which reading and claiming cannot happen — signing in, and reading
+   * back the vendor identity. FR-019 keeps reading and claiming alive below 120; a bot whose
+   * session lapsed at 119 remaining and could not re-open it would be doing neither.
+   *
+   * Narrow on purpose. This is not "the door for anything urgent": everything here is exempt
+   * from the steps that protect the budget, so a request routed through it that could have
+   * waited is load the portal is asked to carry at its worst moment.
+   */
+  readonly essential: EssentialDoor;
+}
+
 /**
  * The outcome of one attempt. A result rather than an exception so the retry loop can tell
  * a transient failure from a permanent one *without* having to inspect, wrap or re-tag the
@@ -249,16 +449,38 @@ type AttemptResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: unknown; readonly retryable: boolean };
 
-export function createHttpClient(options: HttpClientOptions): StrakerHttpClient {
+export function createHttpClient(options: HttpClientOptions): StrakerPacedHttpClient {
   const doFetch = options.fetchImpl ?? fetch;
   const retryPolicy = resolveRetryPolicy(options.retry);
   const timeoutMs = resolveTimeout(options.timeoutMs);
+  const pacingPolicy = resolvePacing(options.pacing);
   const sleep = options.sleep ?? defaultSleep;
   const random = options.random ?? Math.random;
+  const now = options.now ?? Date.now;
   const jar = new Map<string, string>();
   let budget: RateLimitBudget = { known: false, reason: 'no_reply_yet' };
+  /** When each request went out, inside the current window. The hard ceiling's whole state. */
+  const issuedAtMs: number[] = [];
+  /** Set by a 429: the portal's own word that the ceiling was wrong. Null when not parked. */
+  let parkedUntilMs: number | null = null;
 
-  async function attempt<T>(path: string, init: RequestInit): Promise<AttemptResult<T>> {
+  async function attempt<T>(
+    path: string,
+    init: RequestInit,
+    cls: RequestClass,
+  ): Promise<AttemptResult<T>> {
+    // Per ATTEMPT, not per call: a retried read is three requests on the portal's counter,
+    // and a pacer attached one level up would see one. Throws for a suspended deferrable
+    // request — nothing was sent, so it is not an attempt that failed.
+    //
+    // **The guard is load-bearing, not a micro-optimisation.** Written as a bare
+    // `await pace(...)`, an inert pacer still inserts a microtask before every request, and
+    // that reordered enough of the bot's interleaving to fail two of `failureModes.test.ts`'s
+    // ordering assertions. "Unchanged" has to include *when* the request is issued relative
+    // to everything else the process is doing, not only what goes on the wire — so with no
+    // policy configured there is no await here at all.
+    if (pacingPolicy !== undefined) await pace(path, cls);
+
     const headers = new Headers(init.headers);
     // The API refuses a request with no Origin ("403 Invalid or missing Origin", seen on
     // the first live probe run). A browser sets these two automatically, which is why the
@@ -276,9 +498,9 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
 
     let response: Response;
     try {
-      // The single chokepoint through which every Straker request passes — which is also
-      // where the per-minute pacing of FR-019/T065 will attach when Phase 6 arrives. Pace
-      // on `budget`, the narrowed union: `lastRateLimit()` flattens every unknown to the
+      // The single chokepoint through which every Straker request passes, which is why the
+      // deadline and the pacing both attach here. The pacer reads `budget`, the narrowed
+      // union, and never `lastRateLimit()`: that projection flattens every unknown to the
       // same `null`, which cannot tell "the portal stopped reporting" from "no limit".
       response = await doFetch(`${options.baseUrl}${path}`, {
         ...init,
@@ -295,6 +517,9 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
     updateBudget(path, response);
 
     if (!response.ok) {
+      // After `updateBudget`, so a 429 that DID carry headers parks until the reset it named
+      // rather than for a blind window.
+      if (response.status === 429) noteBudgetRefusal();
       const error = new StrakerHttpError(response.status, path, await bodyExcerpt(response));
       return { ok: false, error, retryable: isIndeterminateStatus(response.status) };
     }
@@ -313,8 +538,8 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
   }
 
   /** One attempt, failure surfaced unchanged. The behaviour that predates FR-019b. */
-  async function send<T>(path: string, init: RequestInit): Promise<T> {
-    const result = await attempt<T>(path, init);
+  async function send<T>(path: string, init: RequestInit, cls: RequestClass): Promise<T> {
+    const result = await attempt<T>(path, init, cls);
     if (result.ok) return result.value;
     throw result.error;
   }
@@ -326,7 +551,7 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
       // accepts no method or body from the caller, so no claim can be issued from inside
       // it. "The claim path must not opt into backoff" is therefore not a rule anyone has
       // to remember — there is nothing here to opt in with.
-      const result = await attempt<T>(path, { method: 'GET' });
+      const result = await attempt<T>(path, { method: 'GET' }, 'read');
       if (result.ok) return result.value;
 
       // A 401 is an expired session for the caller to re-open, a 403 means the portal
@@ -377,6 +602,146 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
     });
   }
 
+  /**
+   * FR-019's graduated response, applied to one request before it is issued.
+   *
+   * The order is the point: the *steps* the portal's own reading asks for come first, then
+   * our ceiling — because a pause for the reset also ages the window, and re-checking the
+   * ceiling afterwards is how the two compose instead of stacking.
+   *
+   * **Provably terminating.** Every branch waits at most once and then proceeds; nothing
+   * loops until a condition clears. It cannot: the remainder only changes when a reply
+   * arrives, so a loop waiting for a better reading would wait for a reply it is itself
+   * preventing. One hold, then go, and the next reply corrects the picture.
+   */
+  async function pace(path: string, cls: RequestClass): Promise<void> {
+    if (pacingPolicy === undefined) return;
+    const policy = pacingPolicy;
+
+    const startedAtMs = now();
+    if (cls === 'deferrable' && budgetIsTight(startedAtMs, policy)) {
+      throw suspend(path, 'budget_low', budgetTightDetail(policy));
+    }
+    if (cls === 'read') {
+      const until = readHoldUntilMs(startedAtMs, policy);
+      if (until > startedAtMs) {
+        await hold(
+          path,
+          'budget_low',
+          until - startedAtMs,
+          (ms) => `reading paused ${ms}ms until the request budget resets (${describeRemaining()})`,
+        );
+      }
+    }
+
+    const atCeilingMs = now();
+    pruneWindow(atCeilingMs, policy);
+    if (issuedAtMs.length >= policy.maxRequestsPerWindow) {
+      if (cls === 'deferrable') throw suspend(path, 'ceiling_reached', ceilingDetail(policy));
+      // The oldest slot is inside the window by construction — `pruneWindow` just dropped
+      // everything that was not — so this wait is positive and no longer than one window.
+      const oldest = issuedAtMs[0] ?? atCeilingMs;
+      await hold(
+        path,
+        'ceiling_reached',
+        oldest + policy.windowMs - atCeilingMs,
+        (ms) => `request delayed ${ms}ms to stay under ${ceilingDetail(policy)}`,
+      );
+    }
+    issuedAtMs.push(now());
+  }
+
+  /** Both reasons a deferrable request is not worth sending right now. */
+  function budgetIsTight(nowMs: number, policy: PacingPolicy): boolean {
+    if (parkedUntilMs !== null && parkedUntilMs > nowMs) return true;
+    return budget.known && budget.snapshot.remaining < policy.suspendDeferrableBelow;
+  }
+
+  /**
+   * When a read may next go out: the later of the reported reset and a 429's park, and
+   * never more than a window away. The clamp is the safety, not the arithmetic — a stamp in
+   * a different unit, or a clock skewed against the portal's, must not become an hour-long
+   * sleep inside the transport, which is indistinguishable from a hung bot.
+   */
+  function readHoldUntilMs(nowMs: number, policy: PacingPolicy): number {
+    const ceiling = nowMs + policy.windowMs;
+    let until = parkedUntilMs !== null && parkedUntilMs > nowMs ? parkedUntilMs : nowMs;
+    if (budget.known && budget.snapshot.remaining < policy.pauseReadingBelow) {
+      until = Math.max(until, budget.snapshot.resetAtEpoch * 1_000);
+    }
+    return Math.min(until, ceiling);
+  }
+
+  /**
+   * A 429 is the portal contradicting our ceiling, and it must land whether or not the reply
+   * carried headers: without this, a 429 with no `x-ratelimit-*` leaves the budget "unknown"
+   * and the client reads straight on, arguing with a portal that has just said no.
+   */
+  function noteBudgetRefusal(): void {
+    if (pacingPolicy === undefined) return;
+    const atMs = now();
+    const reset = budget.known ? budget.snapshot.resetAtEpoch * 1_000 : 0;
+    const window = atMs + pacingPolicy.windowMs;
+    parkedUntilMs = reset > atMs ? Math.min(reset, window) : window;
+  }
+
+  function pruneWindow(nowMs: number, policy: PacingPolicy): void {
+    const cutoff = nowMs - policy.windowMs;
+    while (issuedAtMs.length > 0 && (issuedAtMs[0] ?? 0) <= cutoff) issuedAtMs.shift();
+  }
+
+  async function hold(
+    path: string,
+    cause: BudgetSuspensionReason,
+    waitedMs: number,
+    detail: (ms: number) => string,
+  ): Promise<void> {
+    if (waitedMs <= 0) return;
+    raisePacing({
+      kind: 'request_delayed',
+      cause,
+      path,
+      waitedMs,
+      remaining: budget.known ? budget.snapshot.remaining : null,
+      detail: detail(waitedMs),
+    });
+    await sleep(waitedMs);
+  }
+
+  function suspend(
+    path: string,
+    cause: BudgetSuspensionReason,
+    detail: string,
+  ): StrakerBudgetSuspendedError {
+    const remaining = budget.known ? budget.snapshot.remaining : null;
+    raisePacing({ kind: 'deferrable_suspended', cause, path, waitedMs: 0, remaining, detail });
+    return new StrakerBudgetSuspendedError(path, cause, remaining, detail);
+  }
+
+  function describeRemaining(): string {
+    return budget.known
+      ? `${budget.snapshot.remaining} requests reported left`
+      : 'no usable budget reading';
+  }
+
+  function budgetTightDetail(policy: PacingPolicy): string {
+    return `deferrable work is suspended below ${policy.suspendDeferrableBelow} remaining (${describeRemaining()})`;
+  }
+
+  function ceilingDetail(policy: PacingPolicy): string {
+    return `the hard ceiling of ${policy.maxRequestsPerWindow} requests per ${policy.windowMs / 1_000}s`;
+  }
+
+  function raisePacing(event: StrakerPacingEvent): void {
+    if (options.onPacing === undefined) return;
+    try {
+      options.onPacing(event);
+    } catch {
+      // Same rule as the budget warning: this rides the success path, and a sink that threw
+      // here would turn a request the pacer merely delayed into one that failed.
+    }
+  }
+
   function raiseAlert(alert: StrakerTransportAlert): void {
     if (options.onAlert === undefined) return;
     try {
@@ -398,15 +763,24 @@ export function createHttpClient(options: HttpClientOptions): StrakerHttpClient 
     }
   }
 
+  const getInit: RequestInit = { method: 'GET' };
+  const postInit = (body: unknown): RequestInit => ({
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
   return {
-    getJson: (path) => send(path, { method: 'GET' }),
+    // The class each door carries — see the table in the module docstring. `getJson` is the
+    // deferrable one BY DEFAULT, which is what makes FR-019's "suspend deferrable work"
+    // reachable with no call-site change and nothing for a caller to omit.
+    getJson: (path) => send(path, getInit, 'deferrable'),
     getJsonWithBackoff: (path) => sendWithBackoff(path),
-    postJson: (path, body) =>
-      send(path, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      }),
+    postJson: (path, body) => send(path, postInit(body), 'essential'),
+    essential: {
+      getJson: (path) => send(path, getInit, 'essential'),
+      postJson: (path, body) => send(path, postInit(body), 'essential'),
+    },
     lastRateLimit: () => (budget.known ? budget.snapshot : null),
   };
 }
@@ -483,6 +857,44 @@ function resolveRetryPolicy(overrides: Partial<RetryPolicy> | undefined): RetryP
     );
   }
   if (faults.length > 0) throw new Error(`Straker retry policy invalid — ${faults.join('; ')}`);
+  return policy;
+}
+
+/**
+ * Fail fast on a pacing policy that would misbehave in the dark, like the retry policy above.
+ *
+ * `undefined` in, `undefined` out: an absent policy is not a policy of zeroes, it is no
+ * pacer at all — the inert path the capture probe runs on.
+ *
+ * The order check is the one worth explaining. With the thresholds inverted the response
+ * stops being graduated: reading would pause while deferrable work carried on beneath it,
+ * which is the exact opposite of what FR-019 asks for, and nothing at runtime would say so.
+ */
+function resolvePacing(overrides: Partial<PacingPolicy> | undefined): PacingPolicy | undefined {
+  if (overrides === undefined) return undefined;
+  const policy: PacingPolicy = { ...DEFAULT_PACING_POLICY, ...overrides };
+  const faults: string[] = [];
+  if (!Number.isInteger(policy.maxRequestsPerWindow) || policy.maxRequestsPerWindow < 1) {
+    faults.push(
+      `maxRequestsPerWindow must be a positive integer (got ${policy.maxRequestsPerWindow})`,
+    );
+  }
+  if (!(policy.windowMs > 0)) {
+    faults.push(`windowMs must be above zero or nothing ever ages out (got ${policy.windowMs})`);
+  }
+  if (!(policy.suspendDeferrableBelow >= 0)) {
+    faults.push(`suspendDeferrableBelow cannot be negative (got ${policy.suspendDeferrableBelow})`);
+  }
+  if (!(policy.pauseReadingBelow >= 0)) {
+    faults.push(`pauseReadingBelow cannot be negative (got ${policy.pauseReadingBelow})`);
+  }
+  if (!(policy.pauseReadingBelow <= policy.suspendDeferrableBelow)) {
+    faults.push(
+      `pauseReadingBelow must not be above suspendDeferrableBelow, or the steps are inverted ` +
+        `(got ${policy.pauseReadingBelow} > ${policy.suspendDeferrableBelow})`,
+    );
+  }
+  if (faults.length > 0) throw new Error(`Straker pacing policy invalid — ${faults.join('; ')}`);
   return policy;
 }
 
