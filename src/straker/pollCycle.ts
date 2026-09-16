@@ -533,7 +533,7 @@ function enqueueSkipRow(
   deps: StrakerPollCycleDeps,
   decision:
     | Extract<ClaimDecision, { action: 'skip' }>
-    | { objId: string; languageDirection: string },
+    | Extract<ClaimDecision, { action: 'claim' }>,
   skipReason: SkipReason,
   atMs: number,
   note: string | null,
@@ -544,8 +544,11 @@ function enqueueSkipRow(
     eventType: 'skip',
     skipReason,
     languageDirection: decision.languageDirection,
-    effortWords: null,
-    deadlineMs: null,
+    // The two numbers the gate refused ON. They were written `null` here, which made the
+    // sheet unable to answer "how many words did the ceiling turn away today" — the one
+    // question the combined view exists for.
+    effortWords: decision.effortWords,
+    deadlineMs: decision.deadlineMs,
     firstSeenAtMs: atMs,
     note,
   } satisfies TrackingRecord);

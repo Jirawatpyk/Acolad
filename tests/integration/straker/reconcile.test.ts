@@ -808,7 +808,17 @@ describe('T048 three consecutive reconciliation failures raise an alert (FR-016c
       await f.reconciler.runIfDue();
     }
 
-    expect(f.queued.filter((q) => q.payload['condition'] === 'reconcile_failing')).toHaveLength(2);
+    // Read from the OUTBOX, not from `f.queued`. `queued` records every `enqueue` call,
+    // and the deduplication being tested happens *inside* `StrakerOutbox.enqueue` — so
+    // asserting on the calls asserted that two were attempted, which is true whatever the
+    // key is. The mutation this test names in its own first line (keying on the streak
+    // length alone) left it green. `delivered()` exists in this file for exactly this and
+    // says so in its docstring.
+    const alerts = delivered(f).filter((q) => q.payload['condition'] === 'reconcile_failing');
+    expect(alerts).toHaveLength(2);
+    // And they are two distinct events rather than one row read twice: the second outage
+    // began later, which is what makes its alert not a duplicate of the first.
+    expect(alerts[0]?.payload['failingSinceMs']).not.toEqual(alerts[1]?.payload['failingSinceMs']);
   });
 
   it('keeps its own cadence after a failure rather than retrying sooner (FR-016c)', async () => {

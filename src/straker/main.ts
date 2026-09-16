@@ -41,7 +41,7 @@ import {
 } from './offerTracker.js';
 import { createStrakerLogger, STRAKER_LOG_NAME } from './logger.js';
 import { StrakerLedger } from './ledger.js';
-import { StrakerOutbox } from './outbox.js';
+import { StrakerOutbox, type StrakerOutboxOptions } from './outbox.js';
 import { createOfferExtractor } from './offerParse.js';
 import { createStrakerPollCycle } from './pollCycle.js';
 import { enqueueQuarantineAlert, openStrakerDatabase, StrakerStore } from './strakerStore.js';
@@ -380,6 +380,9 @@ export interface StrakerAssemblyDeps {
   readonly senders?: StrakerSenders;
   readonly openDatabase?: typeof openStrakerDatabase;
   readonly now?: () => number;
+  /** Retry cap and give-up age. A test lowers them so a dead backlog can be reached in one
+   *  flush rather than in six hours; production takes the shared defaults. */
+  readonly outboxOptions?: StrakerOutboxOptions;
 }
 
 export interface StrakerAssembly {
@@ -420,7 +423,7 @@ export function assembleStrakerBot(
   const now = deps.now ?? Date.now;
   const opened = (deps.openDatabase ?? openStrakerDatabase)(cfg.stateDir, now());
   const store = new StrakerStore(opened.db);
-  const outbox = new StrakerOutbox(opened.db);
+  const outbox = new StrakerOutbox(opened.db, deps.outboxOptions ?? {});
   // Here rather than in `main()`, despite the decision being the entry point's: a quarantine
   // is the one startup outcome that silently changes what the bot does all day — the held
   // set went with the file, so the ceiling reads zero committed work and every offer fits —
@@ -495,7 +498,7 @@ export function assembleStrakerBot(
   });
 
   return {
-    cycle: withDelivery({ cycle, dispatcher, reconciler, logger, now }),
+    cycle: withDelivery({ cycle, dispatcher, reconciler, outbox, logger, now }),
     store,
     outbox,
     quarantinedCopyPath: opened.recoveredFromCorruption ? opened.corruptCopyPath : null,
@@ -527,6 +530,8 @@ function withDelivery(deps: {
     flush(nowMs: number): Promise<{ sent: number; failed: number; dead: number; dropped: number }>;
   };
   readonly reconciler: { runIfDue(): Promise<unknown> };
+  /** Read only, and only for the dead backlog — the dispatcher owns every write. */
+  readonly outbox: Pick<StrakerOutbox, 'countByStatus'>;
   readonly logger: Logger;
   readonly now: () => number;
 }): StrakerCycle {
@@ -541,6 +546,7 @@ function withDelivery(deps: {
         await deps.reconciler.runIfDue();
       });
 
+      let deadBacklog = 0;
       await reportAsync(async () => {
         const summary = await deps.dispatcher.flush(deps.now());
         // Only when something happened: at a ten-second rhythm a line per quiet cycle is
@@ -551,7 +557,25 @@ function withDelivery(deps: {
             'delivered queued outcomes',
           );
         }
+        deadBacklog = deps.outbox.countByStatus('dead');
       });
+
+      // A dead row is an outcome that will never be delivered until an operator requeues
+      // it, and nothing else surfaces one: the dispatcher logs it, and a log line is not a
+      // channel anybody watches. Gating the liveness signal on the **backlog** rather than
+      // on this flush's count is what makes it persist — it stays red until the queue is
+      // actually drained, which is the state that needs a human.
+      //
+      // A won claim whose announcement dies leaves the team owing work nobody was told
+      // about, and reconciliation will not re-announce it: the work IS held, so there is
+      // nothing missing for it to find. The live XTM bot has gated on this since 001.
+      if (deadBacklog > 0) {
+        deps.logger.error(
+          { module: 'main', action: 'flush', outcome: 'dead_backlog', deadBacklog },
+          'outcomes have been given up on undelivered — run `npm run straker:outbox:requeue` after fixing the destination',
+        );
+        return false;
+      }
 
       return ok;
     },

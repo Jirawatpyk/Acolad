@@ -347,7 +347,13 @@ describe('SC-008 — a broken Straker record cannot move the live XTM bot', () =
       .get() as { payload_json: string } | undefined;
     expect(card).toBeDefined();
     expect(card?.payload_json).toMatch(/Straker/);
-    expect(card?.payload_json).toMatch(/unreadable|could not|not found|no combined/i);
+    // **Both of the assertions above are satisfied by the per-portal row alone**
+    // (`Straker: record unreadable — …`), so dropping the combined row entirely left this
+    // green — which is precisely what this test was written to prevent. The row that must
+    // be there is the one saying the two portals could NOT be summed; without it a reader
+    // is left to think the total is XTM's figure.
+    expect(card?.payload_json).toMatch(/Both portals/);
+    expect(card?.payload_json).toMatch(/no combined total/i);
   });
 });
 
@@ -582,17 +588,38 @@ interface ImportSpecifier {
  */
 function importsOf(file: string): ImportSpecifier[] {
   const source = readFileSync(file, 'utf8');
-  const pattern = /(?:^|\n)\s*(?:import|export)\s+(type\s+)?[^;'"]*?from\s*['"]([^'"]+)['"]/g;
-  return [...source.matchAll(pattern)].map((match) => {
-    const specifier = match[2] ?? '';
-    return {
-      from: file,
-      to: specifier.startsWith('.')
-        ? resolve(dirname(file), specifier).replace(/\\/g, '/')
-        : specifier,
-      typeOnly: match[1] !== undefined,
-    };
-  });
+
+  // **Three spellings, not one.** This guard's own docstring says a guard a spelling can
+  // walk past is worse than no guard, because it reports green while checking nothing —
+  // and it matched only `… from '…'`. Both `await import('…')` and a bare side-effect
+  // `import '…';` went straight through it, which was demonstrated by adding a dynamic
+  // import of `state/db.js` to a Straker module and watching this suite stay green.
+  const forms: { readonly re: RegExp; readonly spec: number; readonly type?: number }[] = [
+    {
+      re: /(?:^|\n)\s*(?:import|export)\s+(type\s+)?[^;'"]*?from\s*['"]([^'"]+)['"]/g,
+      spec: 2,
+      type: 1,
+    },
+    // Dynamic. Never type-only: it is a real runtime load, which is the whole concern.
+    { re: /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g, spec: 1 },
+    // Side-effect only — no bindings, no `from`. Runs the module for what it does.
+    { re: /(?:^|\n)\s*import\s+['"]([^'"]+)['"]/g, spec: 1 },
+  ];
+
+  const found: ImportSpecifier[] = [];
+  for (const form of forms) {
+    for (const match of source.matchAll(form.re)) {
+      const specifier = match[form.spec] ?? '';
+      found.push({
+        from: file,
+        to: specifier.startsWith('.')
+          ? resolve(dirname(file), specifier).replace(/\\/g, '/')
+          : specifier,
+        typeOnly: form.type !== undefined && match[form.type] !== undefined,
+      });
+    }
+  }
+  return found;
 }
 
 function importsUnder(dir: string): ImportSpecifier[] {

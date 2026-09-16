@@ -553,3 +553,72 @@ describe('assembleStrakerBot — the outcomes actually reach a destination (T056
     expect(bot.outbox.countByStatus('sent')).toBe(0);
   });
 });
+
+describe('an outcome that died undelivered reaches a human (S2, I-1)', () => {
+  /**
+   * The outbox's own docstring says "**Dead is visible, not lost**: a dead row still holds
+   * its payload and `requeueDead` brings it back, which is what an operator does after
+   * fixing a webhook." None of that was true.
+   *
+   * Nothing surfaced the count: `withDelivery` discarded the whole `FlushSummary`, so a
+   * dead row changed neither the heartbeat nor any alert. And `requeueDead` had no caller
+   * anywhere — `npm run outbox:requeue` opens the XTM database. So a won claim whose
+   * announcement died after a six-hour Chat outage left the team owing work nobody was told
+   * about, permanently, and reconciliation will not re-announce it because the work *is*
+   * held, so there is nothing missing to find.
+   *
+   * The live XTM bot has gated its heartbeat on the dead backlog since 001. This is the
+   * same rule, which DC-3 wants anyway.
+   */
+  function alwaysFailing(): StrakerSenders {
+    const refuse = async () => ({ ok: false, reason: 'destination is down' }) as const;
+    return { offers: refuse, tracking: refuse, alerts: refuse };
+  }
+
+  it('fails the cycle while an outcome is sitting dead, so the dead-man switch pages', async () => {
+    const offer = captured()['aj-265:ms-my'] as RawOffer;
+    const cfg = loadStrakerBotConfig(env());
+    const bot = assembleStrakerBot(cfg, silentLogger(), {
+      portal: portalListing([offer]),
+      senders: alwaysFailing(),
+      now: () => NOW,
+      // One failure is fatal, so a single flush produces the backlog this is about.
+      outboxOptions: { retryCap: 1 },
+    });
+    open.push(bot);
+
+    const ok = await bot.cycle.runOnce();
+
+    expect(bot.outbox.countByStatus('dead')).toBeGreaterThan(0);
+    // The claim itself succeeded — this is delivery, not the race, failing. It still has to
+    // page, because an outcome nobody was told about is the thing the outbox exists for.
+    expect(ok).toBe(false);
+  });
+
+  it('recovers on its own once the backlog is requeued, without a restart', async () => {
+    const offer = captured()['aj-265:ms-my'] as RawOffer;
+    const cfg = loadStrakerBotConfig(env());
+    let down = true;
+    const senders: StrakerSenders = {
+      offers: async () => (down ? { ok: false, reason: 'down' } : { ok: true }),
+      tracking: async () => (down ? { ok: false, reason: 'down' } : { ok: true }),
+      alerts: async () => (down ? { ok: false, reason: 'down' } : { ok: true }),
+    };
+    const bot = assembleStrakerBot(cfg, silentLogger(), {
+      portal: portalListing([offer]),
+      senders,
+      now: () => NOW,
+      outboxOptions: { retryCap: 1 },
+    });
+    open.push(bot);
+
+    await bot.cycle.runOnce();
+    down = false;
+    // What `npm run straker:outbox:requeue` does — the operator action the docstring
+    // promises and that had no implementation.
+    expect(bot.outbox.requeueDead(NOW)).toBeGreaterThan(0);
+
+    await expect(bot.cycle.runOnce()).resolves.toBe(true);
+    expect(bot.outbox.countByStatus('dead')).toBe(0);
+  });
+});

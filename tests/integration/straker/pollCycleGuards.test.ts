@@ -545,3 +545,72 @@ describe('a refused sign-in backs off instead of hammering the portal (T075)', (
     expect(h.claimed).toEqual(['a']);
   });
 });
+
+describe('the tracking record carries what the gate decided on (A1, C1)', () => {
+  /**
+   * `trackingSink.ts` documents column F as "What the gate decided on" and column G as "The
+   * other half of what the gate decided on". For a skip they were both written `null` — not
+   * because the numbers were unknown, but because `ClaimDecision`'s `skip` variant dropped
+   * them at the moment of deciding, so nothing downstream could carry them.
+   *
+   * The consequence is the one question the combined view exists to answer: "how many words
+   * did the ceiling turn away today?" The sheet cannot say. `ceiling_reached`,
+   * `deadline_unreachable` and `claiming_halted` are exactly the rows decided **by** those
+   * two numbers, and exactly the rows that recorded neither.
+   *
+   * The audit also found the claim rows barely covered — outcome, language, deadline and
+   * effort could each be replaced by a constant with the suite staying green — so these
+   * assert content rather than counts.
+   */
+  it('records the effort and deadline the gate refused on, not blanks', async () => {
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [{ ...eligible('a'), eligible: false }],
+    });
+
+    await h.cycle.runOnce();
+
+    const row = h.queued.find((q) => q.channel === 'tracking')?.payload;
+    expect(row).toMatchObject({
+      eventType: 'skip',
+      skipReason: 'ineligible_language',
+      languageDirection: 'en-us>ms-my',
+      effortWords: 4,
+    });
+    expect(row?.deadlineMs).toEqual(expect.any(Number));
+  });
+
+  it('records a claim with its real outcome, direction, effort and deadline', async () => {
+    // Kills replacing any of the four with a constant — the audit showed all four could be.
+    const h = harness({ offers: [raw('a')], extract: () => [eligible('a')] });
+
+    await h.cycle.runOnce();
+
+    expect(h.queued.find((q) => q.channel === 'tracking')?.payload).toMatchObject({
+      objId: 'a',
+      eventType: 'claim',
+      outcome: 'won',
+      languageDirection: 'en-us>ms-my',
+      effortWords: 4,
+    });
+  });
+
+  it('records a lost claim too, because the denominator is made of those', async () => {
+    // Kills emitting a tracking row only for wins — without the losses the win rate has no
+    // denominator and "Straker sends us nothing" cannot be told from "we keep arriving
+    // second", which is the sentence contract §1 opens with.
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      claim: () => ({ status: 409 }),
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.queued.find((q) => q.channel === 'tracking')?.payload).toMatchObject({
+      objId: 'a',
+      eventType: 'claim',
+      outcome: 'failed',
+    });
+  });
+});

@@ -20,6 +20,7 @@
     "report:latency": "npm run build && node dist/runtime/latencyReport.js",
     "report:catch-rate": "npm run build && node dist/runtime/catchRateReport.js",
     "straker:win-rate": "npm run build && node dist/straker/winRateReport.js",
+    "straker:outbox:requeue": "npm run build && node dist/straker/requeue.js",
     "report:combined": "npm run build && node dist/straker/combinedSummary.js",
     "xtm:recon": "tsc scripts/xtm-recon.ts --outDir dist-recon --module nodenext --moduleResolution nodenext --target ES2022 --skipLibCheck && node dist-recon/xtm-recon.js",
     "xtm:recon-logout": "tsc scripts/recon-logout.ts --outDir dist-recon --module nodenext --moduleResolution nodenext --target ES2022 --skipLibCheck && node dist-recon/recon-logout.js",

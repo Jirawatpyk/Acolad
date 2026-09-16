@@ -35,12 +35,14 @@ import {
 import {
   CLAIM_ALERT_CONDITION,
   OFFER_ALERT_CONDITIONS,
+  SYSTEM_ALERT_CONDITIONS,
   SKIP_ALERT_CONDITION,
   STRAKER_PORTAL_NAME,
   TRANSPORT_ALERT_CONDITIONS,
   createStrakerAlertsSender,
   createStrakerOffersSender,
   type OfferAlertCondition,
+  type SystemAlertCondition,
   type StrakerAlert,
   type StrakerAlertCondition,
   type StrakerOfferAnnouncement,
@@ -148,6 +150,21 @@ function sampleAlert(condition: StrakerAlertCondition): StrakerAlert {
       windowMs: 600_000,
     };
   }
+  if ((SYSTEM_ALERT_CONDITIONS as readonly string[]).includes(condition)) {
+    // This branch was missing, and the list below omitted the system conditions — so a test
+    // named "every alert it can raise" could not construct a system alert at all, and
+    // FR-026b went unenforced for the whole kind. Dropping the portal name from just the
+    // system heading left the suite green.
+    return {
+      kind: 'system',
+      condition: condition as SystemAlertCondition,
+      subsystem: 'reconciliation (assigned-work read and recovery)',
+      detail: 'three passes in a row could not be completed',
+      occurredAtMs: CLAIMED_MS,
+      consecutiveFailures: 3,
+      failingSinceMs: CLAIMED_MS - 45 * 60_000,
+    };
+  }
   return {
     kind: 'offer',
     condition: condition as OfferAlertCondition,
@@ -163,6 +180,7 @@ function sampleAlert(condition: StrakerAlertCondition): StrakerAlert {
 const ALL_CONDITIONS: readonly StrakerAlertCondition[] = [
   ...OFFER_ALERT_CONDITIONS,
   ...TRANSPORT_ALERT_CONDITIONS,
+  ...SYSTEM_ALERT_CONDITIONS,
 ];
 
 // =========================================================================================

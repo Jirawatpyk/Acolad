@@ -100,6 +100,21 @@ export type ClaimDecision =
       readonly reason: SkipReason;
       /** Human-readable, and for a gate refusal it is the gate's own sentence (FR-010). */
       readonly detail: string;
+      /**
+       * What the gate refused **on**, carried through rather than dropped at the decision.
+       *
+       * Nullable, unlike the claim variant, because two of the skip reasons exist precisely
+       * when one of these is missing (`effort_unknown`, `deadline_unknown`). Null here means
+       * the payload carried none; it does not mean the decision ignored them.
+       *
+       * They used to stop here, so the tracking record wrote blanks into the two columns it
+       * labels "What the gate decided on" — and the sheet could not answer how many words
+       * the ceiling turned away today, which is the one question the combined view exists
+       * for. `ceiling_reached` and `deadline_unreachable` are decided by exactly these two
+       * numbers and recorded neither.
+       */
+      readonly effortWords: number | null;
+      readonly deadlineMs: number | null;
     };
 
 /**
@@ -315,5 +330,7 @@ function skip(offer: OfferForDecision, reason: SkipReason, detail: string): Clai
     action: 'skip',
     reason,
     detail,
+    effortWords: offer.effortWords,
+    deadlineMs: offer.deadlineMs,
   };
 }
