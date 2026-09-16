@@ -493,7 +493,18 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       }
       lastAttemptAtMs = atMs;
 
-      const pass = runPass(atMs);
+      // The whole pass, inside one guard. `runPass` grew several calls that sat outside
+      // every try — the held-work read, the success log, and the `logger.error` inside
+      // `fail()` itself, which is the one place a throw could escape the function meant to
+      // absorb failures. The promise this method makes is that it never throws, and the
+      // composition root relies on it; a promise kept by inspection is not kept.
+      //
+      // It matters more than an unhandled rejection usually would, because `lastAttemptAtMs`
+      // is set above, before the pass runs. A throwing `heldWork()` therefore meant a pass
+      // attempted every fifteen minutes, throwing every time, advancing its own schedule
+      // every time — reconciliation silently off for the life of the process, with only
+      // stderr saying so, while the FR-003 window it exists to close stayed open.
+      const pass = runPass(atMs).catch((err: unknown) => fail('record', err, [], atMs));
       inFlight = pass;
       try {
         return await pass;

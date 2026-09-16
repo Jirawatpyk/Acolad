@@ -69,6 +69,8 @@ interface FixtureOptions {
   /** Thrown by the assigned-work read. A function so a test can change it per pass. */
   readonly readFails?: () => unknown | null;
   readonly signInFails?: () => unknown | null;
+  /** Break the held-work read — the one call that sat outside every guard. */
+  readonly heldWorkFails?: () => unknown | null;
   /** Make one recovery's announcement fail, to prove what the transaction covers. */
   readonly enqueueThrowsFor?: (eventId: string) => boolean;
   readonly recordEventThrowsFor?: (objId: string) => boolean;
@@ -142,7 +144,11 @@ function fixture(opts: FixtureOptions = {}): Fixture {
       trace.push(`recordEvent:${event.objId}:${event.eventType}`);
       store.recordEvent(event);
     },
-    heldWork: () => store.heldWork(),
+    heldWork: () => {
+      const failure = opts.heldWorkFails?.();
+      if (failure !== null && failure !== undefined) throw failure;
+      return store.heldWork();
+    },
     sightingsOf: (objId: string) => store.sightingsOf(objId),
   };
 
@@ -1157,5 +1163,48 @@ describe('a rejected sign-in is not retried as though the session had expired', 
     await f.reconciler.runIfDue();
 
     expect(f.signIns()).toBe(2);
+  });
+});
+
+describe('runIfDue keeps its never-throws promise (S3)', () => {
+  /**
+   * `runIfDue` is documented as never throwing, and the composition root relies on it —
+   * `withDelivery` wraps it in a guard whose comment says "this one cannot afford to find
+   * out it was broken". The promise was not kept: `store.heldWork()`, the success log and
+   * the `logger.error` inside `fail()` itself all sat outside every try.
+   *
+   * The consequence was specific and permanent. `lastAttemptAtMs` is set **before** the
+   * pass runs, so a throwing `heldWork()` meant reconciliation attempted a pass every
+   * fifteen minutes, threw every time, advanced its own schedule every time, and **never
+   * reconciled again for the life of the process** — with nothing but stderr saying so.
+   *
+   * Reconciliation is what repairs the FR-003 window. A bot that has silently stopped
+   * reconciling is a bot accumulating work the record does not know about.
+   */
+  it('does not throw when the held-work read fails, and says so as a failure', async () => {
+    const f = fixture({
+      heldWorkFails: () => new Error('SQLITE_IOERR: disk I/O error'),
+    });
+
+    f.setNow(NOW_MS);
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: false });
+  });
+
+  it('keeps reconciling on later passes rather than dying for the life of the process', async () => {
+    // The permanent half. One bad read must cost one pass, not all of them.
+    let broken = true;
+    const f = fixture({
+      heldWorkFails: () => (broken ? new Error('SQLITE_IOERR: disk I/O error') : null),
+    });
+
+    f.setNow(NOW_MS);
+    await f.reconciler.runIfDue();
+    broken = false;
+    f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    const second = await f.reconciler.runIfDue();
+
+    expect(second).toMatchObject({ ran: true, ok: true });
   });
 });

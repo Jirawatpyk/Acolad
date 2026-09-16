@@ -37,9 +37,17 @@ import {
   type StrakerSenders,
 } from '../../../src/straker/dispatcher.js';
 import { StrakerOutbox } from '../../../src/straker/outbox.js';
-import { openStrakerDatabase, type StrakerDB } from '../../../src/straker/strakerStore.js';
 import {
+  enqueueQuarantineAlert,
+  openStrakerDatabase,
+  type StrakerDB,
+} from '../../../src/straker/strakerStore.js';
+import {
+  OFFER_ALERT_CONDITIONS,
+  SYSTEM_ALERT_CONDITIONS,
+  TRANSPORT_ALERT_CONDITIONS,
   TRANSPORT_ALERT_WINDOW_MS,
+  createStrakerAlertsSender,
   createTransportAlertHooks,
   type StrakerTransportAlertNotice,
 } from '../../../src/straker/notifier.js';
@@ -458,5 +466,70 @@ describe('transport alerts carry no identity, so the sink throttles them (T051)'
 
     expect(TRANSPORT_ALERT_WINDOW_MS).toBe(10 * MINUTE);
     expect(raised).toHaveLength(2);
+  });
+});
+
+describe('every alert this bot can queue can actually be rendered (producer side)', () => {
+  /**
+   * The defect this closes, twice over.
+   *
+   * `notifier.ts` validates an alert's `condition` against its card table and refuses
+   * anything it cannot render. A producer that queues the wrong shape therefore does not
+   * fail loudly — the row is queued, refused, retried and **dead-lettered**, which is a
+   * silence exactly where an alert was meant to be.
+   *
+   * It has now happened twice. `reconcile_failing` had no card until Phase 6, caught only
+   * because its author left a tripwire. Then `db_quarantined` shipped with no `condition`,
+   * no `occurredAtMs` and a `kind` the parser does not know — and that one is the alert
+   * raised when the state file has been moved aside, the ledger reads zero committed
+   * capacity and **every offer will fit**. The one startup state where the bot over-claims
+   * irreversibly while looking healthy, and its only warning could not be delivered.
+   *
+   * The existing guard (`notifier.test.ts`, "points every mapped condition at a card the
+   * sender can actually render") walks the two condition **tables**, so it structurally
+   * cannot see a producer outside them. This walks the **producers** instead: every literal
+   * alert payload the bot constructs, through the real sender. A new alert that cannot be
+   * rendered fails here rather than at 03:00.
+   */
+  const chat = { send: async () => 'ok' as const };
+
+  it('renders the database-quarantine alert, which is the one that must never be lost', async () => {
+    const outbox = freshOutbox();
+    enqueueQuarantineAlert(
+      outbox,
+      { recoveredFromCorruption: true, corruptCopyPath: 'state/straker/straker.db.corrupt-x' },
+      NOW_MS,
+    );
+
+    const [row] = outbox.due(NOW_MS);
+    expect(row).toBeDefined();
+    await expect(
+      createStrakerAlertsSender(chat)(JSON.parse(row?.payloadJson ?? '{}')),
+    ).resolves.toEqual({ ok: true });
+  });
+
+  it('names every condition a producer can emit, so a new one cannot be forgotten', () => {
+    // The register. A producer added without a card is a row that dead-letters; a card
+    // added without a producer is dead code. Both are caught by keeping the list here and
+    // checking it against the notifier's own tables.
+    const producible = [
+      'claim_failed',
+      'claim_outcome_unknown',
+      'work_recovered',
+      'offer_effort_unknown',
+      'offer_deadline_unknown',
+      'read_retries_exhausted',
+      'rate_limit_unknown',
+      'reconcile_failing',
+      'db_quarantined',
+    ] as const;
+
+    for (const condition of producible) {
+      expect([
+        ...OFFER_ALERT_CONDITIONS,
+        ...TRANSPORT_ALERT_CONDITIONS,
+        ...SYSTEM_ALERT_CONDITIONS,
+      ]).toContain(condition);
+    }
   });
 });

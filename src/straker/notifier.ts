@@ -159,7 +159,11 @@ export type TransportAlertCondition = (typeof TRANSPORT_ALERT_CONDITIONS)[number
  * it a transport condition would be wrong about half the cases it fires on. It also needs a
  * different subject line: what is failing is a pass, not a request.
  */
-export const SYSTEM_ALERT_CONDITIONS = ['reconcile_failing'] as const;
+export const SYSTEM_ALERT_CONDITIONS = [
+  'reconcile_failing',
+  'db_quarantined',
+  'sign_in_refused',
+] as const;
 export type SystemAlertCondition = (typeof SYSTEM_ALERT_CONDITIONS)[number];
 
 export type StrakerAlertCondition =
@@ -329,6 +333,22 @@ const ALERT_SPECS: Readonly<Record<StrakerAlertCondition, AlertSpec>> = {
       'The portal stopped reporting its budget; only the hard per-minute ceiling restrains polling',
     action:
       'No action while the ceiling holds; if it persists, confirm the portal has not changed its rate-limit headers',
+  },
+  db_quarantined: {
+    severity: 'critical',
+    title: 'State File Quarantined',
+    impact:
+      'The record of work the team already holds went with the old file, so the daily ceiling now reads as ZERO committed capacity and every offer will fit — the bot will over-claim until reconciliation restores the held set',
+    action:
+      'Stop the bot if the ceiling matters today. Keep the quarantined copy: it is the only record of what was held. Reconciliation rebuilds the held set from the portal within fifteen minutes of the next start',
+  },
+  sign_in_refused: {
+    severity: 'critical',
+    title: 'Sign-In Refused',
+    impact:
+      'The bot cannot reach the portal at all — no offers are being read and none can be claimed. It has stopped re-attempting so that a refused credential is not offered repeatedly to an account whose lockout policy is unknown',
+    action:
+      'Check STRAKER_LOGIN_ID and STRAKER_PASSWORD in .env against the portal. If the password was rotated (RP-1), delete state/storageState.json too. The bot retries on its own backoff and recovers without a restart once the credentials work',
   },
   reconcile_failing: {
     severity: 'critical',

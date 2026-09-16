@@ -21,6 +21,8 @@ export interface HarnessOptions {
   /** A getter is allowed, so a test can change what the portal lists between cycles. */
   readonly offers?: readonly RawOffer[];
   readonly readFails?: unknown;
+  /** Refuse the sign-in. Returning null lets it succeed, so a test can recover mid-run. */
+  readonly signInFails?: () => unknown | null;
   readonly extract?: (raw: readonly RawOffer[]) => readonly OfferForDecision[];
   readonly claim?: (offerId: string) => { status: number } | 'accepted' | 'no_answer';
   /** Identities already carrying a claim event, as a previous cycle would have left them. */
@@ -30,6 +32,9 @@ export interface HarnessOptions {
   /** `false` means the tracker and the store disagree — the caller must notice. */
   readonly endSightingResult?: boolean;
   readonly enqueueResult?: () => 'queued' | 'already_pending' | 'already_sent' | 'already_dead';
+  /** An advancing clock, for the rules that are about time rather than about sequence —
+   *  the sign-in backoff cannot be exercised at all against a frozen one. */
+  readonly now?: () => number;
 }
 
 export interface Harness {
@@ -77,7 +82,12 @@ export function harness(opts: HarnessOptions): Harness {
       },
     } as never,
     signIn: async () => {
+      // Traced BEFORE the refusal: what a sign-in test measures is how many times the bot
+      // POSTed the credentials, and a refused attempt is still an attempt at a portal that
+      // may be counting them toward a lockout.
       trace.push('signIn');
+      const failure = opts.signInFails?.();
+      if (failure !== null && failure !== undefined) throw failure;
       return { vendorId: 'vendor-1' };
     },
     listOpenOffers: async () => {
@@ -180,7 +190,7 @@ export function harness(opts: HarnessOptions): Harness {
       workdays: new Set([1, 2, 3, 4, 5]),
     },
     extractOffers: opts.extract ?? (() => []),
-    now: () => Date.parse('2026-09-16T10:00:00+07:00'),
+    now: opts.now ?? (() => Date.parse('2026-09-16T10:00:00+07:00')),
   });
 
   return { cycle, trace, claimed, events, holds, queued, logs };

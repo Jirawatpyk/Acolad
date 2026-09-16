@@ -937,7 +937,11 @@ describe('reporting a quarantine durably', () => {
       string,
       unknown
     >;
-    expect(payload['kind']).toBe('db_quarantined');
+    // `kind: 'system'` with `condition: 'db_quarantined'` — the notifier's own shape. It
+    // used to be `kind: 'db_quarantined'` with no condition at all, which the alerts sender
+    // refuses before reading anything else, so this alert dead-lettered every time.
+    expect(payload['kind']).toBe('system');
+    expect(payload['condition']).toBe('db_quarantined');
     expect(payload['corruptCopyPath']).toBe(quarantined.corruptCopyPath);
     expect(payload['heldWorkLost']).toBe(true);
     expect(String(payload['detail'])).toMatch(/ceiling|capacity/i);

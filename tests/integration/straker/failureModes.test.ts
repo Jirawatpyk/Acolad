@@ -335,7 +335,7 @@ describe('failure mode: the portal refuses the sign-in', () => {
     expect(bot.assembly.store.trackerState().live).toEqual([]);
   });
 
-  it('tries again on the next cycle rather than holding a dead session', async () => {
+  it('holds off on the next cycle rather than re-offering refused credentials', async () => {
     const portal = fakeStraker();
     portal.login = async () => json({ error: 'invalid credentials' }, 401);
     const bot = assemble(portal);
@@ -344,12 +344,17 @@ describe('failure mode: the portal refuses the sign-in', () => {
     const afterFirst = callsTo(portal, 'login').length;
     await bot.assembly.cycle.runOnce();
 
-    // `session ??= await signIn()` only re-signs when `session` is null. A sign-in that
-    // threw before a session existed must leave it null, or the bot would sit at a dead
-    // sign-in for ever while its liveness signal said "failing" and nothing ever tried
-    // again. Growth rather than a total, because the reconciler signs in on its own
-    // schedule too — see the test below.
-    expect(callsTo(portal, 'login').length).toBeGreaterThan(afterFirst);
+    // **This assertion was inverted on 2026-09-16, and the inversion is the fix.** It used
+    // to require growth — "tries again on the next cycle rather than holding a dead
+    // session" — which is what `session ??= await signIn()` gave: one login attempt per
+    // ten-second cycle, about 8,640 a day, indefinitely, against an account whose lockout
+    // policy is unknown and with a password RP-1 records as compromised. The reasoning was
+    // sound about *never* retrying and silent about *how often*.
+    //
+    // The poll cycle now backs off, doubling from a minute, and clears the moment a read
+    // succeeds. The bot still recovers without a restart — `pollCycleGuards.test.ts` proves
+    // that against an advancing clock, which this fixture does not have.
+    expect(callsTo(portal, 'login').length).toBe(afterFirst);
   });
 
   it('posts refused credentials once per session holder, and no more', async () => {

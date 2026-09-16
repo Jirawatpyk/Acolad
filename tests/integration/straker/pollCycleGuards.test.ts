@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { StrakerHttpError } from '../../../src/straker/httpClient.js';
 import { eligible, harness, raw, type HarnessOptions } from './pollCycleHarness.js';
 
 /**
@@ -367,5 +368,180 @@ describe('an outcome that died undelivered is not read as handled (C3)', () => {
     await h.cycle.runOnce();
 
     expect(h.logs.some((l) => l.fields.outcome === 'already_dead')).toBe(false);
+  });
+});
+
+describe('R7 survives a store that cannot record the claim (C-2)', () => {
+  /**
+   * The cross-cycle guard reads `claimedObjIds()`, which reads the very rows the per-claim
+   * transaction writes — and that transaction's failure is caught and only logged. So when
+   * the write fails, the offer is invisible to the next cycle's guard and is claimed again
+   * ten seconds later.
+   *
+   * That is precisely the conversion the guard's own comment exists to prevent: an outcome
+   * of `unknown` means nobody knows whether the first claim landed, and asking again is how
+   * "we do not know" becomes "we may have committed twice". Reconciliation cannot help — it
+   * adds rows, it cannot un-claim, and it runs once per ninety poll cycles.
+   *
+   * The realistic trigger is systemic rather than per-row — a full disk, `SQLITE_IOERR`, a
+   * sustained `SQLITE_BUSY` — which means it would hit every claim at once rather than one.
+   */
+  it('does not claim the same offer twice when its record could not be written', async () => {
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      recordEventFails: () => true,
+    });
+
+    await h.cycle.runOnce();
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['a']);
+  });
+
+  it('still claims a genuinely new offer in the same cycle as a failed record', async () => {
+    // The guard must not become "stop claiming once anything fails" — that would turn one
+    // bad write into a bot that races for nothing.
+    const h = harness({
+      offers: [raw('a'), raw('b')],
+      extract: () => [eligible('a'), eligible('b')],
+      recordEventFails: (objId) => objId === 'a',
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['a', 'b']);
+  });
+});
+
+describe('a cycle that lost a claim record does not report success (S1)', () => {
+  /**
+   * The spec's worst outcome, and it was reachable while looking perfectly healthy.
+   *
+   * The reads succeed, the claims go out, the portal commits work to the team — and then
+   * the per-claim transaction fails. It was caught, logged, and the cycle returned `true`
+   * unconditionally, logging `outcome: 'ok'`, so `startStrakerBot` pinged `heartbeat.ok()`.
+   * Portal-committed work, no row, no ledger hold, no card, and a green dead-man switch,
+   * indefinitely. The only trace was pino error lines — on the same disk that, if the
+   * trigger was a full disk, could not take them either.
+   *
+   * The heartbeat is the one channel that does not depend on the store, which is exactly
+   * why it is the one that has to carry this.
+   */
+  it('returns false when a claim could not be recorded, so the heartbeat goes red', async () => {
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      recordEventFails: () => true,
+    });
+
+    await expect(h.cycle.runOnce()).resolves.toBe(false);
+  });
+
+  it('still returns true when only the observational half failed, which is recoverable', async () => {
+    // A lost sighting costs a lifetime measurement, not a commitment. Failing the heartbeat
+    // for that would page someone about a measurement while the bot keeps winning work —
+    // and a dead-man switch that cries wolf is one nobody reads.
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [{ ...eligible('a'), eligible: false }],
+      recordEventFails: () => true,
+    });
+
+    await expect(h.cycle.runOnce()).resolves.toBe(true);
+  });
+});
+
+describe('a refused sign-in backs off instead of hammering the portal (T075)', () => {
+  /**
+   * The bot signs in whenever it has no session, and the loop runs every ten seconds. A
+   * refused password therefore posted the same refused credentials **8,640 times a day,
+   * indefinitely** — and nothing in the graduated budget response could damp it, because
+   * sign-in deliberately goes through the `essential` door, which is never suspended.
+   *
+   * Three things make that the wrong direction to be wrong in. RP-1 records this account's
+   * password as compromised, so it is the credential most likely to be refused. The
+   * portal's lockout policy is unknown. And contract §4a already establishes the principle
+   * for the claim path — a bot that argues with a refusal is how an account earns a
+   * permanent block rather than recovers from one.
+   *
+   * The live XTM bot has had `LOGIN_MAX_RETRY` → lockout for this since 001. This is the
+   * same shape, which DC-3 wants anyway.
+   */
+  /** Ten seconds a cycle, the production rhythm — the figure the storm is measured in. */
+  function ticking(start = Date.parse('2026-09-16T10:00:00+07:00')) {
+    let t = start;
+    return { now: () => t, tick: (ms = 10_000) => (t += ms) };
+  }
+
+  it('stops re-attempting after consecutive refusals rather than trying every cycle', async () => {
+    const clock = ticking();
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      signInFails: () => new StrakerHttpError(401, '/auth/login', 'bad credentials'),
+      now: clock.now,
+    });
+
+    // Forty minutes of production cycles.
+    for (let i = 0; i < 240; i += 1) {
+      await h.cycle.runOnce();
+      clock.tick();
+    }
+
+    // Far fewer than one per cycle. The exact figure is the backoff's business; what this
+    // pins is that it is bounded rather than linear in cycles.
+    // Was 240 — one per cycle. The backoff doubles from a minute, so forty minutes buys a
+    // handful of attempts rather than one every ten seconds.
+    const attempts = h.trace.filter((t) => t === 'signIn').length;
+    expect(attempts).toBeLessThan(10);
+    expect(attempts).toBeGreaterThan(0);
+  });
+
+  it('alerts once the refusals look like a credential problem, not a blip', async () => {
+    const clock = ticking();
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      signInFails: () => new StrakerHttpError(401, '/auth/login', 'bad credentials'),
+      now: clock.now,
+    });
+
+    for (let i = 0; i < 240; i += 1) {
+      await h.cycle.runOnce();
+      clock.tick();
+    }
+
+    // T075: a refused sign-in used to raise nothing at all. What paged was "the bot is not
+    // alive", half an hour later, via the dead-man switch — not "the password is wrong".
+    const alerts = h.queued.filter((q) => q.channel === 'alerts');
+    expect(alerts.length).toBeGreaterThan(0);
+    expect(alerts.length).toBeLessThan(4);
+    expect(JSON.stringify(alerts)).toMatch(/sign[- ]?in|credential|login/i);
+  });
+
+  it('recovers immediately once the credentials work again', async () => {
+    // The backoff must not outlive the problem: a password fixed at 09:00 should not leave
+    // the bot idle until the lockout elapses.
+    let bad = true;
+    const clock = ticking();
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      signInFails: () => (bad ? new StrakerHttpError(401, '/auth/login', 'bad') : null),
+      now: clock.now,
+    });
+
+    for (let i = 0; i < 30; i += 1) {
+      await h.cycle.runOnce();
+      clock.tick();
+    }
+    bad = false;
+    for (let i = 0; i < 400; i += 1) {
+      await h.cycle.runOnce();
+      clock.tick();
+    }
+
+    expect(h.claimed).toEqual(['a']);
   });
 });

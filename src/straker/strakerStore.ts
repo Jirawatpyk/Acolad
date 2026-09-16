@@ -339,7 +339,18 @@ export function enqueueQuarantineAlert(
     `db_quarantined:${basename(corruptCopyPath)}`,
     'alerts',
     JSON.stringify({
-      kind: 'db_quarantined',
+      // A `system` alert, in the notifier's own shape. It was `kind: 'db_quarantined'`
+      // with no `condition` and no `occurredAtMs` — which the alerts sender refuses on its
+      // first line, so the row was queued, retried and dead-lettered. Silently, and on the
+      // one alert that must never be lost.
+      kind: 'system',
+      condition: 'db_quarantined',
+      subsystem: `Straker state file (${basename(corruptCopyPath)})`,
+      occurredAtMs: nowMs,
+      // A quarantine is one event, not a streak — but the system card carries a count and
+      // a span, so it says so honestly rather than leaving the fields to be invented.
+      consecutiveFailures: 1,
+      failingSinceMs: nowMs,
       corruptCopyPath,
       heldWorkLost: true,
       detail:

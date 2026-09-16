@@ -260,8 +260,14 @@ describe('assembleStrakerBot — a quarantined state file reaches a human', () =
     expect(queued).toHaveLength(1);
     expect(queued[0]?.channel).toBe('alerts');
     expect(queued[0]?.eventId).toMatch(/^db_quarantined:/);
+    // A `system` alert with a `condition` the notifier has a card for. It was
+    // `kind: 'db_quarantined'` with no condition and no timestamp, which the alerts sender
+    // refuses on its first line — so this row was queued, retried and dead-lettered. That
+    // is why `alerts.test.ts` now round-trips it through the real sender rather than
+    // stopping, as this test does, at "a row was queued".
     expect(JSON.parse(queued[0]?.payloadJson ?? '{}')).toMatchObject({
-      kind: 'db_quarantined',
+      kind: 'system',
+      condition: 'db_quarantined',
       heldWorkLost: true,
     });
   });
