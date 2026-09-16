@@ -626,6 +626,27 @@ describe('reportWorthSending — an empty daily report is not sent', () => {
     ).toBe(true);
   });
 
+  it('sends when the win rate has actual races in it, even on a day with no work', () => {
+    // The deliberate half of the win-rate rule: "n/a — no genuinely winnable offers" is a
+    // non-event, but a real fortnightly figure is worth putting in front of someone whether or
+    // not anything is due today. It is also the only place that figure appears.
+    expect(
+      reportWorthSending(
+        [],
+        [
+          { label: 'XTM', value: '0 words committed' },
+          { label: 'Straker', value: '0 words committed' },
+          { label: 'Both portals', value: '0 words committed' },
+          {
+            label: 'Straker win rate',
+            value:
+              '12.5% — 1 won of 8 winnable in the last 14 days · 2 turned away by our own rules',
+          },
+        ],
+      ),
+    ).toBe(true);
+  });
+
   it('recognises the real combined rows as nothing, not a hand-written imitation of them', async () => {
     // The rule matches on the text `combinedReportRows` produces, so it is pinned against that
     // function's ACTUAL output rather than against a string copied into this file. Reword the

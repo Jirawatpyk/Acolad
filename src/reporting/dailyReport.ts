@@ -89,20 +89,31 @@ export function reportWorthSending(
 ): boolean {
   if (held.length > 0) return true;
   // Suppress only when EVERY companion row is recognisably nothing. The test is an allowlist,
-  // not a denylist, so an unfamiliar row — a win rate, a retry count, something added later —
-  // counts as content and the report goes out.
-  return !companion.every((row) => NOTHING_COMMITTED.test(row.value ?? ''));
+  // not a denylist, so an unfamiliar row — a retry count, something added later — counts as
+  // content and the report goes out.
+  return !companion.every((row) => SAYS_NOTHING.some((pattern) => pattern.test(row.value ?? '')));
 }
 
 /**
- * A companion row that says a portal committed nothing, and nothing else.
+ * The companion rows that say nothing happened.
  *
  * Anchored and exact on purpose. A loose `includes('0')` would match "10 words committed", and
  * a loose "is this row interesting" test would have to be updated every time the combined
  * section gains a row — silently, in the direction of suppressing more. This way the failure
  * mode of an unrecognised row is an extra card, never a hidden one.
  */
-const NOTHING_COMMITTED = /^0 \S+ committed$/;
+const SAYS_NOTHING: readonly RegExp[] = [
+  // "0 words committed" — a portal, or the combined line, holding nothing.
+  /^0 \S+ committed$/,
+  // The win-rate row with no races in it. Added when T076 put that row in the card and this
+  // rule stopped suppressing anything — which is the allowlist behaving as designed: it failed
+  // toward SENDING, and the test pinned against `combinedReportRows`'s real output caught it on
+  // the first run rather than letting the feature quietly switch itself off.
+  //
+  // A rate with actual races in it is NOT matched, and that is deliberate: `12.5% — 1 won of 8`
+  // is a fortnightly figure worth putting in front of someone even on a day with no work.
+  /^n\/a — no genuinely winnable offers in .+ · 0 turned away by our own rules$/,
+];
 
 /**
  * Builds the Google Chat cardsV2 payload for the daily in-progress jobs report.
