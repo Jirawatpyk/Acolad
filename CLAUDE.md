@@ -6,14 +6,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 บอทเฝ้าพอร์ทัล Acolad ตลอด 24/7: ตรวจจับงานแปลใหม่ → แจ้งเตือน Google Chat
 ภายใน 60 วินาที. ฟีเจอร์ 001 จับงานที่ partner.acolad.com (ถอดออกแล้ว);
-**ฟีเจอร์ 002 (ปัจจุบัน) ย้ายไป XTM Cloud (Tasks→Active)** + กดรับงานมาเลย์
+**ฟีเจอร์ 002 (live อยู่) ย้ายไป XTM Cloud (Tasks→Active)** + กดรับงานมาเลย์
 อัตโนมัติ (bulk) + บันทึก task ทุกงานลง Google Sheets — กดรับเฉพาะคู่ภาษา
 มาเลย์ MS (ดู [[acolad-malay-only-rule]])
 
+**ฟีเจอร์ 003 (live 2026-09-16)** เพิ่มบอท**ตัวที่สอง** `jobcatch-straker` — HTTP
+ล้วน ไม่ใช้ browser — แข่งคว้างานที่พอร์ทัล Straker (`vendr.straker.ai`) ดู
+[[straker-bot-live-trial-ceiling]]
+
+> **มีบอทสองตัวรันแยกกันบน PM2 — อย่าคิดว่ามีตัวเดียว**: `acolad-bot` (XTM,
+> Playwright, port 47811, `state/acolad.db`) และ `jobcatch-straker` (HTTP, port
+> 47812, `state/straker/straker.db`, Sheet + ห้อง Chat ของตัวเอง). แยกขาดจากกัน
+> ตั้งใจ (R11) — มีจุดเดียวที่ต่อกันคือรายงาน 09:00 ของ XTM ที่แสดง workload รวม
+> สองพอร์ทัล
+
 **สถานะปัจจุบัน**: ฟีเจอร์ 002 **live** (auto-accept งานมาเลย์ ตั้งแต่ 2026-06-22) +
-**accept-scheduling gate live** ตั้งแต่ 2026-06-27 (PR #7/#8). detect + log(Sheets) +
-notify(Chat) + auto-accept (กรองด้วย schedule gate) ครบวงจร. 580+ tests ผ่าน,
-coverage detection/state/reporting/schedule ≥ 80%, lint + typecheck สะอาด.
+**accept-scheduling gate live** ตั้งแต่ 2026-06-27 (PR #7/#8) + **ฟีเจอร์ 003 live
+2026-09-16** (PR #30/#31). 1691 tests ผ่าน, coverage 6 area ≥ 80%
+(detection/state/reporting/schedule/straker/shared), lint + typecheck สะอาด.
+
+> **ค้างอยู่และเป็นงานของเจ้าของ (RP-1)**: รหัสผ่าน Straker เคยส่งผ่านแชต ถือว่ารั่ว
+> — ต้อง rotate แล้วลบ `state/storageState.json`. บอท sign-in ทุก 10 วินาที
 
 > **3 สวิตช์ accept — อย่าสับสน**: `ACCEPT_ENABLED` คุมการกดรับ *ทั้งหมด* (0 =
 > detect+notify อย่างเดียว ไม่กดรับ); `ACCEPT_SCHEDULE_ENABLED` คุม *แค่ตาราง* (0 =
@@ -33,11 +46,12 @@ coverage detection/state/reporting/schedule ≥ 80%, lint + typecheck สะอ�
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
 
-**Current feature**: 002-xtm-detect-accept
-**Current plan**: specs/002-xtm-detect-accept/plan.md
-**Spec**: specs/002-xtm-detect-accept/spec.md
-**Tasks**: specs/002-xtm-detect-accept/tasks.md (สร้างด้วย /speckit-tasks)
-**Design artifacts**: specs/002-xtm-detect-accept/ (research.md, data-model.md, quickstart.md, contracts/)
+**Current feature**: 003-straker-offer-race (ตรงกับ `.specify/feature.json`)
+**Current plan**: specs/003-straker-offer-race/plan.md
+**Spec**: specs/003-straker-offer-race/spec.md
+**Tasks**: specs/003-straker-offer-race/tasks.md (สร้างด้วย /speckit-tasks)
+**Design artifacts**: specs/003-straker-offer-race/ (research.md, data-model.md, quickstart.md, contracts/, release-preconditions.md, xtm-baseline.md)
+**ฟีเจอร์ก่อนหน้า**: specs/002-xtm-detect-accept/ (ยัง live — 003 ไม่ได้แทนที่ 002)
 **Constitution**: .specify/memory/constitution.md (v1.0.1 — 8 principles, gate ทุก plan/PR)
 **Stack**: Node.js 22 + TypeScript strict, Playwright (Chromium), SQLite (better-sqlite3), googleapis (Sheets), pino, zod, PM2 บน Windows 11
 
@@ -84,8 +98,11 @@ npm test                # Vitest unit + integration (fixtures เท่านั
 npx vitest run tests/unit/xtmDiff.test.ts  # รัน test ไฟล์เดียว
 npm run test:coverage   # gate ≥ 80% บน detection/state/reporting/schedule
 npm run poll:once       # รันรอบเดียวจบ (smoke) — เพิ่ม $env:LIVE_PORTAL='1' สำหรับ portal จริง
-npm run deploy          # รัน 24/7: build + restart แบบ single-instance-safe + verify (ใช้อันนี้เสมอ)
-# ห้าม `pm2 restart acolad-bot` ด้วยมือ — มัน skip stop-and-wait แล้วทิ้ง orphan/ชน lock
+npm run deploy                      # = -Target xtm (ค่าปริยาย — restart เฉพาะ acolad-bot)
+npm run deploy -- -Target straker   # restart เฉพาะ jobcatch-straker
+npm run deploy -- -Target both      # xtm ก่อน แล้ว straker; ถ้าตัวแรกล้ม ตัวที่สองไม่รัน
+# ห้าม `pm2 restart` ด้วยมือ — มัน skip stop-and-wait แล้วทิ้ง orphan/ชน lock
+# แก้โค้ดที่ src/reporting/, src/runtime/, src/straker/combinedSummary.ts = กระทบ XTM ด้วย -> ใช้ both
 npm run outbox:requeue  # ops: คืนรายการแจ้งเตือน dead → pending (ฐานข้อมูล XTM)
 npm run straker:outbox:requeue  # ops: อันเดียวกันสำหรับ Straker — คนละ db คนละสคริปต์ (R11)
 npm run straker:unbar           # ops: ปลดล็อกหลังพอร์ทัลแบนบัญชี (403) — ต้องรันมือเท่านั้น
@@ -132,6 +149,14 @@ main/once → bootstrap.createXtmBot() ประกอบทุกชิ้น (
 | `reporting/` | ส่งออก (TDD + coverage gate) | `dispatcher.ts` (channel→sender + payload-shape routing), `googleChat.ts` (`ChatPayload` union), `chatCard.ts`/`cardText.ts`/`dateFormat.ts` (cardsV2 builder + helpers), `sheets.ts` (Sink + Sender — scrape **File WWC** [Weighted Word Count] จาก Active grid ลง PM_Tracking Sheet; Sheet **v3**: 14 คอลัมน์, File WWC ที่คอลัมน์ **I**, `_job_key` ที่ **N** — ย้ายจาก v2 13 คอลัมน์/`_job_key` ที่ M), `xtmNotifier.ts` (EN card builders), `dailyReport.ts` (รายงาน 09:00), `systemAlerts.ts` (EN alert cards) |
 | `runtime/` | orchestration + entry points | (ดู Entry points ด้านบน) + `rateLimiter.ts`, `scheduler.ts` |
 | `monitoring/` | สุขภาพระบบ | `heartbeat.ts` (Healthchecks), `logger.ts` (pino + redaction) |
+| `shared/` | ใช้ร่วมกัน**สองบอท** (มี coverage gate) | `outboxRetry.ts` (ตารางเวลา retry), `rollingLogger.ts` (rotation/retention/censor), `sqliteOpen.ts` (open→WAL→migrate→quarantine) |
+| `straker/` | **บอทตัวที่สอง ครบวงจรในตัวเอง** (มี coverage gate) | `httpClient.ts` (transport ที่เดียว — DC-4), `pollCycle.ts` (fetch→diff→gate→act→persist→notify — ชื่อ step เดียวกับ XTM จงใจ), `claim.ts`/`claimDecision.ts`/`claimOutcome.ts`, `reconcile.ts` (ทุก 15 นาที — คืนโควต้างานที่เสร็จ), `ledger.ts` (เพดานราย deadline day), `strakerStore.ts`/`outbox.ts`, `notifier.ts`/`trackingSink.ts`/`dispatcher.ts`, `combinedSummary.ts` (อ่านสองพอร์ทัล read-only), `main.ts` (composition root) |
+
+**R11 bulkhead — กฎที่ test บังคับ ไม่ใช่สไตล์**: ไฟล์ใน `src/straker/**` **ห้าม
+value-import** `src/state/` หรือ `src/config/` (ข้อยกเว้น type-only ตัวเดียวที่บันทึกไว้:
+`outcomePolicy.ts`) และฝั่ง XTM มีไฟล์เดียวที่เอื้อมเข้า `src/straker/` ได้คือ
+`runtime/xtmPollLoop.ts` → `combinedReportRows`. เพิ่ม import ใหม่ = `isolation.test.ts`
+แดงทันที. อีกกฎคู่กัน **DC-4**: ทุกอย่างที่ยิง request ต้องอยู่ใน `httpClient.ts` ไฟล์เดียว
 
 **XtmPortalClient** (interface ใน `src/portal/xtmClient.ts`) แยก Playwright I/O
 ออกจาก orchestration — `XtmPollCycle` พึ่ง interface `XtmAcceptor`/`ClosedReader`
@@ -178,6 +203,14 @@ config โหลด+ตรวจด้วย zod ใน `src/config/index.ts` �
 - Sheets: `GOOGLE_SHEETS_ID`, `SHEETS_TAB_NAME` + ไฟล์ `google-credentials.json`
 - แจ้งเตือน/heartbeat: `GOOGLE_CHAT_WEBHOOK_SYSTEM`, `GOOGLE_CHAT_WEBHOOK_TEAM`
   (กลุ่มทีม — daily report + งานที่กดรับ; secret + redacted), `HEALTHCHECKS_PING_URL`
+
+**บอท Straker มี config คนละชุด** (`src/straker/config.ts` — โหลดแยก ไม่ใช้
+`src/config/index.ts` เพราะ R11) ตัวที่ required: `STRAKER_BASE_URL`,
+`STRAKER_LOGIN_ID`, `STRAKER_PASSWORD`, `STRAKER_MAX_WORDS_PER_DAY`,
+`STRAKER_SHEETS_ID`, `STRAKER_CHAT_WEBHOOK_OFFERS`,
+`STRAKER_HEALTHCHECKS_PING_URL` + ใช้ `GOOGLE_CHAT_WEBHOOK_SYSTEM` และ
+`GOOGLE_SERVICE_ACCOUNT_KEY_PATH` **ร่วมกับ XTM โดยตั้งใจ** (on-call ดูที่เดียว —
+ตัวแปรเดียวกันคือสิ่งที่กันไม่ให้สองบอทหลุดไปคนละห้อง)
 
 ตัวคุม accept (`ACCEPT_*`) + tuning (`POLL_INTERVAL_MS` ฯลฯ) มี default
 ปลอดภัย — `ACCEPT_ENABLED`/`ACCEPT_RECON` ปริยาย = ปิด. กลุ่ม **`ACCEPT_SCHEDULE_*`**
@@ -233,7 +266,11 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
   helper `schedule/acceptCapacity.ts` (`decideGroupCapacity`, all-or-nothing per bulk-group **ครอบทั้ง
   feasibility + capacity** กัน owned-but-Rejected); seed จาก held ครั้งเดียว/รอบ **ก่อน** record
   (memoize, advance per-DL-day). audit: `XtmCycleSummary.acceptedDueDays` log `resultingBucketEffort` ตอน accept
-- daily report 09:00 (`dailyReport.ts`) ส่ง **เฉพาะวันทำการ** (PR #8) — **`📋 Daily Report`:
+- daily report 09:00 (`dailyReport.ts`) ส่ง **เฉพาะวันทำการ** (PR #8) **และเฉพาะเมื่อมี
+  อะไรจะรายงาน** (PR #32) — ไม่มีงานถือ + อีกพอร์ทัลก็ว่าง = **ไม่ส่ง** แล้ว log
+  `action:daily_report outcome:skipped` แทน (เงียบเพราะออกแบบ ≠ เงียบเพราะพัง — ดูจาก log
+  บรรทัดนั้น และ heartbeat ต้องยังเขียว). กฎ fail-safe: แถวที่ระบบไม่รู้จัก = ถือว่ามีเนื้อหา
+  แล้วส่ง — **`📋 Daily Report`:
   Due today (Σ คำ held ที่ **effective deadline day = วันนี้** — งานที่ DL เวลาก่อน 09:00 นับเข้า**วันทำงานก่อนหน้า**
   ไม่ใช่วันที่ปฏิทินดิบ; cutoff PR #19) / ⚠️ Overdue (instant `dueAtMs<now`) / In progress top-5 by
   deadline** สร้างจาก held list, **throw-safe + อยู่ใน try/catch ของ loop** (bug รายงานไม่ page; PR
@@ -256,6 +293,51 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
   (deadline day)** ที่ budget คำเต็มจริง (dedup `daily_cap_reached:<วันDL>` — 2 วัน DL ล้นในวัน
   Bangkok เดียวกันได้ 2 alert; PR #15); ไม่ใช่งานเดี่ยวใหญ่เกิน cap (อันนั้น = "accept manually").
 
+## jobcatch-straker (live 2026-09-16 — runbook)
+
+บอทตัวที่สอง **HTTP ล้วน ไม่มี browser**: อ่านรายการงานเปิดที่ `vendr.straker.ai`
+ทุก 10 วินาที → ตัดสิน → **ยิง claim แข่งกับเวนเดอร์เจ้าอื่น**. ต่างจาก XTM ตรงที่
+การคว้างาน**ย้อนกลับไม่ได้** ดีไซน์เลยเอียงไปทาง "ไม่คว้า" เสมอเมื่อไม่แน่ใจ.
+
+**พฤติกรรมที่ดูเหมือน bug แต่ตั้งใจ — อ่านก่อนแจ้งว่าพัง:**
+
+- **แพ้การแข่งแล้ว alert ทุกครั้ง** — `CONFIRMED_LOST_RACE_SIGNALS` ใน `claimOutcome.ts`
+  **จงใจว่างเปล่า** จนกว่า RP-4 จะยืนยันสัญญาณจริงจากพอร์ทัล. ระหว่างนี้ทุกการถูกปฏิเสธ
+  ถูกจัดเป็น `failed` ซึ่งเป็นฝั่งที่ปลอดภัย (FR-005a) แต่เสียงดัง. **ปิดเคสนี้ = เติมค่า
+  เดียวลง array นั้น** หลังเห็นของจริงหนึ่งครั้ง (SC-007 ติดป้าย conditional ไว้แล้ว)
+- **เพดาน 50 คำ/วัน ต่ำผิดปกติ** — ตั้งใจ ระหว่าง RP-4 ยังเปิด. งานที่เคยเห็นมี 2-4 คำ
+  จึงยังรับได้หลายงาน แต่ถ้ามีงานอ้างว่า 500 คำโผล่มาจะถูกปฏิเสธ + alert ซึ่งคือ
+  สัญญาณที่อยากได้พอดี (แปลว่า `words` อาจไม่ใช่หน่วย effort ที่เราเข้าใจ).
+  `STRAKER_THROUGHPUT_WORDS_PER_HOUR=389` **pin ไว้** ไม่ให้ derive จากเพดานต่ำ ๆ
+- **โดน 403 = หยุดกดรับถาวร** ข้ามรอบและข้าม restart (เก็บใน `straker_meta`).
+  ปลดด้วย `npm run straker:unbar` **เท่านั้น** — ไม่มี auto-recovery เพราะบัญชีที่
+  login ได้ก็โดนแบนพร้อมกันได้. ระหว่างโดนแบนยัง **อ่าน/บันทึก/reconcile ต่อ**
+- **claim ไม่เคย retry** ไม่ว่ากรณีใด (R7/FR-019c) — ผลลัพธ์ที่ไม่รู้จะถูกปิดโดย
+  reconcile ทุก 15 นาทีแทน ไม่ใช่ยิงซ้ำ
+
+**"ทำไมบอทไม่คว้างาน X":** เปิด Google Sheet (`NZTC Tracking` → แท็บ
+`Straker_Tracking`) → คอลัมน์ **Skip reason** บอกเหตุผลตรง ๆ; ถ้าไม่มีแถวเลย
+แปลว่าบอทไม่เคย*เห็น*งานนั้น → ดู log `module:pollCycle action:cycle` ว่ารอบนั้น
+`offers` เป็นเท่าไร. เหตุผลที่เจอบ่อย: เกินเพดานวันนั้น · ทำไม่ทันในเวลาทำงานก่อน DL ·
+DL ตรงวันหยุด · อ่าน effort/deadline ไม่ได้ (อันนี้ alert ด้วย — FR-023a)
+
+**คำสั่ง ops (อ่านอย่างเดียวทั้งหมด ยกเว้น unbar/requeue):**
+
+```powershell
+npm run straker:win-rate        # won / winnable — FR-017; ทั้ง record ถ้าไม่ใส่ --days
+npm run report:combined         # workload สองพอร์ทัลรวม + retries + uptime
+npm run straker:outbox:requeue  # dead -> pending (รันหลังแก้ปลายทางแล้วเท่านั้น)
+npm run straker:unbar           # ปลดล็อกหลัง 403 — ต้องมีคนตัดสินใจ
+```
+
+**หยุดบอท:** `pm2 stop jobcatch-straker` (XTM ไม่กระทบ — คนละ process คนละ port).
+ยังไม่มี kill-switch แบบ `ACCEPT_ENABLED=0` ของ XTM — ถ้าอยากให้อ่านอย่างเดียว
+ต้องหยุดทั้งตัว
+
+**ยังค้าง (งานของเจ้าของ):** RP-1 rotate รหัสผ่าน · RP-2 อ่าน portal terms แล้วบันทึก
+ข้อสรุปพร้อมชื่อ · RP-4 เฝ้าดูงานจริง 1 งาน. ทั้งสามอยู่ใน
+`specs/003-straker-offer-race/release-preconditions.md`
+
 ## ข้อควรระวังเฉพาะโปรเจกต์
 
 - **Secrets อยู่ใน `.env` เท่านั้น** (gitignored): portal credentials,
@@ -265,7 +347,9 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
 - **ห้ามให้ repo อยู่ใต้ Google Drive / OneDrive backup** — .gitignore ไม่กัน cloud
   sync; `.env` + `google-credentials.json` + `state/storageState.json` จะรั่วขึ้น cloud
   (ตรวจในแอป Google Drive → Settings → Folders)
-- **single-instance**: บอท bind `127.0.0.1:47811` ตอน start (`SINGLE_INSTANCE_PORT`) —
+- **single-instance**: **คนละ port ต่อบอท** — XTM `127.0.0.1:47811`
+  (`SINGLE_INSTANCE_PORT`), Straker `127.0.0.1:47812` (`STRAKER_SINGLE_INSTANCE_PORT`;
+  config ปฏิเสธถ้าตั้งเป็น 47811 หรือ state dir ชนกัน). บอท bind ตอน start —
   ตัวที่ 2 จะ refuse + ping Healthchecks `/fail`. deploy/restart ใช้ `npm run deploy`
   เท่านั้น (ห้าม `pm2 restart` มือ). ดู [[acolad-run-via-pm2-single-instance]]
 - **reboot survival**: `pm2-windows-startup` ปลุก PM2 หลัง logon — ต้องเปิด auto-logon
@@ -285,9 +369,8 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
     ดูเขียวสวย แต่ไม่ page ใคร เพราะ integration ไม่สืบทอดจาก check เดิม
   - **ชื่อ check สำคัญ**: ข้อความที่เข้า Google Chat ใช้ชื่อ check เป็นตัวบอกว่าบอทไหนตาย
     (ชื่อเดิมคือ `My First Check` ซึ่งตอนตีสองบอกอะไรไม่ได้เลย)
-- **Straker โดนแบน (403)**: บอทจะ **หยุดกดรับถาวร** (เก็บใน `straker_meta` — restart ไม่ล้าง) แต่ยัง
-  อ่าน/บันทึก/reconcile ต่อ. alert `account_barred` เด้งครั้งเดียวตอนเจอ. ปลดล็อกด้วย
-  `npm run straker:unbar` **เท่านั้น** — ไม่มี auto-recovery เพราะบัญชีที่ login ได้ก็โดนแบนพร้อมกันได้
+- **Straker โดนแบน (403)** และพฤติกรรมอื่นที่ดูเหมือน bug แต่ตั้งใจ — ดูหัวข้อ
+  **jobcatch-straker (runbook)** ด้านบน
 - PowerShell 5.1 เป็น shell หลักของเครื่องนี้ (ไม่มี `&&` — ใช้ `;`)
 - จังหวะเรียก portal มีเพดานเข้มงวด (กันบัญชีถูกระงับ): ห้ามลด interval
   ต่ำกว่า 20s หรือเพิ่มความถี่คำขอโดยไม่แก้ FR-011 ใน spec ก่อน
