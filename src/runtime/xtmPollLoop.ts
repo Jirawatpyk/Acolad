@@ -7,7 +7,11 @@ import { Dispatcher } from '../reporting/dispatcher.js';
 import { GoogleChatSender, type ChatSender } from '../reporting/googleChat.js';
 import type { SheetSender } from '../reporting/sheets.js';
 import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
-import { buildDailyReportCard, dueDailyReport } from '../reporting/dailyReport.js';
+import {
+  buildDailyReportCard,
+  dueDailyReport,
+  reportWorthSending,
+} from '../reporting/dailyReport.js';
 // The Straker side of FR-018's combined view. A one-symbol dependency on purpose: this
 // loop is the live bot's, and the surface it takes on should be as small as the
 // requirement allows. `combinedReportRows` is documented never to throw.
@@ -378,58 +382,82 @@ export class XtmPollLoop {
           const held = this.store.listByLifecycle('accepted');
           // Bucket "Due today" by the EFFECTIVE deadline day (the working day the work lands on)
           // so the report's headline matches the capacity cap — same mapper the cycle uses.
-          const card = buildDailyReportCard(
-            held,
-            nowMs,
-            this.cfg.XTM_ACOLAD_OFFERS_URL,
-            this.cfg.activeMaxPerDay,
-            makeEffectiveDayOf(
-              this.cfg.hoursStartMin,
-              this.cfg.workdays,
-              holidaysForEffectiveDay(nowMs),
-            ),
-            // #8: only advertise the per-deadline cap when the schedule gate is ON. With the gate
-            // off the cap is not enforced (accept 24/7), so the headline must not claim a limit.
-            this.cfg.ACCEPT_SCHEDULE_ENABLED,
-            this.cfg.ACCEPT_EFFORT_METRIC,
-            // FR-018 / US3: the other portal's committed workload and the combined total.
-            // The two bots keep separate ledgers — total isolation, at the accepted cost
-            // that the two daily ceilings can sum past what the one crew can actually do.
-            // Shared visibility is the agreed mitigation, and this report is the only place
-            // a human reliably looks, so it is where the mitigation has to appear.
-            //
-            // `combinedReportRows` never throws and degrades to rows that state the gap, so
-            // a Straker record that cannot be read costs the extra section and not the
-            // report. That matters here specifically: PR #14 fixed a bug in this report that
-            // took the whole poll loop down.
-            combinedReportRows({
-              xtm: {
-                stateDir: this.cfg.STATE_DIR,
-                metric: this.cfg.ACCEPT_EFFORT_METRIC,
-                ceilingPerDay: this.cfg.activeMaxPerDay,
-                dayOf: effectiveDayMapper(
-                  this.cfg.hoursStartMin,
-                  this.cfg.workdays,
-                  holidaysForEffectiveDay(nowMs),
-                ),
-              },
-              nowMs,
-            }),
-          );
-          this.db.transaction(() => {
-            this.outbox.enqueue(`daily:${date}`, JSON.stringify(card), this.clock.nowIso(), 'team');
-            this.meta.set('last_daily_report_date', date);
-          })();
-          this.logger.info(
-            {
-              module: 'xtmPollLoop',
-              action: 'daily_report',
-              outcome: 'enqueued',
-              date,
-              held: held.length,
+          const companion = combinedReportRows({
+            xtm: {
+              stateDir: this.cfg.STATE_DIR,
+              metric: this.cfg.ACCEPT_EFFORT_METRIC,
+              ceilingPerDay: this.cfg.activeMaxPerDay,
+              dayOf: effectiveDayMapper(
+                this.cfg.hoursStartMin,
+                this.cfg.workdays,
+                holidaysForEffectiveDay(nowMs),
+              ),
             },
-            'daily in-progress report enqueued',
-          );
+            nowMs,
+          });
+
+          // Nothing to say is a reason not to speak. The team has had an identical empty card
+          // every working day since 2026-07-15, and a notification that never varies trains
+          // people not to open the one that does. Liveness is the heartbeat's job, not this
+          // card's (Constitution IV, SC-010).
+          if (!reportWorthSending(held, companion)) {
+            // The DAY is recorded as decided, not just the send. Without this the loop would
+            // re-ask every twenty seconds until midnight — re-reading the job store and
+            // reopening Straker's database each time — and a job arriving at 15:00 would fire
+            // a "daily" report in the afternoon, which is not what a 09:00 summary is. That
+            // job announces itself when it is accepted; it does not need this card too.
+            this.meta.set('last_daily_report_date', date);
+            this.logger.info(
+              { module: 'xtmPollLoop', action: 'daily_report', outcome: 'skipped', date },
+              'no work held and nothing else to report — daily report not sent',
+            );
+          } else {
+            const card = buildDailyReportCard(
+              held,
+              nowMs,
+              this.cfg.XTM_ACOLAD_OFFERS_URL,
+              this.cfg.activeMaxPerDay,
+              makeEffectiveDayOf(
+                this.cfg.hoursStartMin,
+                this.cfg.workdays,
+                holidaysForEffectiveDay(nowMs),
+              ),
+              // #8: only advertise the per-deadline cap when the schedule gate is ON. With the gate
+              // off the cap is not enforced (accept 24/7), so the headline must not claim a limit.
+              this.cfg.ACCEPT_SCHEDULE_ENABLED,
+              this.cfg.ACCEPT_EFFORT_METRIC,
+              // FR-018 / US3: the other portal's committed workload and the combined total.
+              // The two bots keep separate ledgers — total isolation, at the accepted cost
+              // that the two daily ceilings can sum past what the one crew can actually do.
+              // Shared visibility is the agreed mitigation, and this report is the only place
+              // a human reliably looks, so it is where the mitigation has to appear.
+              //
+              // `combinedReportRows` never throws and degrades to rows that state the gap, so
+              // a Straker record that cannot be read costs the extra section and not the
+              // report. That matters here specifically: PR #14 fixed a bug in this report that
+              // took the whole poll loop down.
+              companion,
+            );
+            this.db.transaction(() => {
+              this.outbox.enqueue(
+                `daily:${date}`,
+                JSON.stringify(card),
+                this.clock.nowIso(),
+                'team',
+              );
+              this.meta.set('last_daily_report_date', date);
+            })();
+            this.logger.info(
+              {
+                module: 'xtmPollLoop',
+                action: 'daily_report',
+                outcome: 'enqueued',
+                date,
+                held: held.length,
+              },
+              'daily in-progress report enqueued',
+            );
+          }
         } catch (e) {
           this.logger.error(
             {

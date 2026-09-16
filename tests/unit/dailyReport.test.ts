@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { dueDailyReport, buildDailyReportCard } from '../../src/reporting/dailyReport.js';
+import {
+  dueDailyReport,
+  buildDailyReportCard,
+  reportWorthSending,
+} from '../../src/reporting/dailyReport.js';
 import { bangkokDateString } from '../../src/schedule/bangkokCalendar.js';
 import { makeEffectiveDayOf, deadlineDayOf } from '../../src/schedule/deadlineDay.js';
 import type { XtmJobState } from '../../src/detection/types.js';
@@ -560,5 +564,106 @@ describe('the companion portal section (FR-018, US3, V17)', () => {
     );
 
     expect(card).toContain('no combined total');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A report with nothing in it is noise, not reassurance
+// ---------------------------------------------------------------------------
+describe('reportWorthSending — an empty daily report is not sent', () => {
+  /**
+   * The XTM bot has held no jobs since 2026-07-15 (recorded in
+   * `specs/003-straker-offer-race/xtm-baseline.md`), so every working day at 09:00 the team
+   * has been getting a card that says "0 words · No jobs in progress" and nothing else. A
+   * notification that is always identical trains people to stop opening it — which is a cost
+   * paid by the NEXT card, the one that does say something.
+   *
+   * Liveness is not the reason to keep sending it. That is the heartbeat's job
+   * (Constitution IV, SC-010), and it is a better instrument: it pages when the bot is
+   * silent, whereas a daily card only tells you the bot was alive at 09:00.
+   */
+  it('sends when the team holds work — the ordinary case', () => {
+    expect(reportWorthSending([makeJob()], [])).toBe(true);
+  });
+
+  it('does not send when there is no work and nothing else to say', () => {
+    expect(reportWorthSending([], [])).toBe(false);
+  });
+
+  it('still sends when a companion row carries a warning, because a fault is worth saying', () => {
+    // The combined section degrades to rows that STATE a gap rather than going quiet — an
+    // unreadable Straker record, a total that cannot be shown because the units differ. Those
+    // rows are the whole reason the section is trustworthy, and suppressing them would make
+    // "no report" mean both "nothing to do" and "something is broken".
+    expect(
+      reportWorthSending([], [{ emoji: '⚠️', label: 'Straker', value: 'record unreadable — …' }]),
+    ).toBe(true);
+  });
+
+  it('does not send for companion rows that merely report nothing', () => {
+    // "0 words committed" on both portals is the same non-event as an empty XTM list.
+    expect(
+      reportWorthSending(
+        [],
+        [
+          { label: 'XTM', value: '0 words committed' },
+          { label: 'Straker', value: '0 words committed' },
+          { label: 'Both portals', value: '0 words committed' },
+        ],
+      ),
+    ).toBe(false);
+  });
+
+  it('treats a warning anywhere in the companion as enough, not only the first row', () => {
+    expect(
+      reportWorthSending(
+        [],
+        [
+          { label: 'XTM', value: '0 words committed' },
+          { emoji: '⚠️', label: 'Both portals', value: 'no combined total — units differ' },
+        ],
+      ),
+    ).toBe(true);
+  });
+
+  it('recognises the real combined rows as nothing, not a hand-written imitation of them', async () => {
+    // The rule matches on the text `combinedReportRows` produces, so it is pinned against that
+    // function's ACTUAL output rather than against a string copied into this file. Reword the
+    // combined section and this test fails — which is the point: the alternative is suppression
+    // silently switching off (harmless) or, worse, an unrecognised row being treated as empty.
+    const { combinedReportRows, effectiveDayMapper } =
+      await import('../../src/straker/combinedSummary.js');
+    const { openDatabase } = await import('../../src/state/db.js');
+    const { openStrakerDatabase } = await import('../../src/straker/strakerStore.js');
+    const { mkdtempSync, mkdirSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+
+    const nowMs = Date.parse('2026-06-25T10:00:00+07:00');
+    const root = mkdtempSync(join(tmpdir(), 'daily-empty-'));
+    try {
+      openDatabase(root, new Date(nowMs).toISOString()).db.close();
+      const strakerDir = join(root, 'straker');
+      mkdirSync(strakerDir, { recursive: true });
+      openStrakerDatabase(strakerDir, nowMs).db.close();
+
+      const companion = combinedReportRows({
+        xtm: {
+          stateDir: root,
+          metric: 'words',
+          ceilingPerDay: 1_000,
+          dayOf: effectiveDayMapper(9 * 60, new Set([1, 2, 3, 4, 5]), new Map()),
+        },
+        strakerStateDir: strakerDir,
+        nowMs,
+      });
+
+      // Both records readable, neither holding anything: the live situation, and the one case
+      // where staying quiet is right.
+      expect(companion.length).toBeGreaterThan(0);
+      expect(reportWorthSending([], companion)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
