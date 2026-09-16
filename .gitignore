@@ -30,3 +30,7 @@ Thumbs.db
 
 # Claude Code per-agent scratch memory (machine-local)
 .claude/agent-memory/
+
+# Straker Phase 0 probe runtime state (rewritten every cycle). The captured offer
+# payloads and events.ndjson are the deliverable and stay tracked.
+fixtures/straker/tracker-state.json

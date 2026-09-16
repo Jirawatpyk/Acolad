@@ -7,3 +7,10 @@ feature.json
 
 # Per-machine extension config overrides.
 extensions/*/local-config.yml
+
+# speckit-superpowers-bridge runtime state. Per-developer, never shared — the
+# extension's own .gitignore declares these, but it sits inside the extension
+# folder and so cannot cover them here at the .specify/ root.
+bridge-events.jsonl
+bridge-snapshots/
+superpowers-handoff.json

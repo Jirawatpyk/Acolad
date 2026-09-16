@@ -1,7 +1,6 @@
 import Database from 'better-sqlite3';
-import { mkdirSync, renameSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { computeXtmJobKey } from '../detection/jobKey.js';
+import { openSqliteWithQuarantine } from '../shared/sqliteOpen.js';
 
 export type DB = Database.Database;
 
@@ -83,12 +82,16 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 `;
 
-export interface OpenResult {
-  db: DB;
-  /** True when the previous db file was corrupt and quarantined (FR-017). */
-  recoveredFromCorruption: boolean;
-  corruptCopyPath?: string;
-}
+/**
+ * The outcome of opening the state file, as a union: the quarantine flag and the path to
+ * the quarantined copy are one fact, so a `true` always names its file. They used to be
+ * two independent fields, which is why `bootstrap.ts` carried a `?? 'n/a'` for a state
+ * `openDatabase` cannot produce — an alert that says a file was moved aside and not where.
+ */
+export type OpenResult =
+  | { db: DB; recoveredFromCorruption: false }
+  /** Quarantined as `acolad.db.corrupt-<ts>` (FR-017). */
+  | { db: DB; recoveredFromCorruption: true; corruptCopyPath: string };
 
 /**
  * A migration step failed for a LOGIC reason (a bug in our migration code — e.g. an
@@ -104,42 +107,41 @@ export class MigrationError extends Error {
   }
 }
 
+/** This bot's state file. Named here so the quarantine copy is named from it too. */
+const DB_FILENAME = 'acolad.db';
+
 /**
  * Open (and migrate) the SQLite state db with WAL. On a corrupt/unopenable file
  * the original is quarantined as acolad.db.corrupt-<ts> (never overwritten) and
  * a fresh db is created — caller treats this as a cold start + alert (FR-017).
- * A `MigrationError` (our own migration logic bug) is re-thrown, NOT quarantined.
+ * A `MigrationError` (our own migration logic bug) is re-thrown, NOT quarantined —
+ * quarantining there would rename a perfectly valid acolad.db and silently discard all
+ * job history for a code bug (PR #23).
+ *
+ * The open/quarantine sequence itself lives in `shared/sqliteOpen.ts`, which both bots
+ * use; what stays here is what is this bot's own — the filename, the migration, and which
+ * error means "our code is wrong".
  */
 export function openDatabase(stateDir: string, nowIso: string): OpenResult {
-  mkdirSync(stateDir, { recursive: true });
-  const dbPath = join(stateDir, 'acolad.db');
-
-  let attempt: DB | undefined;
-  try {
-    attempt = new Database(dbPath);
-    attempt.pragma('journal_mode = WAL');
-    migrate(attempt);
-    return { db: attempt, recoveredFromCorruption: false };
-  } catch (err) {
-    // Release any handle opened above so the file can be renamed (Windows EBUSY).
-    try {
-      attempt?.close();
-    } catch {
-      // ignore — best-effort close before quarantine
-    }
-    // A migration LOGIC error (our code threw) is NOT file corruption. Quarantining here would
-    // rename a perfectly valid acolad.db to .corrupt and silently discard all job history for a
-    // code bug. Crash loud instead: propagate so the bot fails to start + pages, db preserved.
-    if (err instanceof MigrationError) throw err;
-    if (!existsSync(dbPath)) throw err;
-    const stamp = nowIso.replace(/[:.]/g, '-');
-    const corruptCopyPath = join(stateDir, `acolad.db.corrupt-${stamp}`);
-    renameSync(dbPath, corruptCopyPath);
-    const db = new Database(dbPath);
-    db.pragma('journal_mode = WAL');
-    migrate(db);
-    return { db, recoveredFromCorruption: true, corruptCopyPath };
-  }
+  const opened = openSqliteWithQuarantine({
+    dir: stateDir,
+    fileName: DB_FILENAME,
+    nowIso,
+    migrate,
+    isLogicError: (err) => err instanceof MigrationError,
+  });
+  // Rebuilt rather than spread, on purpose: `OpenResult` carries no `path`, and its
+  // `corruptCopyPath` must stay ABSENT (not present-and-undefined) on the healthy path —
+  // the shape callers have always been handed. Branching on the flag rather than on the
+  // path's absence because `OpenedSqlite` is now a union that carries the path only on the
+  // quarantined side; the two conditions were always the same condition.
+  return opened.recoveredFromCorruption
+    ? {
+        db: opened.db,
+        recoveredFromCorruption: true,
+        corruptCopyPath: opened.corruptCopyPath,
+      }
+    : { db: opened.db, recoveredFromCorruption: false };
 }
 
 /**

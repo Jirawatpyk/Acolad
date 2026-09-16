@@ -88,6 +88,7 @@ export function buildDailyReportCard(
   effectiveDay: (dueDate: string | null) => string | null = deadlineDayOf,
   capEnforced = true,
   metric: EffortMetric = 'words',
+  companion: readonly CardRow[] = [],
 ): { cardsV2: unknown[] } {
   const today = bangkokDateString(nowMs);
   // Derive the unit noun from the metric so callers need only pass `metric`.
@@ -149,6 +150,19 @@ export function buildDailyReportCard(
   if (held.length === 0) rows.push({ label: '—', value: 'No jobs in progress' });
   const more = sorted.length - top.length;
   if (more > 0) rows.push({ label: '—', value: `(+${more} more)` });
+
+  // The other portal's figures, and the combined total (FR-018, US3). Appended last, so a
+  // reader's eye lands on this bot's own workload first and the cross-portal view reads as
+  // the context it is.
+  //
+  // **Already-decided rows, not data.** Whether a combined total may be shown at all is a
+  // real decision — the two portals can measure in different units, and one record can be
+  // unreadable, in which case a partial total presented as a whole one is worse than no
+  // total. That decision lives in `src/straker/combinedSummary.ts`, and this builder
+  // deliberately does not import it: the live bot's daily report must not be able to break
+  // because Straker's internals changed. An empty list is the ordinary case and renders the
+  // card exactly as it was before this existed.
+  rows.push(...companion);
 
   // Header date: `today` is already a Bangkok 'YYYY-MM-DD' (from bangkokDateString), so reverse its
   // parts to 'DD/MM/YYYY' — no parse round-trip / slice fragility.

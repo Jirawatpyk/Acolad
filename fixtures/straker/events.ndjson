@@ -1,0 +1,7 @@
+{"kind":"read_failed","atMs":1789343390255,"reason":"StrakerHttpError: Straker /api/vendors/4a249411-d3a9-4057-8e95-9a5d59f8e804/job-offers?status=open replied 502: <html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>nginx/1.27.5</center>\r\n</body>\r\n</html>\r\n"}
+{"kind":"appeared","objId":"2a956065-dffa-420a-8893-6cd54bcce3d6","atMs":1789429082114,"sighting":1}
+{"kind":"appeared","objId":"66ae223e-8828-45f7-91c8-e6a841cc346e","atMs":1789429092794,"sighting":1}
+{"kind":"vanished","objId":"2a956065-dffa-420a-8893-6cd54bcce3d6","atMs":1789429680070,"lifetimeMs":587265,"upperBoundMs":597956}
+{"kind":"vanished","objId":"66ae223e-8828-45f7-91c8-e6a841cc346e","atMs":1789431041036,"lifetimeMs":1937575,"upperBoundMs":1948242}
+{"kind":"appeared","objId":"94fd32c1-d02b-4442-bc20-24c07b04fd50","atMs":1789455387856,"sighting":1}
+{"kind":"vanished","objId":"94fd32c1-d02b-4442-bc20-24c07b04fd50","atMs":1789455602461,"lifetimeMs":203936,"upperBoundMs":214605}

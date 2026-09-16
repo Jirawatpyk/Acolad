@@ -194,7 +194,9 @@ describe('openDatabase corruption recovery (FR-017)', () => {
     writeFileSync(join(dir, 'acolad.db'), 'not a sqlite file at all');
     const res = openDatabase(dir, NOW);
     expect(res.recoveredFromCorruption).toBe(true);
-    expect(res.corruptCopyPath).toBeDefined();
+    // Narrowed rather than optional-chained: `OpenResult` is a union, so the path is not
+    // merely likely to be there after a quarantine — it is part of what a quarantine is.
+    expect(res.recoveredFromCorruption && res.corruptCopyPath).toMatch(/acolad\.db\.corrupt-/);
     expect(new MetaStore(res.db).get('schema_version')).toBe('2');
     res.db.close();
   });

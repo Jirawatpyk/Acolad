@@ -99,10 +99,12 @@ async function main(): Promise<void> {
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
-  // PM2 on Windows cannot deliver POSIX signals to a daemon-spawned process; started with
-  // `--shutdown-with-message` it sends an IPC 'shutdown' message instead. Handle it so
-  // `pm2 stop`/deploy triggers the bounded teardown rather than waiting out kill_timeout
-  // and SIGKILLing mid-cycle (which orphans Chromium). Harmless if the message never comes.
+  // PM2 on Windows cannot deliver POSIX signals to a daemon-spawned process, and the IPC
+  // alternative is not reachable either: `--shutdown-with-message` does not exist in PM2 7,
+  // which is what runs here. So none of the three handlers above fires under PM2 — no
+  // shutdown line has ever appeared in this bot's log — and `pm2 stop` kills the process
+  // instead of running the bounded teardown. Kept because Ctrl-C in a terminal DOES reach
+  // them, and because a PM2 release that delivers either would then need no change here.
   process.on('message', (msg) => {
     if (msg === 'shutdown') shutdown('shutdown-message');
   });

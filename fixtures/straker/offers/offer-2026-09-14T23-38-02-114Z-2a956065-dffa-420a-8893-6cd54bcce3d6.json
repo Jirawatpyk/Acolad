@@ -1,0 +1,17 @@
+{
+  "obj_id": "2a956065-dffa-420a-8893-6cd54bcce3d6",
+  "job_ref": "aj-265",
+  "title": "REQ34204, Supreme_STRAKER.xlsx",
+  "source_lang": "en-us",
+  "target_lang": "th",
+  "service": "translation",
+  "words": 2,
+  "rate_type": "total_project",
+  "unit_cost": "1.0000",
+  "total_unit": "1.000",
+  "budget": "1.00",
+  "currency": "USD",
+  "due_at": "2026-09-15T23:20:00",
+  "listing_type": "direct_po",
+  "status": "open"
+}

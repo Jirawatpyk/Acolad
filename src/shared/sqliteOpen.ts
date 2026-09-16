@@ -1,0 +1,143 @@
+/**
+ * Opening a SQLite state file safely — the sequence both bots depend on and neither
+ * should have to remember.
+ *
+ * A bot that stores its own state has to answer one awkward question at every start: what
+ * if the file on disk is not usable? Losing it silently is unacceptable (it is the only
+ * record of what has already been done), and so is refusing to start forever. The answer
+ * both bots settled on is the same one: move the unusable file aside under a stamped name,
+ * start fresh, and tell the caller it happened so it can raise a cold start.
+ *
+ * The order of the steps carries the safety, which is why they are here rather than copied:
+ *
+ *  - **Close the handle before renaming.** Windows refuses to rename a file that is still
+ *    open (EBUSY), and the realistic corruption is the one that opens fine and fails on the
+ *    first real query — so at the moment of the rename the handle is open.
+ *  - **Re-throw the caller's own logic error instead of quarantining.** A bug in a migration
+ *    is not a corrupt file. The XTM bot learned this the expensive way (PR #23): treating
+ *    the two alike renames a perfectly good database and discards its history for what is a
+ *    code defect. The caller names its own error type; only it knows which is which.
+ *  - **Quarantine only when there is a file to quarantine.** An open that failed before
+ *    creating anything has nothing to rename, and reporting a recovery that did not happen
+ *    is worse than propagating the real error.
+ *  - **Let the caller narrow what "unusable" means, if it wants to.** By default any
+ *    failure that is not the caller's own logic error is treated as a broken file, which is
+ *    what the live XTM bot has always done and must keep doing. A caller that can name the
+ *    errors which really mean corruption says so through `isCorruption`, and everything
+ *    else then propagates untouched. Which default is right depends on what the file is
+ *    worth: see that field.
+ *
+ * What differs between the two callers is passed in, and it is only ever five things: the
+ * filename, the migration, which error means "our code is wrong", optionally which error
+ * means "the file is broken", and the clock reading that stamps the quarantine copy.
+ */
+
+import Database from 'better-sqlite3';
+import { existsSync, mkdirSync, renameSync } from 'node:fs';
+import { join } from 'node:path';
+
+export interface SqliteOpenSpec {
+  /** Directory to hold the file; created if absent. */
+  readonly dir: string;
+  /** The file's name within `dir`. Also the stem of any quarantine copy, so each bot's
+   *  quarantined file is filed under its own name. */
+  readonly fileName: string;
+  /** Caller's clock as an ISO timestamp; stamped into the quarantine name after `:` and
+   *  `.` are replaced, both being illegal in a Windows filename. */
+  readonly nowIso: string;
+  /** Bring the schema up to date. Runs against the opened file, and again against the
+   *  fresh one if the first had to be quarantined — so it must work on an empty database. */
+  readonly migrate: (db: Database.Database) => void;
+  /**
+   * True for the caller's own "this is a bug in our code, the file is fine" error. Such an
+   * error is re-thrown with the file left exactly as it was, so the bot fails to start
+   * loudly rather than quietly discarding history for a defect a deploy can fix.
+   */
+  readonly isLogicError: (err: unknown) => boolean;
+  /**
+   * True for an error that means the FILE ITSELF is unusable. Only such an error reaches
+   * the quarantine; anything else propagates with the file left exactly as it was.
+   *
+   * **Omit it and nothing changes**: every non-logic failure is treated as corruption, the
+   * behaviour `src/state/db.ts` has run on in production since 2026-06. That default is not
+   * a recommendation — it is a promise to the caller that already depends on it (SC-005).
+   *
+   * Supply one when the file is worth more than the startup. `new Database()`, the WAL
+   * pragma and a migration can all fail for reasons that say nothing about the bytes on
+   * disk: `SQLITE_BUSY`/`SQLITE_LOCKED` (a second instance, or a virus scanner, holding the
+   * file), `SQLITE_FULL` (the disk filled mid-DDL), `SQLITE_READONLY`/`EACCES`/`EPERM`
+   * (ACLs changed by a Windows update), `SQLITE_IOERR`, `SQLITE_PROTOCOL`. Quarantining on
+   * one of those renames an intact database away and hands back an empty one — and where a
+   * bot derives a limit from what that database holds, "empty" does not read as "broken",
+   * it reads as "nothing is committed yet", which is the quiet version of the failure.
+   *
+   * Asked AFTER `isLogicError`, never before: an error can satisfy both, and PR #23's
+   * lesson wins that tie.
+   */
+  readonly isCorruption?: ((err: unknown) => boolean) | undefined;
+}
+
+interface OpenedSqliteBase {
+  readonly db: Database.Database;
+  /** The file actually opened — returned rather than implied, so a caller (and an
+   *  isolation test) can assert which file this store touched. */
+  readonly path: string;
+}
+
+/** The ordinary outcome: the file on disk was usable, or there was none and one was made. */
+export interface SqliteOpenedClean extends OpenedSqliteBase {
+  readonly recoveredFromCorruption: false;
+}
+
+/** The previous file was unusable and was moved aside. The caller treats this as a cold
+ *  start **plus an alert** — and now always has a path to put in that alert. */
+export interface SqliteOpenedAfterQuarantine extends OpenedSqliteBase {
+  readonly recoveredFromCorruption: true;
+  readonly corruptCopyPath: string;
+}
+
+/**
+ * A union rather than a flag beside an optional path.
+ *
+ * The two used to be independent fields, so `{ recoveredFromCorruption: true }` with no
+ * path was constructible — and every consumer grew a fallback for it. `bootstrap.ts`
+ * printed `?? 'n/a'` into the XTM alert and Straker's queued alert said `?? 'unknown'`:
+ * an operator told their state file had been quarantined and not told where it went, for
+ * a state this function has never been able to produce. The union deletes the state and
+ * the fallbacks with it, and makes a caller check the flag before reaching for the path —
+ * which is the order it should have been read in anyway.
+ */
+export type OpenedSqlite = SqliteOpenedClean | SqliteOpenedAfterQuarantine;
+
+export function openSqliteWithQuarantine(spec: SqliteOpenSpec): OpenedSqlite {
+  const { dir, fileName, nowIso, migrate, isLogicError, isCorruption } = spec;
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, fileName);
+
+  let attempt: Database.Database | undefined;
+  try {
+    attempt = new Database(path);
+    attempt.pragma('journal_mode = WAL');
+    migrate(attempt);
+    return { db: attempt, path, recoveredFromCorruption: false };
+  } catch (err) {
+    // Release any handle opened above so the file can be renamed (Windows EBUSY).
+    try {
+      attempt?.close();
+    } catch {
+      // ignore — best-effort close before quarantine
+    }
+    if (isLogicError(err)) throw err;
+    // Asked second, and only when the caller supplied one. Absent, every non-logic failure
+    // still quarantines — the behaviour the live XTM bot depends on (SC-005).
+    if (isCorruption !== undefined && !isCorruption(err)) throw err;
+    if (!existsSync(path)) throw err;
+    const stamp = nowIso.replace(/[:.]/g, '-');
+    const corruptCopyPath = join(dir, `${fileName}.corrupt-${stamp}`);
+    renameSync(path, corruptCopyPath);
+    const db = new Database(path);
+    db.pragma('journal_mode = WAL');
+    migrate(db);
+    return { db, path, recoveredFromCorruption: true, corruptCopyPath };
+  }
+}

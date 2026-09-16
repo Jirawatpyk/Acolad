@@ -36,6 +36,11 @@ export default tseslint.config(
       'src/runtime/catchRateReport.ts',
       'src/runtime/once.ts',
       'src/runtime/main.ts',
+      // Straker's entry points are deliberately absent: `main.ts` reports only through
+      // `console.error`, which the rule already allows, and `winRateReport.ts`,
+      // `combinedSummary.ts` and `requeue.ts` write to `process.stdout` directly. None
+      // needs the exemption, and an allowlist entry that exempts nothing reads as
+      // permission the next person will use.
     ],
     rules: { 'no-console': 'off' },
   },

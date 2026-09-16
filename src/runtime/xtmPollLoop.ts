@@ -8,6 +8,10 @@ import { GoogleChatSender, type ChatSender } from '../reporting/googleChat.js';
 import type { SheetSender } from '../reporting/sheets.js';
 import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
 import { buildDailyReportCard, dueDailyReport } from '../reporting/dailyReport.js';
+// The Straker side of FR-018's combined view. A one-symbol dependency on purpose: this
+// loop is the live bot's, and the surface it takes on should be as small as the
+// requirement allows. `combinedReportRows` is documented never to throw.
+import { combinedReportRows, effectiveDayMapper } from '../straker/combinedSummary.js';
 import { getThaiHolidays, holidaysForEffectiveDay } from '../schedule/thaiHolidays.js';
 import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { makeEffectiveDayOf } from '../schedule/deadlineDay.js';
@@ -388,6 +392,29 @@ export class XtmPollLoop {
             // off the cap is not enforced (accept 24/7), so the headline must not claim a limit.
             this.cfg.ACCEPT_SCHEDULE_ENABLED,
             this.cfg.ACCEPT_EFFORT_METRIC,
+            // FR-018 / US3: the other portal's committed workload and the combined total.
+            // The two bots keep separate ledgers — total isolation, at the accepted cost
+            // that the two daily ceilings can sum past what the one crew can actually do.
+            // Shared visibility is the agreed mitigation, and this report is the only place
+            // a human reliably looks, so it is where the mitigation has to appear.
+            //
+            // `combinedReportRows` never throws and degrades to rows that state the gap, so
+            // a Straker record that cannot be read costs the extra section and not the
+            // report. That matters here specifically: PR #14 fixed a bug in this report that
+            // took the whole poll loop down.
+            combinedReportRows({
+              xtm: {
+                stateDir: this.cfg.STATE_DIR,
+                metric: this.cfg.ACCEPT_EFFORT_METRIC,
+                ceilingPerDay: this.cfg.activeMaxPerDay,
+                dayOf: effectiveDayMapper(
+                  this.cfg.hoursStartMin,
+                  this.cfg.workdays,
+                  holidaysForEffectiveDay(nowMs),
+                ),
+              },
+              nowMs,
+            }),
           );
           this.db.transaction(() => {
             this.outbox.enqueue(`daily:${date}`, JSON.stringify(card), this.clock.nowIso(), 'team');
