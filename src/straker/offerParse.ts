@@ -111,11 +111,16 @@ export interface DeadlineZone {
  * nothing could reveal what the portal meant, with a note that one line would change if the
  * answer turned out to be otherwise. This is that line, and the answer is **UTC**.
  *
- * **What settled it**: AJ-295 was recorded through both of the portal's endpoints within
- * twenty minutes. The offer list gave a zone-less `2026-09-17T15:00:00`; the assigned-jobs
- * list gave the same job with an explicit `Z`, which `reconcile.ts` parsed as 22:00 +07; and
- * the portal UI showed "17 Sept 2026, 22:00 GMT+7". Seven hours apart — Bangkok's own offset,
- * which is what a zone-less UTC string misread as local time produces exactly.
+ * **What settled it**: AJ-295's own job page, which states the zone outright —
+ * `Due date  17 Sep 2026 15:00 (UTC)`. The offer list had given the same job a zone-less
+ * `2026-09-17T15:00:00`: the detail page's figure with its label removed.
+ *
+ * The comparison that raised the suspicion first is still worth recording, because it is
+ * what a running bot can notice on its own. AJ-295 was recorded through both endpoints
+ * within twenty minutes — a zone-less `15:00` from the offer list, and the same job with an
+ * explicit `Z` from the assigned list, which `reconcile.ts` read as 22:00 +07. Seven hours
+ * apart, Bangkok's own offset, which is exactly what a zone-less UTC string misread as local
+ * time produces.
  *
  * **What it cost.** Assumption 1 worried about the optimistic direction — reading a deadline
  * later than it is, accepting work the team cannot finish. The error ran the other way, and
@@ -123,6 +128,18 @@ export interface DeadlineZone {
  * fitted comfortably was refused as `deadline_unreachable` and nothing looked broken. Two
  * jobs were lost that way on 2026-09-17 alone (08:19 and 17:15), both then claimed by hand.
  * A pessimistic clock does not page anyone; it just stops winning.
+ *
+ * **Before changing this back, read this paragraph.** The portal shows the same deadline two
+ * ways, and only one of them is about this field:
+ *
+ * - the job **list** renders it localised — "17 Sept 2026, 22:00 GMT+7"
+ * - the job **detail page** states it raw — "Due date  17 Sep 2026 15:00 (UTC)"
+ *
+ * Same instant, and the API sends the second one: `2026-09-17T15:00:00`, the detail page's
+ * figure with its `(UTC)` label dropped. Anyone who opens the list, sees GMT+7 and
+ * "corrects" this constant will reintroduce the seven-hour error with total confidence,
+ * because the screen appears to confirm it. **Open the job's detail page instead** — the
+ * portal labels the zone there itself, which is as direct as this gets.
  *
  * Still pinned in code rather than taken from `process.env.TZ`, so CI and the office machine
  * cannot disagree, and still overridable per call.
