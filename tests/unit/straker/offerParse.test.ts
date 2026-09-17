@@ -130,9 +130,9 @@ describe('parseOffer — the golden cases, read off disk', () => {
       eligible: true,
       monolingual: false,
       effortWords: 2,
-      // 2026-09-15T23:20:00 read as Bangkok. Asserted as an absolute instant with an
+      // 2026-09-15T23:20:00 read as UTC. Asserted as an absolute instant with an
       // explicit Z, so this line stays true whatever zone the test host runs in.
-      deadlineMs: Date.parse('2026-09-15T16:20:00Z'),
+      deadlineMs: Date.parse('2026-09-15T23:20:00Z'),
     });
   });
 
@@ -145,7 +145,7 @@ describe('parseOffer — the golden cases, read off disk', () => {
       eligible: true,
       monolingual: false,
       effortWords: 2,
-      deadlineMs: Date.parse('2026-09-15T16:20:00Z'),
+      deadlineMs: Date.parse('2026-09-15T23:20:00Z'),
     });
   });
 
@@ -159,7 +159,7 @@ describe('parseOffer — the golden cases, read off disk', () => {
       eligible: true,
       monolingual: false,
       effortWords: 4,
-      deadlineMs: Date.parse('2026-09-15T21:00:00Z'),
+      deadlineMs: Date.parse('2026-09-16T04:00:00Z'),
     });
   });
 
@@ -192,14 +192,37 @@ describe('parseOffer — the deadline zone, which the payload does not carry', (
     else process.env.TZ = original;
   });
 
+  it('reads a zone-less due_at as UTC — settled by AJ-295, 2026-09-17', () => {
+    // The module docstring named the observation that would decide this in advance:
+    // "an assigned job shows its deadline in the portal UI, which is the observation that
+    // decides." AJ-295 made it by accident, by being recorded through BOTH endpoints.
+    //
+    //   offer list    zone-less `2026-09-17T15:00:00`  -> bot read 15:00 +07
+    //   assigned list explicit `Z`, parsed by reconcile -> 22:00 +07
+    //   portal UI     "17 Sept 2026, 22:00 GMT+7"
+    //
+    // Seven hours apart, which is Bangkok's offset and not a coincidence. Read as Bangkok
+    // the deadline had already passed when the bot saw the offer at 17:15, so a 1,533-word
+    // DTP job was refused as unreachable. It had not passed. A human claimed it.
+    //
+    // The error ran the OPPOSITE way to the one assumption 1 feared: it was pessimistic,
+    // losing work, not optimistic and missing deliveries.
+    const offer = parseOffer(
+      withField(captured(AJ_265_MS), 'due_at', '2026-09-17T15:00:00'),
+      options(),
+    );
+
+    expect(offer.deadlineMs).toBe(Date.parse('2026-09-17T22:00:00+07:00'));
+  });
+
   it('names the assumed zone in an exported constant', () => {
     // "One line to change" is the requirement: the zone lives here, not spread across
     // `Date.parse` calls. Kills: a literal '+07:00' inlined at the parse site.
-    expect(STRAKER_DEADLINE_ZONE).toEqual({ id: 'Asia/Bangkok', utcOffset: '+07:00' });
+    expect(STRAKER_DEADLINE_ZONE).toEqual({ id: 'UTC', utcOffset: '+00:00' });
   });
 
   it.each(['UTC', 'America/New_York', 'Pacific/Auckland', 'Asia/Bangkok'])(
-    'reads due_at as Bangkok even when the host runs in %s',
+    'reads due_at as UTC even when the host runs in %s',
     (tz) => {
       // THE test this whole section exists for. `due_at` is zone-less
       // (`2026-09-15T23:20:00`); parsed bare it silently takes the host's zone — Bangkok
@@ -210,7 +233,7 @@ describe('parseOffer — the deadline zone, which the payload does not carry', (
       // Kills: `Date.parse(raw.due_at)` and `new Date(raw.due_at)`.
       process.env.TZ = tz;
       expect(parseOffer(captured(AJ_265_MS), options()).deadlineMs).toBe(
-        Date.parse('2026-09-15T16:20:00Z'),
+        Date.parse('2026-09-15T23:20:00Z'),
       );
     },
   );
@@ -257,7 +280,7 @@ describe('parseOffer — a missing effort or deadline is a SKIP, not a failure (
     const parsed = parseOffer(withField(captured(AJ_265_MS), 'words', undefined), options());
     expect(parsed.effortWords).toBeNull();
     expect(parsed.objId).toBe(AJ_265_MS);
-    expect(parsed.deadlineMs).toBe(Date.parse('2026-09-15T16:20:00Z'));
+    expect(parsed.deadlineMs).toBe(Date.parse('2026-09-15T23:20:00Z'));
   });
 
   it('treats an explicit null word count the same way', () => {
@@ -512,7 +535,7 @@ describe('createOfferExtractor', () => {
     expect(logger.lines).toHaveLength(1);
     expect(logger.lines[0]).toMatchObject({
       level: 'info',
-      fields: { module: 'offerParse', action: 'configure', deadlineZone: 'Asia/Bangkok' },
+      fields: { module: 'offerParse', action: 'configure', deadlineZone: 'UTC' },
     });
   });
 

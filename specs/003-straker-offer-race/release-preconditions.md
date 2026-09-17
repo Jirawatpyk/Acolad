@@ -81,10 +81,39 @@ never been able to verify, because no claim has ever been made against this port
 |---|---|---|
 | The claim endpoint's **path and body** | `claim.ts` — `claimRequestPath`, `CLAIM_REQUEST_BODY` | Reasoned by analogy with the one confirmed offer-addressing endpoint. Contract §4 is marked NOT YET EXERCISED. |
 | The **lost-race signal** | `claimOutcome.ts` — `CONFIRMED_LOST_RACE_SIGNALS` is **deliberately empty** | Until it is filled, *every* rejection classifies as `failed` and alerts. That is the safe direction (FR-005a) and it is also noisy. |
-| Whether `due_at` is **Bangkok or New Zealand** | `offerParse.ts` — `STRAKER_DEADLINE_ZONE` | An assigned job shows its deadline in the portal UI. If it is NZ, every deadline is being read five hours late and the bot accepts work it cannot finish. |
+| ~~Whether `due_at` is **Bangkok or New Zealand**~~ — **CLOSED 2026-09-17: it is UTC** | `offerParse.ts` — `STRAKER_DEADLINE_ZONE` | Settled exactly as this row said it would be, by an assigned job's deadline in the portal UI. It was neither option offered here. See below. |
 | Whether `words` is really the **effort** field | `offerParse.ts` assumption 2 | Confirmed on one independent offer and contradicted by a cent on the other. Effort is what the whole ceiling rests on. |
 
-**How to close it.** Watch a real offer arrive and let the bot claim it, with someone
+### The zone question closed itself, 2026-09-17 — and the answer was a third option
+
+**`due_at` on the offer list is UTC.** Not Bangkok, not New Zealand.
+
+It closed without anyone watching for it, because AJ-295 was recorded through *both* of the
+portal's endpoints inside twenty minutes:
+
+| Source | What it gave | Read as |
+|---|---|---|
+| offer list (`/job-offers?status=open`) | `2026-09-17T15:00:00`, no zone | 15:00 +07 — **wrong** |
+| assigned list (`/assigned-jobs`) | the same job, with an explicit `Z` | 22:00 +07 — right |
+| the portal UI | "17 Sept 2026, 22:00 GMT+7" | 22:00 +07 |
+
+Seven hours apart, which is Bangkok's own offset — the signature of a zone-less UTC string
+read as local time. The endpoint that does not require a guess is the one that agreed with
+the screen.
+
+**The error ran opposite to the one this table feared.** The row above worried about reading
+deadlines *late* and accepting work the team cannot finish — loud, and it would have shown up
+as a missed delivery. What actually happened was the quiet direction: every offer deadline was
+read **seven hours early**, so work that fitted was refused as `deadline_unreachable` and
+nothing looked wrong at all. Two jobs went that way on 2026-09-17 (08:19, 44 words; 17:15,
+1,533 words) and the team claimed both by hand.
+
+Fixed in `STRAKER_DEADLINE_ZONE`, which is the single line this was always designed to be.
+**RP-4's other halves remain open** — the lost-race signal and whether `words` is really the
+effort field. AJ-295 settles neither: it was never claimed by the bot, so no rejection body
+was seen, and its word count has not been checked against the delivered file.
+
+**How to close the rest.** Watch a real offer arrive and let the bot claim it, with someone
 present. Then, from `state/straker/straker.db` and `logs/jobcatch-straker.*.log`:
 
 - If the claim **won** — open the assigned job in the portal and compare its deadline and its

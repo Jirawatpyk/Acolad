@@ -156,7 +156,10 @@ describe('assembleStrakerBot — the offer parser main() wires in is the real on
       eventType: 'claim',
       outcome: 'won',
       effortWords: offer?.['words'],
-      deadlineMs: Date.parse(`${String(offer?.['due_at'])}+07:00`),
+      // `Z`, not `+07:00`: the offer list's `due_at` is UTC, settled by AJ-295 on
+      // 2026-09-17 (see `STRAKER_DEADLINE_ZONE`). The zone itself is pinned against an
+      // independent value in `offerParse.test.ts`; this line only has to agree with it.
+      deadlineMs: Date.parse(`${String(offer?.['due_at'])}Z`),
     });
   });
 
@@ -538,7 +541,7 @@ describe('assembleStrakerBot — the outcomes actually reach a destination (T056
     expect(senders.got.offers[0]).toMatchObject({
       languageDirection: 'en-us>ms-my',
       effortWords: offer['words'],
-      deadlineMs: Date.parse(`${String(offer['due_at'])}+07:00`),
+      deadlineMs: Date.parse(`${String(offer['due_at'])}Z`), // UTC — see the note above
     });
   });
 
