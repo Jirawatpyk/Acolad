@@ -70,7 +70,7 @@
  * this task.
  */
 
-import { formatLanguageDirection } from './eligibility.js';
+import { formatLanguageDirection, isMonolingualDirection } from './eligibility.js';
 import { isBudgetSuspended, isSessionExpired, type StrakerHttpClient } from './httpClient.js';
 import type { HoldResult, StrakerLedger } from './ledger.js';
 import type { Logger } from '../monitoring/logger.js';
@@ -310,9 +310,21 @@ function readEffort(value: unknown): number | null {
   return value;
 }
 
+/**
+ * The assigned list's direction, read the same way `offerParse` reads the offer list's.
+ *
+ * The two endpoints name the field identically, so they must not disagree about what it
+ * means: a `target_lang` of exactly `null` is monolingual work, and the direction doubles
+ * the source (`ja>ja`). Every assigned DTP job observed so far has arrived with the doubled
+ * tag already spelled out — the live record holds one — so the null branch here is
+ * defensive. It costs one line and it removes the case where the same portal fact produces
+ * a DTP row from one endpoint and an unreadable direction charged to the translation
+ * ceiling from the other.
+ */
 function readDirection(source: unknown, target: unknown): string | null {
-  if (typeof source !== 'string' || typeof target !== 'string') return null;
-  if (source.trim() === '' || target.trim() === '') return null;
+  if (typeof source !== 'string' || source.trim() === '') return null;
+  if (target === null) return formatLanguageDirection(source, source);
+  if (typeof target !== 'string' || target.trim() === '') return null;
   return formatLanguageDirection(source, target);
 }
 
@@ -686,6 +698,14 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         ? deps.ledger.hold(
             {
               objId: item.objId,
+              // Read back from the direction the assigned list reports, because the offer that
+              // produced this work is long gone. `ja>ja` is DTP preparation; anything with two
+              // different sides is translation. An unreadable direction falls to translation —
+              // the stricter budget, so an unknown kind cannot quietly buy extra capacity.
+              kind:
+                item.languageDirection !== null && isMonolingualDirection(item.languageDirection)
+                  ? 'monolingual'
+                  : 'translation',
               // Zero, not a guess. An unreadable effort makes the day under-state by an
               // unknown amount, which is what the alert's detail says in words.
               effortWords: item.effortWords ?? 0,

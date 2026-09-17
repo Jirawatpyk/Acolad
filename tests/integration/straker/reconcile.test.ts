@@ -107,7 +107,7 @@ function fixture(opts: FixtureOptions = {}): Fixture {
   const outbox = new StrakerOutbox(opened.db);
   const ledger = new StrakerLedger(
     store,
-    opts.ceiling ?? CEILING,
+    { translation: opts.ceiling ?? CEILING, monolingual: opts.ceiling ?? CEILING },
     { hoursStartMin: 9 * 60, workdays: new Set([1, 2, 3, 4, 5]) },
     // Fixed rather than the curated calendar: this suite is about reconciliation, and a
     // holiday moving under it would change which day the ledger buckets into.
@@ -330,7 +330,7 @@ describe('T047 what the record is missing is added, and marked recovered (FR-016
     await f.reconciler.runIfDue();
 
     expect(f.store.heldWork()).toMatchObject([{ objId: 'a', effortWords: 100 }]);
-    expect(f.ledger.committedOn(DEADLINE_DAY, NOW_MS)).toBe(100);
+    expect(f.ledger.committedOn(DEADLINE_DAY, NOW_MS, 'translation')).toBe(100);
   });
 
   it('announces the recovery durably rather than only logging it (FR-016)', async () => {
@@ -636,6 +636,29 @@ describe('T047 the recovery reaches the tracking record (FR-014, FR-011a)', () =
     expect(row?.payload['firstSeenAtMs']).toBe(NOW_MS - 300_000);
   });
 
+  it('charges recovered DTP work to the DTP budget, read off its own direction', async () => {
+    // FR-016a recovers work no sighting recorded, so the offer that would have said
+    // `monolingual` is long gone. The only evidence left is the direction the assigned list
+    // reports, and `ja>ja` is what DTP preparation looks like there — this is the shape the
+    // live database actually holds for the 2026-09-17 job. Filing it as translation would
+    // charge a 956-word formatting job to a ceiling it was never measured against.
+    const f = fixture({ assigned: [assignedWork('dtp', { languageDirection: 'ja>ja' })] });
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork()).toMatchObject([{ objId: 'dtp', kind: 'monolingual' }]);
+  });
+
+  it('falls back to the translation budget when the direction says nothing', async () => {
+    // The stricter of the two ceilings, deliberately: an unknown kind must not be able to
+    // buy the larger budget by being unreadable.
+    const f = fixture({ assigned: [assignedWork('a', { languageDirection: null })] });
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork()).toMatchObject([{ objId: 'a', kind: 'translation' }]);
+  });
+
   it('withholds the tracking row when the language direction cannot be read, and says so', async () => {
     // Kills: inventing a placeholder direction, and kills queuing a row the sink refuses.
     // Nothing in the store carries a language direction to fall back on — neither
@@ -893,6 +916,7 @@ describe('T049 recovered work is counted even past the ceiling, and warns (FR-01
     f.store.hold({
       objId: 'earlier-win',
       effortWords: CEILING - room,
+      kind: 'translation',
       deadlineMs: DEADLINE_MS,
       heldSinceMs: NOW_MS - 3_600_000,
     });
@@ -907,7 +931,7 @@ describe('T049 recovered work is counted even past the ceiling, and warns (FR-01
     await f.reconciler.runIfDue();
 
     expect(f.store.heldWork().map((w) => w.objId)).toContain('a');
-    expect(f.ledger.committedOn(DEADLINE_DAY, NOW_MS)).toBe(CEILING + 400);
+    expect(f.ledger.committedOn(DEADLINE_DAY, NOW_MS, 'translation')).toBe(CEILING + 400);
   });
 
   it('warns when a recovery takes the day past its ceiling', async () => {
@@ -946,7 +970,10 @@ describe('T049 recovered work is counted even past the ceiling, and warns (FR-01
     await f.reconciler.runIfDue();
 
     expect(
-      f.ledger.checkCapacity({ objId: 'next', effortWords: 1, deadlineMs: DEADLINE_MS }, NOW_MS),
+      f.ledger.checkCapacity(
+        { objId: 'next', effortWords: 1, deadlineMs: DEADLINE_MS, kind: 'translation' },
+        NOW_MS,
+      ),
     ).toMatchObject({ fits: false, reason: 'ceiling_reached' });
   });
 
@@ -1238,7 +1265,7 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
 
     // A second 100-word offer for the same day does not fit under a 150 ceiling.
     const before = f.ledger.checkCapacity(
-      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS },
+      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
       NOW_MS,
     );
     expect(before.fits).toBe(false);
@@ -1254,7 +1281,7 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     // The load-bearing assertion: the budget came back, so the day can be claimed against
     // again. Kills a mutation that marks the row released without the ledger noticing.
     const after = f.ledger.checkCapacity(
-      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS },
+      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
       NOW_MS + RECONCILE_INTERVAL_MS,
     );
     expect(after.fits).toBe(true);

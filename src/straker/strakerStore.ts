@@ -203,7 +203,12 @@ CREATE TABLE IF NOT EXISTS held_work (
   effort_words INTEGER NOT NULL CHECK (effort_words >= 0),
   deadline_ms INTEGER,
   held_since_ms INTEGER NOT NULL,
-  released_at_ms INTEGER
+  released_at_ms INTEGER,
+  -- Which budget this work is charged to (2026-09-17). Translation and DTP preparation are
+  -- both counted in words, and a word means something entirely different in each, so they
+  -- cannot share a daily ceiling. Defaulted rather than required so the ALTER below can add
+  -- it to a database that already holds rows.
+  kind TEXT NOT NULL DEFAULT 'translation' CHECK (kind IN ('translation', 'monolingual'))
 );
 
 -- Durable flags that must outlive a process, of which there is exactly one today: the
@@ -378,8 +383,27 @@ export function enqueueQuarantineAlert(
   );
 }
 
+/**
+ * Columns added to a table that already exists. `CREATE TABLE IF NOT EXISTS` leaves an older
+ * table exactly as it was, so a new column has to be added explicitly — and idempotently,
+ * because `migrate` runs on every open.
+ *
+ * The default is what makes this safe on the live database: every row held before 2026-09-17
+ * predates DTP support and was translation work, so `'translation'` is not a guess.
+ */
+function addMissingColumns(db: StrakerDB): void {
+  const columns = (db.pragma('table_info(held_work)') as { name: string }[]).map((c) => c.name);
+  if (!columns.includes('kind')) {
+    db.exec(
+      "ALTER TABLE held_work ADD COLUMN kind TEXT NOT NULL DEFAULT 'translation' " +
+        "CHECK (kind IN ('translation', 'monolingual'))",
+    );
+  }
+}
+
 function migrate(db: StrakerDB): void {
   db.exec(ddl());
+  addMissingColumns(db);
   assertVocabularyCovered(db);
   db.pragma(`user_version = ${SCHEMA_VERSION}`);
 }
@@ -496,9 +520,15 @@ function eventColumns(event: OfferEvent): {
 }
 
 /** Work the team holds on this portal — the ledger's only source (data-model §5). */
+/** Which daily budget a piece of held work is charged to. */
+export const WORK_KINDS = ['translation', 'monolingual'] as const;
+export type WorkKind = (typeof WORK_KINDS)[number];
+
 export interface HeldWork {
   readonly objId: string;
   readonly effortWords: number;
+  /** `monolingual` is DTP preparation and similar: measured in words, but not translation. */
+  readonly kind: WorkKind;
   /** Null only when the work was recovered without a readable deadline; such rows cannot
    *  be bucketed and are surfaced by the ledger rather than silently dropped. */
   readonly deadlineMs: number | null;
@@ -529,6 +559,7 @@ interface EventRow {
 interface HeldRow {
   obj_id: string;
   effort_words: number;
+  kind: WorkKind;
   deadline_ms: number | null;
   held_since_ms: number;
   released_at_ms: number | null;
@@ -765,14 +796,16 @@ export class StrakerStore {
     const objId = requireIdentity(work.objId, 'held work');
     this.db
       .prepare(
-        `INSERT INTO held_work (obj_id, effort_words, deadline_ms, held_since_ms, released_at_ms)
-         VALUES (?, ?, ?, ?, NULL)
+        `INSERT INTO held_work
+           (obj_id, effort_words, deadline_ms, held_since_ms, released_at_ms, kind)
+         VALUES (?, ?, ?, ?, NULL, ?)
          ON CONFLICT (obj_id) DO UPDATE SET
            effort_words = excluded.effort_words,
            deadline_ms = excluded.deadline_ms,
+           kind = excluded.kind,
            released_at_ms = NULL`,
       )
-      .run(objId, work.effortWords, work.deadlineMs, work.heldSinceMs);
+      .run(objId, work.effortWords, work.deadlineMs, work.heldSinceMs, work.kind);
   }
 
   /**
@@ -846,6 +879,7 @@ export class StrakerStore {
     return rows.map((r) => ({
       objId: r.obj_id,
       effortWords: r.effort_words,
+      kind: r.kind,
       deadlineMs: r.deadline_ms,
       heldSinceMs: r.held_since_ms,
       releasedAtMs: r.released_at_ms,

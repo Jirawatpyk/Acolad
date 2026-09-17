@@ -147,6 +147,7 @@ const sightingEvent = (over: Partial<SightingEvent> = {}): SightingEvent => ({
 const hold = (over: Partial<NewHold> = {}): NewHold => ({
   objId: 'e3b0c442-98fc-1c14-9afb-f4c8996fb924',
   effortWords: 1_200,
+  kind: 'translation',
   deadlineMs: Date.parse('2026-09-17T17:00:00+07:00'),
   heldSinceMs: NOW_MS,
   ...over,
@@ -1131,5 +1132,93 @@ describe('listEvents(window) — the bound the 09:00 report reads through', () =
     store.recordEvent(at('new', 10_000_000));
 
     expect(store.listEvents()).toHaveLength(2);
+  });
+});
+
+describe('the kind column arriving on a database that predates it', () => {
+  /**
+   * A pre-2026-09-17 record: `held_work` as it was before DTP work needed its own budget.
+   * Built by dropping the column off a real database rather than by hand-writing the old
+   * DDL, so the two cannot drift — the rest of the schema is whatever the code creates today.
+   */
+  function databaseWithoutKind(): string {
+    const { strakerDir } = tempRoot();
+    const opened = openStrakerDatabase(strakerDir, NOW_MS);
+    // SQLite refuses DROP COLUMN while a CHECK names the column, so the old table is
+    // rebuilt from the CURRENT one's own DDL with the kind clause cut out. Derived rather
+    // than hand-written, so the rest of the shape cannot drift away from production's.
+    const ddl = (
+      opened.db
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'held_work'")
+        .get() as { sql: string }
+    ).sql;
+    // Cut from the end of the last pre-DTP column to the closing paren. Cutting back from
+    // `kind` itself does not work: the clause is preceded by a comment whose prose contains
+    // commas, so the nearest comma is inside English rather than inside SQL.
+    const lastOldColumn = 'released_at_ms INTEGER';
+    const cutFrom = ddl.indexOf(lastOldColumn);
+    expect(cutFrom).toBeGreaterThan(-1);
+    expect(ddl).toContain('kind TEXT NOT NULL'); // the table really does have it to remove
+    const withoutKind =
+      ddl.slice(0, cutFrom + lastOldColumn.length) + ddl.slice(ddl.lastIndexOf(')'));
+    expect(withoutKind).not.toContain('kind');
+
+    opened.db.exec('DROP TABLE held_work');
+    opened.db.exec(withoutKind);
+    opened.db
+      .prepare(
+        'INSERT INTO held_work (obj_id, effort_words, deadline_ms, held_since_ms, released_at_ms)' +
+          ' VALUES (@id, 900, @dl, @at, NULL)',
+      )
+      .run({ id: 'before-dtp', dl: NOW_MS + 86_400_000, at: NOW_MS });
+    opened.db.close();
+    return strakerDir;
+  }
+
+  it('files work held before DTP existed as translation, not as nothing', () => {
+    // The live database held real work when this column landed. A row that came back with
+    // no kind — or a kind the ledger does not recognise — is excluded from EVERY total in
+    // both directions, and the ceiling silently becomes unlimited. The default is the
+    // whole safety argument, so it is asserted rather than trusted.
+    const dir = databaseWithoutKind();
+
+    const reopened = openStrakerDatabase(dir, NOW_MS);
+    openDbs.push(reopened.db);
+
+    expect(new StrakerStore(reopened.db).heldWork()).toEqual([
+      expect.objectContaining({ objId: 'before-dtp', kind: 'translation', effortWords: 900 }),
+    ]);
+  });
+
+  it('adds the column once, however many times the bot restarts', () => {
+    // `migrate` runs on every open, so a migration that is not idempotent fails on the
+    // SECOND start — after a deploy has already been called a success.
+    const dir = databaseWithoutKind();
+
+    for (let restart = 0; restart < 3; restart += 1) {
+      const opened = openStrakerDatabase(dir, NOW_MS);
+      openDbs.push(opened.db);
+      const columns = (opened.db.pragma('table_info(held_work)') as { name: string }[]).map(
+        (c) => c.name,
+      );
+      expect(columns.filter((c) => c === 'kind')).toHaveLength(1);
+    }
+  });
+
+  it('still refuses a kind the ledger cannot account for', () => {
+    // The CHECK has to survive the migration: it is what makes `work.kind !== kind` safe to
+    // read as an exhaustive split rather than as a filter that can drop rows on the floor.
+    const dir = databaseWithoutKind();
+    const opened = openStrakerDatabase(dir, NOW_MS);
+    openDbs.push(opened.db);
+
+    expect(() =>
+      opened.db
+        .prepare(
+          'INSERT INTO held_work (obj_id, effort_words, deadline_ms, held_since_ms, kind)' +
+            ' VALUES (@id, 1, @dl, @at, @kind)',
+        )
+        .run({ id: 'bad', dl: NOW_MS, at: NOW_MS, kind: 'desktop-publishing' }),
+    ).toThrow(/CHECK/i);
   });
 });

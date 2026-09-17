@@ -164,6 +164,7 @@ export const SYSTEM_ALERT_CONDITIONS = [
   'db_quarantined',
   'sign_in_refused',
   'account_barred',
+  'offer_unreadable',
 ] as const;
 export type SystemAlertCondition = (typeof SYSTEM_ALERT_CONDITIONS)[number];
 
@@ -342,6 +343,14 @@ const ALERT_SPECS: Readonly<Record<StrakerAlertCondition, AlertSpec>> = {
       'The record of work the team already holds went with the old file, so the daily ceiling now reads as ZERO committed capacity and every offer will fit — the bot will over-claim until reconciliation restores the held set',
     action:
       'Stop the bot if the ceiling matters today. Keep the quarantined copy: it is the only record of what was held. Reconciliation rebuilds the held set from the portal within fifteen minutes of the next start',
+  },
+  offer_unreadable: {
+    severity: 'critical',
+    title: 'Offer Could Not Be Read',
+    impact:
+      'The portal sent an offer in a shape this bot does not recognise, so it was passed over without ever reaching a decision. Every other offer in the same reading was unaffected — that is deliberate, and it is the difference from 2026-09-17, when one unreadable offer blinded the bot completely for three minutes and lost a 956-word job',
+    action:
+      'Read the `field` in the log line beside this alert: it names exactly which part of the payload was unusable. If the shape is legitimate work the portal really sends — as `target_lang: null` turned out to be for DTP jobs — the parser needs to learn it. If it is genuinely malformed, the offer was rightly refused and no action is needed beyond knowing it happened',
   },
   account_barred: {
     severity: 'critical',

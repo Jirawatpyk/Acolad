@@ -78,6 +78,13 @@ export interface OfferForDecision {
   readonly effortWords: number | null;
   /** Deadline as epoch ms, or null when the payload carried none. */
   readonly deadlineMs: number | null;
+  /**
+   * True when the offer is not a translation — source and target are the same language,
+   * which the portal signals by sending `target_lang: null` (observed 2026-09-17 on a DTP
+   * preparation job). Such work is measured against its own daily budget and its own rate,
+   * because a word count says much less about how long it takes.
+   */
+  readonly monolingual: boolean;
 }
 
 /** Claim it, or skip it and say which rule turned it away. There is no third answer. */
@@ -86,6 +93,8 @@ export type ClaimDecision =
       readonly objId: string;
       readonly languageDirection: string;
       readonly action: 'claim';
+      /** Carried through so the hold is charged to the budget the decision was made against. */
+      readonly monolingual: boolean;
       /** Non-null by construction: the gate refuses an offer with no effort. */
       readonly effortWords: number;
       /** Non-null by construction: the gate refuses an offer with no deadline. */
@@ -126,8 +135,25 @@ export type ClaimDecision =
  */
 export type ClaimDecisionSettings = Pick<
   StrakerBotConfig,
-  'throughputWordsPerHour' | 'hoursStartMin' | 'hoursEndMin' | 'workdays'
+  | 'throughputWordsPerHour'
+  | 'dtpThroughputWordsPerHour'
+  | 'hoursStartMin'
+  | 'hoursEndMin'
+  | 'workdays'
 >;
+
+/**
+ * The rate this kind of work is actually done at.
+ *
+ * Both figures are derived from their own ceiling over the working day (`config.ts`), so
+ * this is not a second knob — it is the same knob read for the right kind of work. Feeding
+ * a DTP offer the translation rate is not a rounding error: the two ceilings are an order
+ * of magnitude apart, so the wrong one refuses work that fits, or admits work that does
+ * not. Claiming is irreversible, so the second direction is the expensive one.
+ */
+function throughputFor(monolingual: boolean, settings: ClaimDecisionSettings): number {
+  return monolingual ? settings.dtpThroughputWordsPerHour : settings.throughputWordsPerHour;
+}
 
 /** Only `checkCapacity` is reachable from here — deciding must not be able to record. */
 export type CapacityChecker = Pick<StrakerLedger, 'checkCapacity'>;
@@ -172,12 +198,19 @@ export function decideClaims(
   // rather than let the gate blame each offer in turn for a misconfiguration — and rather
   // than claim on an answer nobody could defend. `config.ts` already guarantees a positive
   // figure; this is the guard for a caller that assembled its settings by hand.
-  if (!(settings.throughputWordsPerHour > 0)) {
-    throw new Error(
-      `Straker throughput must be a positive words-per-hour figure, got ${String(
-        settings.throughputWordsPerHour,
-      )}`,
-    );
+  //
+  // Both rates are checked, not just the one this batch happens to need: the defect is in
+  // the configuration either way, and a pass that happens to carry no DTP offer must not
+  // report a broken DTP rate as healthy.
+  for (const [name, rate] of [
+    ['throughput', settings.throughputWordsPerHour],
+    ['DTP throughput', settings.dtpThroughputWordsPerHour],
+  ] as const) {
+    if (!(rate > 0)) {
+      throw new Error(
+        `Straker ${name} must be a positive words-per-hour figure, got ${String(rate)}`,
+      );
+    }
   }
 
   // The pass's own copy of the held set, advanced as offers are claimed. Without the
@@ -195,6 +228,7 @@ export function decideClaims(
         effortWords: decision.effortWords,
         deadlineMs: decision.deadlineMs,
         heldSinceMs: nowMs,
+        kind: offer.monolingual ? 'monolingual' : 'translation',
         releasedAtMs: null,
       });
     }
@@ -241,7 +275,7 @@ function decideOne(
     nowMs,
     dueAtMs: offer.deadlineMs,
     effort: offer.effortWords,
-    throughputPerHour: settings.throughputWordsPerHour,
+    throughputPerHour: throughputFor(offer.monolingual, settings),
     calendar,
     holidaysCuratedForSpan: curated,
   });
@@ -281,7 +315,12 @@ function decideOne(
   // decision could reinstate the check — see spec.md §Clarifications, 2026-09-15.
 
   const capacity = ledger.checkCapacity(
-    { objId: offer.objId, effortWords, deadlineMs },
+    {
+      objId: offer.objId,
+      effortWords,
+      deadlineMs,
+      kind: offer.monolingual ? 'monolingual' : 'translation',
+    },
     nowMs,
     held,
   );
@@ -291,6 +330,7 @@ function decideOne(
     objId: offer.objId,
     languageDirection: offer.languageDirection,
     action: 'claim',
+    monolingual: offer.monolingual,
     effortWords,
     deadlineMs,
     deadlineDay: capacity.deadlineDay,

@@ -78,6 +78,12 @@ const WORKDAYS: ReadonlySet<number> = new Set([1, 2, 3, 4, 5]);
 
 const SETTINGS: ClaimDecisionSettings = {
   throughputWordsPerHour: 100,
+  // Deliberately NOT equal to the translation rate. Every offer these tests drive is a
+  // translation, so this figure should never be consulted — and if the gate ever reaches
+  // for it by mistake, an absurd rate makes that visible as a wrong verdict rather than
+  // hiding behind a matching number. Two ceilings set equal is what kept the DTP rate
+  // unreachable through a whole suite.
+  dtpThroughputWordsPerHour: 9_999,
   hoursStartMin: 9 * 60,
   hoursEndMin: 18 * 60,
   workdays: WORKDAYS,
@@ -91,6 +97,7 @@ const ROOMY = 100_000;
 function offer(objId: string, over: Partial<OfferForDecision> = {}): OfferForDecision {
   return {
     objId,
+    monolingual: false,
     languageDirection: 'en-GB>ms-MY',
     eligible: true,
     effortWords: 100,
@@ -108,7 +115,14 @@ function freshLedger(ceiling: number): { ledger: StrakerLedger; store: StrakerSt
   const opened = openStrakerDatabase(dir, WED_10AM);
   openDbs.push(opened.db);
   const store = new StrakerStore(opened.db);
-  return { ledger: new StrakerLedger(store, ceiling, LEDGER_CALENDAR), store };
+  return {
+    ledger: new StrakerLedger(
+      store,
+      { translation: ceiling, monolingual: ceiling },
+      LEDGER_CALENDAR,
+    ),
+    store,
+  };
 }
 
 afterEach(() => {
@@ -133,7 +147,14 @@ function ctx(
 
 /** A held row, for seeding a day that is already partly (or wholly) spent. */
 function heldRow(objId: string, effortWords: number, deadlineMs: number): HeldWork {
-  return { objId, effortWords, deadlineMs, heldSinceMs: WED_10AM, releasedAtMs: null };
+  return {
+    objId,
+    effortWords,
+    deadlineMs,
+    heldSinceMs: WED_10AM,
+    kind: 'translation',
+    releasedAtMs: null,
+  };
 }
 
 /**

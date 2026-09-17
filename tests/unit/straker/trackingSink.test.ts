@@ -163,15 +163,15 @@ describe('every offer seen produces a row — won, lost and skipped alike (FR-01
     // The whole row, cell by cell. A per-field assertion passes just as happily when two
     // adjacent columns have swapped places, which is the failure T046 exists to prevent.
     expect(sheet.rows[0]).toEqual([
-      '2026-09-15T13:56:20+07:00',
-      'claim',
-      'won',
+      '15/09/2026 13:56:20',
+      'Claim',
+      'Won',
       '66ae223e-8828-45f7-91c8-e6a841cc346e',
       'en-us>ms-my',
-      '2026-09-16T11:00:00+07:00',
+      '16/09/2026 11:00',
       '2',
       '',
-      '2026-09-15T13:56:22+07:00',
+      '15/09/2026 13:56:22',
       '',
       '66ae223e-8828-45f7-91c8-e6a841cc346e|claim',
     ]);
@@ -185,7 +185,7 @@ describe('every offer seen produces a row — won, lost and skipped alike (FR-01
     );
 
     expect(result).toEqual({ ok: true });
-    expect(sheet.rows[0]?.[2]).toBe('lost');
+    expect(sheet.rows[0]?.[2]).toBe('Lost');
     expect(sheet.rows[0]?.[9]).toBe('another vendor claimed it first');
   });
 
@@ -204,7 +204,7 @@ describe('every offer seen produces a row — won, lost and skipped alike (FR-01
       }),
     );
 
-    expect(sheet.rows[0]?.[1]).toBe('sighting');
+    expect(sheet.rows[0]?.[1]).toBe('Sighting');
     expect(sheet.rows[0]?.[2]).toBe(''); // no outcome yet, and none invented
     expect(sheet.rows[0]?.[8]).toBe(''); // not claimed
   });
@@ -226,7 +226,7 @@ describe('every offer seen produces a row — won, lost and skipped alike (FR-01
     );
 
     const row = sheet.rows[0];
-    expect(row?.[1]).toBe('skip');
+    expect(row?.[1]).toBe('Skip');
     expect(row?.[2]).toBe(''); // a skip has no claim outcome
     // Plain language (contract §1): a reader must not need the source to know what happened.
     expect(row?.[7]).toBe('not enough working time before the deadline');
@@ -272,7 +272,7 @@ describe('every offer seen produces a row — won, lost and skipped alike (FR-01
 
     expect(result).toEqual({ ok: true });
     expect(sheet.rows[0]?.[0]).toBe(''); // no first sighting to claim there was one
-    expect(sheet.rows[0]?.[2]).toBe('recovered');
+    expect(sheet.rows[0]?.[2]).toBe('Recovered');
   });
 });
 
@@ -316,7 +316,7 @@ describe('rows are keyed on identity together with event type (FR-014, constitut
       `${objId}|claim`,
       `${objId}|recovery`,
     ]);
-    expect(sheet.rows.map((row) => row[2])).toEqual(['', 'unknown', 'recovered']);
+    expect(sheet.rows.map((row) => row[2])).toEqual(['', 'Unknown', 'Recovered']);
   });
 
   it('updates a row in place when the same event is sent again, rather than duplicating it', async () => {
@@ -327,7 +327,7 @@ describe('rows are keyed on identity together with event type (FR-014, constitut
     await sink(viaQueue({ ...WON, outcome: 'won', note: 'settled by reconciliation' }));
 
     expect(sheet.rows).toHaveLength(1);
-    expect(sheet.rows[0]?.[2]).toBe('won');
+    expect(sheet.rows[0]?.[2]).toBe('Won');
     expect(sheet.writes.map((w) => w.op)).toEqual(['append', 'write']);
     // Row 2 of the sheet: row 1 is the header. Off by one here overwrites the header.
     expect(sheet.writes[1]?.rowNum).toBe(2);
@@ -474,6 +474,79 @@ describe('failures are reported to the dispatcher, never thrown and never retrie
     });
 
     expect(sheet.rows[0]?.[2]).toBe('');
+  });
+});
+
+describe('the sheet reads like a record a person keeps, not a log a machine writes', () => {
+  it('renders the two race timestamps to the second, in the readable Bangkok format', async () => {
+    // Seconds are not decoration here. First seen and Claimed at are the two ends of
+    // SC-001's latency measure, and the races observed so far are decided inside two
+    // seconds — a minute-resolution format would quantise the whole measurement away.
+    const sheet = headedSheet();
+
+    await createTrackingSink(sheet.api)(viaQueue(WON));
+
+    expect(sheet.rows[0]?.[0]).toBe('15/09/2026 13:56:20');
+    expect(sheet.rows[0]?.[8]).toBe('15/09/2026 13:56:22');
+  });
+
+  it('renders the deadline to the minute — a deadline has no second hand', async () => {
+    const sheet = headedSheet();
+
+    await createTrackingSink(sheet.api)(viaQueue(WON));
+
+    expect(sheet.rows[0]?.[5]).toBe('16/09/2026 11:00');
+  });
+
+  it('keeps a deadline on the far side of midnight Bangkok on its Bangkok date', async () => {
+    // 23:30 UTC is 06:30 the NEXT day in Bangkok. A formatter that shifted the clock but
+    // read the date off the unshifted value would print the day before, and the operator
+    // would read a deadline that has already passed.
+    const sheet = headedSheet();
+
+    await createTrackingSink(sheet.api)(
+      viaQueue({ ...WON, deadlineMs: Date.parse('2026-09-16T23:30:00Z') }),
+    );
+
+    expect(sheet.rows[0]?.[5]).toBe('17/09/2026 06:30');
+  });
+
+  it('leaves an absent timestamp blank rather than printing an epoch', async () => {
+    // Reconciliation finds work no sighting ever recorded (FR-016a). "never sighted" has
+    // to read as empty; 01/01/1970 would read as a real, very old sighting.
+    const sheet = headedSheet();
+
+    await createTrackingSink(sheet.api)(
+      viaQueue({
+        eventType: 'recovery',
+        objId: 'aj-900',
+        languageDirection: 'en-us>ms-my',
+        effortWords: 3,
+        deadlineMs: null,
+        firstSeenAtMs: null,
+        claimedAtMs: CLAIMED_AT,
+        outcome: 'recovered',
+        note: 'found held on the portal with no sighting on record',
+      }),
+    );
+
+    expect(sheet.rows[0]?.[0]).toBe('');
+    expect(sheet.rows[0]?.[5]).toBe('');
+  });
+
+  it('capitalises Event and Outcome without touching the hidden key they are built from', async () => {
+    // The cells are for a reader; `_row_key` is the upsert's identity. If capitalising the
+    // display had leaked into the key, every existing row would stop matching and the sink
+    // would append a duplicate instead of updating in place.
+    const sheet = headedSheet();
+
+    await createTrackingSink(sheet.api)(viaQueue(WON));
+    await createTrackingSink(sheet.api)(viaQueue({ ...WON, outcome: 'lost' }));
+
+    expect(sheet.rows).toHaveLength(1); // the second call updated the first row
+    expect(sheet.rows[0]?.[1]).toBe('Claim');
+    expect(sheet.rows[0]?.[2]).toBe('Lost');
+    expect(sheet.rows[0]?.[ROW_KEY_COLUMN]).toBe('66ae223e-8828-45f7-91c8-e6a841cc346e|claim');
   });
 });
 

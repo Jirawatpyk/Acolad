@@ -20,8 +20,8 @@
  * | Col | Header             | Why it is there, and there |
  * |-----|--------------------|---|
  * | A   | First seen         | When the offer was first sighted — the win rate's clock and, if the race is real, the latency measure's start |
- * | B   | Event              | `sighting` / `claim` / `recovery` / `skip`. Second because it is the dedup axis: a sheet keyed on identity **and** event type is unreadable without a column saying which event a row is |
- * | C   | Outcome            | `won` / `lost` / `failed` / `unknown` / `recovered`, blank where the event had none. Kept apart from the skip reason so `lost` — a normal result — never reads as a fault |
+ * | B   | Event              | `Sighting` / `Claim` / `Recovery` / `Skip`. Second because it is the dedup axis: a sheet keyed on identity **and** event type is unreadable without a column saying which event a row is |
+ * | C   | Outcome            | `Won` / `Lost` / `Failed` / `Unknown` / `Recovered`, blank where the event had none. Kept apart from the skip reason so `lost` — a normal result — never reads as a fault |
  * | D   | Offer ID           | The portal's own opaque identifier (R8), never composed from other fields |
  * | E   | Language direction | FR-011a. With all 44 directions eligible, the claimed mix has to be visible here rather than discovered at delivery |
  * | F   | Deadline           | What the gate decided on |
@@ -35,13 +35,20 @@
  * languages, due, effort, note, key — because an operator reads both and should not have to
  * re-learn where to look. `Event` is the one insertion, and it earns its place above.
  *
- * ## Timestamps are ISO 8601 in Asia/Bangkok, and that is a departure worth naming
+ * ## Timestamps read `DD/MM/YYYY HH:mm`, and that is a recorded deviation (2026-09-17)
  *
- * The XTM sheet renders `DD/MM/YYYY HH:mm`. This one does not, for two reasons. Constitution
- * III asks for ISO 8601 in Asia/Bangkok and the XTM format is a recorded deviation from it,
- * not the rule; and minute resolution cannot measure a race decided in seconds — SC-001's
- * latency measure would be quantised away by the format before anyone could read it. The
- * offset is written out (`+07:00`) so a reader never has to know which zone the file is in.
+ * Constitution III says user-facing timestamps MUST be ISO 8601 in Asia/Bangkok, and this
+ * sheet shipped that way — `2026-09-17T08:18:32+07:00`. The owner then asked for the record
+ * to be readable, and the clause's own rationale is readability: operators must be able to
+ * "scan, filter, and trust them without decoding format drift". Two formats across the two
+ * sheets one operator reads side by side **is** the drift the clause guards against, and the
+ * XTM sheet has rendered `DD/MM/YYYY HH:mm` since 002. The two now agree, on the format the
+ * operator already knows. Recorded in 003's Complexity Tracking rather than argued away.
+ *
+ * The seconds SC-001's latency measure needs do not survive the XTM format, so they are kept
+ * in the two columns that are load-bearing and dropped where they were only noise — see
+ * {@link toRowValues}. The zone is no longer written into each cell; the sheet is
+ * Asia/Bangkok throughout, as its XTM counterpart already was.
  *
  * ## What is deliberately NOT here
  *
@@ -183,31 +190,58 @@ const SKIP_REASON_TEXT = {
 } as const satisfies Record<SkipReason, string>;
 
 /**
- * Epoch ms → `YYYY-MM-DDTHH:mm:ss+07:00`. The date comes from the canonical Bangkok helper
- * and the time of day from the canonical offset it is built on; the +7h shift is not
- * re-derived here (`reporting/dateFormat.ts` sets the same precedent).
+ * Epoch ms → `DD/MM/YYYY HH:mm` in Asia/Bangkok, with seconds when the column needs them.
+ *
+ * The date comes from the canonical Bangkok helper and the time of day from the canonical
+ * offset it is built on; the +7h shift is not re-derived here (`reporting/dateFormat.ts`
+ * sets the same precedent, and the output deliberately matches what it renders).
+ *
+ * `seconds` is not a stylistic choice — see {@link toRowValues} for which columns pass it
+ * and why the answer differs per column.
  */
-function bangkokIso(ms: number | null): string {
+function bangkokClock(ms: number | null, seconds = false): string {
   if (ms === null) return '';
+  const [year, month, day] = bangkokCalendar(ms).date.split('-'); // canonical, already +07:00
   const shifted = new Date(ms + BKK_OFFSET_MS); // UTC parts now read as Bangkok wall clock
   const p2 = (n: number): string => String(n).padStart(2, '0');
-  const time = `${p2(shifted.getUTCHours())}:${p2(shifted.getUTCMinutes())}:${p2(shifted.getUTCSeconds())}`;
-  return `${bangkokCalendar(ms).date}T${time}+07:00`;
+  const time = `${p2(shifted.getUTCHours())}:${p2(shifted.getUTCMinutes())}`;
+  const secs = seconds ? `:${p2(shifted.getUTCSeconds())}` : '';
+  return `${day}/${month}/${year} ${time}${secs}`;
 }
 
-/** The record as eleven cells, in the order {@link TRACKING_HEADER} declares. */
+/**
+ * `sighting` → `Sighting`. The enum values are identifiers, and a column of bare
+ * identifiers reads as a log dump rather than a record someone keeps.
+ *
+ * Display only. {@link trackingRowKey} keeps the raw value, because it is the upsert's
+ * identity: capitalising that would stop every existing row matching, and the sink would
+ * append a second row for an event it was asked to update.
+ */
+function forReading(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+/**
+ * The record as eleven cells, in the order {@link TRACKING_HEADER} declares.
+ *
+ * **First seen and Claimed at carry seconds; Deadline does not.** Those two are the ends of
+ * SC-001's latency measure and the races seen so far are decided inside two seconds — at
+ * minute resolution the number this feature exists to produce would be quantised to zero
+ * before anyone could read it. A deadline has no second hand, and printing `:00` on every
+ * one of them would only add a column of noise.
+ */
 function toRowValues(record: TrackingRecord): string[] {
   const settledEvent = record.eventType === 'claim' || record.eventType === 'recovery';
   return [
-    bangkokIso(record.firstSeenAtMs),
-    record.eventType,
-    settledEvent ? record.outcome : '',
+    bangkokClock(record.firstSeenAtMs, true),
+    forReading(record.eventType),
+    settledEvent ? forReading(record.outcome) : '',
     record.objId,
     record.languageDirection,
-    bangkokIso(record.deadlineMs),
+    bangkokClock(record.deadlineMs),
     record.effortWords === null ? '' : String(record.effortWords),
     record.eventType === 'skip' ? SKIP_REASON_TEXT[record.skipReason] : '',
-    settledEvent ? bangkokIso(record.claimedAtMs) : '',
+    settledEvent ? bangkokClock(record.claimedAtMs, true) : '',
     record.note ?? '',
     trackingRowKey(record.objId, record.eventType),
   ];

@@ -128,6 +128,7 @@ describe('parseOffer — the golden cases, read off disk', () => {
       objId: AJ_265_MS,
       languageDirection: 'en-us>ms-my',
       eligible: true,
+      monolingual: false,
       effortWords: 2,
       // 2026-09-15T23:20:00 read as Bangkok. Asserted as an absolute instant with an
       // explicit Z, so this line stays true whatever zone the test host runs in.
@@ -142,6 +143,7 @@ describe('parseOffer — the golden cases, read off disk', () => {
       objId: AJ_265_TH,
       languageDirection: 'en-us>th',
       eligible: true,
+      monolingual: false,
       effortWords: 2,
       deadlineMs: Date.parse('2026-09-15T16:20:00Z'),
     });
@@ -155,6 +157,7 @@ describe('parseOffer — the golden cases, read off disk', () => {
       objId: AJ_267_ZH,
       languageDirection: 'en-us>zh-tw',
       eligible: true,
+      monolingual: false,
       effortWords: 4,
       deadlineMs: Date.parse('2026-09-15T21:00:00Z'),
     });
@@ -301,7 +304,6 @@ describe('parseOffer — a wrong shape is a hard FAILURE (FR-023)', () => {
     ['source_lang', ''],
     ['source_lang', ['en-us']],
     ['target_lang', undefined],
-    ['target_lang', null],
     ['target_lang', 7],
   ])('rejects %s = %o — identity and direction are not optional', (field, value) => {
     // An entry with no identity cannot be tracked or deduplicated (data model §2), and a
@@ -395,6 +397,53 @@ describe('parseOffer — a wrong shape is a hard FAILURE (FR-023)', () => {
   });
 });
 
+describe('parseOffer — a null target_lang is DTP work, not a broken payload', () => {
+  /**
+   * Learned from production on 2026-09-17. The portal offered `Members Co Ltd Q3.docx`
+   * — 956 words, phase "DTP (prep)", Japanese to Japanese — with `target_lang: null`,
+   * because preparing a document for publication has no target language to translate into.
+   *
+   * The parser treated that as a contract violation and threw. Seventeen consecutive cycles
+   * failed, the bot saw nothing for three minutes, and the job was claimed by hand instead.
+   *
+   * `undefined` is deliberately NOT accepted alongside `null`. The portal was observed to
+   * send an explicit null; a missing key has never been seen, and inventing a meaning for it
+   * is the guessing this parser exists to refuse.
+   */
+  it('reads it as monolingual work rather than throwing', () => {
+    const offer = parseOffer(withField(captured(AJ_265_MS), 'target_lang', null), options());
+
+    expect(offer.monolingual).toBe(true);
+  });
+
+  it('records the direction as source-to-itself, matching what the assigned list reports', () => {
+    // The same work read from the assigned-jobs endpoint comes back as `ja>ja`, because that
+    // endpoint does carry a target. Rendering the two differently would put one job under two
+    // names in the record — the tracking sheet and the reconciliation row would disagree.
+    const offer = parseOffer(
+      withField(withField(captured(AJ_265_MS), 'source_lang', 'ja'), 'target_lang', null),
+      options(),
+    );
+
+    expect(offer.languageDirection).toBe('ja>ja');
+  });
+
+  it('still refuses a target_lang that is present but unusable', () => {
+    // Null means "no target". An empty string or a number means the payload is wrong, and
+    // that distinction is the whole reason this is not a blanket relaxation.
+    for (const bad of ['', 7, []]) {
+      expect(() =>
+        parseOffer(withField(captured(AJ_265_MS), 'target_lang', bad), options()),
+      ).toThrow(StrakerOfferShapeError);
+    }
+  });
+
+  it('marks an ordinary translation offer as NOT monolingual', () => {
+    // The control. Without it the flag could be hardcoded true and every test above passes.
+    expect(parseOffer(captured(AJ_265_MS), options()).monolingual).toBe(false);
+  });
+});
+
 describe('parseOffer — eligibility comes from the direction (FR-011)', () => {
   it('marks an excluded direction ineligible without refusing to parse it', () => {
     // An ineligible offer is still recorded — FR-017's win-rate denominator needs it.
@@ -474,22 +523,101 @@ describe('createOfferExtractor', () => {
     expect(extract(raw).map((o) => o.objId)).toEqual(raw.map((o) => o.obj_id));
   });
 
-  it('fails the whole read when a single entry is malformed', () => {
-    // Matches `listOpenOffers`, which already rejects an entire reply over one entry with
-    // no `obj_id`, and matches the contract's governing rule: a departure stops the action.
-    // The alternative — dropping the bad entry — would shrink the list silently, and a
-    // shrinking list is indistinguishable from offers vanishing.
-    const extract = createOfferExtractor({ excludedLanguagePairs: [], logger });
+  it('keeps the readable offers when one entry is malformed, and reports the bad one', () => {
+    /**
+     * This test asserted the OPPOSITE until 2026-09-17, and the reasoning it carried was
+     * sound as far as it went: "dropping the bad entry would shrink the list silently, and a
+     * shrinking list is indistinguishable from offers vanishing."
+     *
+     * That is true. What it missed is that those were not the only two options. On 2026-09-17
+     * the portal offered a DTP job with `target_lang: null`; the throw took down the WHOLE
+     * read for **17 consecutive cycles over three minutes**, during which the bot saw nothing
+     * at all — and because a parse failure is not a transport failure, no alert was raised
+     * either. A 956-word job was lost.
+     *
+     * The third option is to report the bad entry and carry on: not silent, and not fatal to
+     * the offers that parsed perfectly well beside it.
+     */
+    const unreadable: { objId: string | null; reason: string }[] = [];
+    const extract = createOfferExtractor({
+      excludedLanguagePairs: [],
+      logger,
+      onUnreadable: (objId, reason) => unreadable.push({ objId, reason }),
+    });
     const raw = [
       captured(AJ_265_MS),
       withField(captured(AJ_267_ZH), 'listing_type', 'auction'),
     ] as unknown as RawOffer[];
 
-    expect(() => extract(raw)).toThrow(StrakerOfferShapeError);
+    const parsed = extract(raw);
+
+    // The good offer survives — this is the whole point.
+    expect(parsed.map((o) => o.objId)).toEqual([captured(AJ_265_MS).obj_id]);
+    // And the bad one is named, so it can be recorded and alerted rather than vanishing.
+    expect(unreadable).toHaveLength(1);
+    expect(unreadable[0]?.objId).toBe(captured(AJ_267_ZH).obj_id);
+    expect(unreadable[0]?.reason).toMatch(/listing_type/);
+  });
+
+  it('reports an entry so broken it has no identity, rather than throwing', () => {
+    // No `obj_id` means nothing can be recorded against it, so the report carries null and
+    // the caller alerts on the reason alone. Still not a reason to lose the rest of the read.
+    const unreadable: { objId: string | null; reason: string }[] = [];
+    const extract = createOfferExtractor({
+      excludedLanguagePairs: [],
+      logger,
+      onUnreadable: (objId, reason) => unreadable.push({ objId, reason }),
+    });
+
+    const parsed = extract([captured(AJ_265_MS), 'not an offer at all'] as unknown as RawOffer[]);
+
+    expect(parsed).toHaveLength(1);
+    expect(unreadable[0]?.objId).toBeNull();
+  });
+
+  it('still parses everything when nothing is malformed, and reports nothing', () => {
+    const unreadable: unknown[] = [];
+    const extract = createOfferExtractor({
+      excludedLanguagePairs: [],
+      logger,
+      onUnreadable: () => unreadable.push(1),
+    });
+
+    expect(extract(capturedOffers() as unknown as RawOffer[])).toHaveLength(3);
+    expect(unreadable).toEqual([]);
   });
 
   it('returns nothing for an empty read, without inventing a failure', () => {
     const extract = createOfferExtractor({ excludedLanguagePairs: [], logger });
     expect(extract([])).toEqual([]);
+  });
+});
+
+describe('reporting an unreadable entry must not become the failure it reports', () => {
+  it('keeps the readable offers when raising the alert itself throws', () => {
+    // `onUnreadable` writes to SQLite from inside the read's own guard. If that write
+    // throws — a locked file, a quarantined database — an unguarded call aborts the read
+    // and loses the good offers: the 2026-09-17 failure arriving through the fix for the
+    // 2026-09-17 failure. The report is best-effort; the read is not.
+    const logger = recordingLogger();
+    const extract = createOfferExtractor({
+      excludedLanguagePairs: [],
+      logger,
+      onUnreadable: () => {
+        throw new Error('outbox is unwritable');
+      },
+    });
+    const raw = [
+      captured(AJ_265_MS),
+      withField(captured(AJ_267_ZH), 'listing_type', 'auction'),
+    ] as unknown as RawOffer[];
+
+    const parsed = extract(raw);
+
+    expect(parsed.map((o) => o.objId)).toEqual([captured(AJ_265_MS).obj_id]);
+    // Not swallowed either — a lost alert has to leave a trace somebody can find.
+    expect(
+      logger.lines.some((l) => l.fields['action'] === 'alert' && l.fields['outcome'] === 'failed'),
+    ).toBe(true);
   });
 });

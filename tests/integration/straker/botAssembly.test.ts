@@ -55,6 +55,7 @@ function env(overrides: Record<string, string> = {}): Record<string, string> {
     STRAKER_LOGIN_ID: 'user@example.test',
     STRAKER_PASSWORD: 'pw',
     STRAKER_MAX_WORDS_PER_DAY: '2000',
+    STRAKER_DTP_MAX_WORDS_PER_DAY: '30000',
     STRAKER_SHEETS_ID: 'sheet-straker',
     STRAKER_CHAT_WEBHOOK_OFFERS: 'https://chat.example.test/offers',
     GOOGLE_CHAT_WEBHOOK_SYSTEM: 'https://chat.example.test/ops',
@@ -195,6 +196,62 @@ describe('assembleStrakerBot — the ledger ceiling is the configured one', () =
     const skips = bot.store.listEvents().filter((e) => e.eventType === 'skip');
     expect(skips.map((s) => s.skipReason)).toEqual(['ceiling_reached']);
     expect(skips).toHaveLength(1);
+  });
+
+  /**
+   * A DTP offer, built from a captured translation payload by nulling `target_lang`.
+   *
+   * Synthesised rather than captured because the real one — the 956-word job of
+   * 2026-09-17 — was never written to disk: the bot threw while parsing it, which is the
+   * incident. Every other field is the portal's own.
+   */
+  function dtpOffer(words: number, objId = 'dtp-1'): RawOffer {
+    return {
+      ...captured()['aj-265:th'],
+      obj_id: objId,
+      target_lang: null,
+      words,
+    } as unknown as RawOffer;
+  }
+
+  it('measures a DTP offer at the DTP rate, not at the translation rate', async () => {
+    // The two rates are both DERIVED from their own ceiling over the 9-hour working day,
+    // so this fixes them at 2000/9 = 222.2 and 30000/9 = 3333.3 w/h. From 10:00 to the
+    // fixture's 23:20 deadline there are 8 working hours, which buys 1,777 words at the
+    // translation rate and 26,666 at the DTP rate. A 5,000-word DTP job therefore lands
+    // squarely between them: claimed if the gate reads the right rate, skipped as
+    // `deadline_unreachable` if it reaches for translation's.
+    const cfg = loadStrakerBotConfig(
+      env({ STRAKER_MAX_WORDS_PER_DAY: '2000', STRAKER_DTP_MAX_WORDS_PER_DAY: '30000' }),
+    );
+    const portal = portalListing([dtpOffer(5000)]);
+    const bot = assemble(cfg, portal);
+
+    await bot.cycle.runOnce();
+
+    expect(portal.claims).toEqual(['dtp-1']);
+    expect(bot.store.heldWork().map((w) => w.kind)).toEqual(['monolingual']);
+  });
+
+  it('measures a DTP offer at the DTP rate rather than a rate of its own', async () => {
+    // The mirror of the test above, and the mutation guard the translation side already
+    // had: drive the DTP ceiling down so its derived rate is 90/9 = 10 w/h, giving 80
+    // words of working time. 85 words is inside the DTP ceiling — so this is not a
+    // capacity refusal — but outside what 10 w/h reaches. A hard-coded rate, or
+    // translation's 222.2, claims it.
+    const cfg = loadStrakerBotConfig(
+      env({ STRAKER_MAX_WORDS_PER_DAY: '2000', STRAKER_DTP_MAX_WORDS_PER_DAY: '90' }),
+    );
+    const portal = portalListing([dtpOffer(85)]);
+    const bot = assemble(cfg, portal);
+
+    await bot.cycle.runOnce();
+
+    expect(portal.claims).toEqual([]);
+    expect(bot.store.listEvents()[0]).toMatchObject({
+      eventType: 'skip',
+      skipReason: 'deadline_unreachable',
+    });
   });
 
   it('measures feasibility at the configured throughput, not at one of its own', async () => {

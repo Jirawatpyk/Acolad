@@ -207,7 +207,8 @@ config โหลด+ตรวจด้วย zod ใน `src/config/index.ts` �
 **บอท Straker มี config คนละชุด** (`src/straker/config.ts` — โหลดแยก ไม่ใช้
 `src/config/index.ts` เพราะ R11) ตัวที่ required: `STRAKER_BASE_URL`,
 `STRAKER_LOGIN_ID`, `STRAKER_PASSWORD`, `STRAKER_MAX_WORDS_PER_DAY`,
-`STRAKER_SHEETS_ID`, `STRAKER_CHAT_WEBHOOK_OFFERS`,
+**`STRAKER_DTP_MAX_WORDS_PER_DAY`** (เพดานงาน DTP แยกต่างหาก — required ตั้งแต่
+2026-09-17), `STRAKER_SHEETS_ID`, `STRAKER_CHAT_WEBHOOK_OFFERS`,
 `STRAKER_HEALTHCHECKS_PING_URL` + ใช้ `GOOGLE_CHAT_WEBHOOK_SYSTEM` และ
 `GOOGLE_SERVICE_ACCOUNT_KEY_PATH` **ร่วมกับ XTM โดยตั้งใจ** (on-call ดูที่เดียว —
 ตัวแปรเดียวกันคือสิ่งที่กันไม่ให้สองบอทหลุดไปคนละห้อง)
@@ -305,10 +306,16 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
   **จงใจว่างเปล่า** จนกว่า RP-4 จะยืนยันสัญญาณจริงจากพอร์ทัล. ระหว่างนี้ทุกการถูกปฏิเสธ
   ถูกจัดเป็น `failed` ซึ่งเป็นฝั่งที่ปลอดภัย (FR-005a) แต่เสียงดัง. **ปิดเคสนี้ = เติมค่า
   เดียวลง array นั้น** หลังเห็นของจริงหนึ่งครั้ง (SC-007 ติดป้าย conditional ไว้แล้ว)
-- **เพดาน 50 คำ/วัน ต่ำผิดปกติ** — ตั้งใจ ระหว่าง RP-4 ยังเปิด. งานที่เคยเห็นมี 2-4 คำ
-  จึงยังรับได้หลายงาน แต่ถ้ามีงานอ้างว่า 500 คำโผล่มาจะถูกปฏิเสธ + alert ซึ่งคือ
-  สัญญาณที่อยากได้พอดี (แปลว่า `words` อาจไม่ใช่หน่วย effort ที่เราเข้าใจ).
-  `STRAKER_THROUGHPUT_WORDS_PER_HOUR=389` **pin ไว้** ไม่ให้ derive จากเพดานต่ำ ๆ
+- **มีสองเพดาน แยกกันเด็ดขาด** (ตั้งแต่ 2026-09-17): งานแปลใช้
+  `STRAKER_MAX_WORDS_PER_DAY` (live = 3,500) งาน DTP/monolingual ใช้
+  `STRAKER_DTP_MAX_WORDS_PER_DAY` (live = 30,000) — คนละ ledger คนละ budget
+  งานจัดหน้าหนึ่งวันจึงกินโควตางานแปลไม่ได้ และกลับกัน
+- **throughput ทั้งสองตัว derive จากเพดานของตัวเอง ÷ 9 ชม.ทำงาน** (3,500/9 ≈ 389,
+  30,000/9 ≈ 3,333) — `STRAKER_THROUGHPUT_WORDS_PER_HOUR` และ
+  `STRAKER_DTP_THROUGHPUT_WORDS_PER_HOUR` **ต้องปล่อยว่าง**. ใส่ค่าลงไป = แยกเป็นสอง
+  ปุ่มที่หลุดจากกัน แก้เพดานแล้วเรตค้างที่เดิม
+  ⚠️ **30,000 ยังไม่ใช่ตัวเลขที่วัดมา** — เห็นงาน DTP จริงมาแล้ว 1 งาน (956 คำ)
+  เท่านั้น เงื่อนไขถอนกลับอยู่ใน `plan.md` §Complexity Tracking
 - **โดน 403 = หยุดกดรับถาวร** ข้ามรอบและข้าม restart (เก็บใน `straker_meta`).
   ปลดด้วย `npm run straker:unbar` **เท่านั้น** — ไม่มี auto-recovery เพราะบัญชีที่
   login ได้ก็โดนแบนพร้อมกันได้. ระหว่างโดนแบนยัง **อ่าน/บันทึก/reconcile ต่อ**
@@ -316,10 +323,20 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
   reconcile ทุก 15 นาทีแทน ไม่ใช่ยิงซ้ำ
 
 **"ทำไมบอทไม่คว้างาน X":** เปิด Google Sheet (`NZTC Tracking` → แท็บ
-`Straker_Tracking`) → คอลัมน์ **Skip reason** บอกเหตุผลตรง ๆ; ถ้าไม่มีแถวเลย
-แปลว่าบอทไม่เคย*เห็น*งานนั้น → ดู log `module:pollCycle action:cycle` ว่ารอบนั้น
-`offers` เป็นเท่าไร. เหตุผลที่เจอบ่อย: เกินเพดานวันนั้น · ทำไม่ทันในเวลาทำงานก่อน DL ·
-DL ตรงวันหยุด · อ่าน effort/deadline ไม่ได้ (อันนี้ alert ด้วย — FR-023a)
+`Straker_Tracking`) — **มีสามเคส ไม่ใช่สอง**:
+
+1. **มีแถว + มี Skip reason** → อ่านเหตุผลได้ตรง ๆ. ที่เจอบ่อย: เกินเพดานวันนั้น ·
+   ทำไม่ทันในเวลาทำงานก่อน DL · DL ตรงวันหยุด · อ่าน effort/deadline ไม่ได้
+   (อันนี้ alert ด้วย — FR-023a)
+2. **มีแถว sighting แต่ไม่มีแถว skip** → บอท*เห็น*งาน แต่ **parse ไม่ผ่าน** จึงไม่เคย
+   ตัดสินใจเรื่องมันเลย (เคสนี้เกิดครั้งแรก 2026-09-17). จะมี alert
+   `offer_unreadable` หนึ่งใบต่อหนึ่ง offer id และ log `module:offerParse
+   action:parse outcome:unreadable` บอก field ที่อ่านไม่ออก
+3. **ไม่มีแถวเลย** → บอทไม่เคยเห็นงานนั้น → ดู log `module:pollCycle action:cycle`
+   ว่ารอบนั้น `offers` เป็นเท่าไร. ถ้าเป็น 0 ทั้งที่พอร์ทัลมีงาน ให้สงสัย
+   **entry ที่ไม่มี `obj_id`** ซึ่งยังทำให้การอ่านทั้งรอบล้ม (`offersApi.ts` —
+   ตั้งใจ เพราะงานที่ไม่มี identity ติดตามไม่ได้) แต่ล้มแบบ**เสียงดัง**: cycle fail
+   → heartbeat fail → page
 
 **คำสั่ง ops (อ่านอย่างเดียวทั้งหมด ยกเว้น unbar/requeue):**
 

@@ -234,6 +234,7 @@ function countByChannel(db: DB): Record<string, number> {
 async function runXtm(strakerStateDir: string, cycles = 2): Promise<XtmObservables> {
   vi.stubEnv('STRAKER_STATE_DIR', strakerStateDir);
   vi.stubEnv('STRAKER_MAX_WORDS_PER_DAY', '2000');
+  vi.stubEnv('STRAKER_DTP_MAX_WORDS_PER_DAY', '30000');
 
   const stateDir = tempDir('xtm-isolation-');
   const db = openDatabase(stateDir, NOW_ISO).db;
@@ -277,6 +278,7 @@ function healthyStrakerRecord(): string {
   new StrakerStore(opened.db).hold({
     objId: 'offer-1',
     effortWords: 120,
+    kind: 'translation',
     deadlineMs: Date.parse('2026-09-17T17:00:00+07:00'),
     heldSinceMs: NOW_MS,
   });
@@ -332,6 +334,7 @@ describe('SC-008 — a broken Straker record cannot move the live XTM bot', () =
     openDbs.push(db);
     vi.stubEnv('STRAKER_STATE_DIR', join(tmpdir(), 'straker-never-existed-at-all'));
     vi.stubEnv('STRAKER_MAX_WORDS_PER_DAY', '2000');
+    vi.stubEnv('STRAKER_DTP_MAX_WORDS_PER_DAY', '30000');
 
     const loop = new XtmPollLoop(
       db,
@@ -403,6 +406,7 @@ describe('SC-008 — a running Straker bot leaves the XTM record byte for byte a
       STRAKER_LOGIN_ID: 'user@example.test',
       STRAKER_PASSWORD: 'pw',
       STRAKER_MAX_WORDS_PER_DAY: '2000',
+      STRAKER_DTP_MAX_WORDS_PER_DAY: '30000',
       STRAKER_SHEETS_ID: 'sheet-straker',
       STRAKER_CHAT_WEBHOOK_OFFERS: 'https://chat.example.test/offers',
       GOOGLE_CHAT_WEBHOOK_SYSTEM: 'https://chat.example.test/ops',
@@ -485,6 +489,7 @@ describe('SC-008 — the Straker lock cannot reach a port that is not its own', 
       STRAKER_LOGIN_ID: 'user@example.test',
       STRAKER_PASSWORD: 'pw',
       STRAKER_MAX_WORDS_PER_DAY: '2000',
+      STRAKER_DTP_MAX_WORDS_PER_DAY: '30000',
       STRAKER_SHEETS_ID: 'sheet-straker',
       STRAKER_CHAT_WEBHOOK_OFFERS: 'https://chat.example.test/offers',
       GOOGLE_CHAT_WEBHOOK_SYSTEM: 'https://chat.example.test/ops',

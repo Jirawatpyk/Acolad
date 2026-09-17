@@ -20,14 +20,33 @@
  * | `words` or `due_at` **absent** | that field parses to `null` | The gate turns it into an `effort_unknown` / `deadline_unknown` skip **and an alert** (FR-023a). One offer is passed over; the read is fine. |
  * | any field of the **wrong type**, an unknown `listing_type` or `status`, a missing `obj_id` | throw {@link StrakerOfferShapeError} | The shape changed. Interpreting it is how a bot claims the wrong work while looking healthy. |
  *
- * A throw rejects the **whole read**, not the one entry. That matches `listOpenOffers`, which
- * already rejects an entire reply over a single entry with no `obj_id`, and it is deliberate:
- * dropping a bad entry would shrink the list silently, and a silently shorter list is
- * indistinguishable from offers vanishing — which stamps fabricated lifetimes on live offers.
- * That is the silent-zero family the XTM bot's 38-minute outage belongs to; the mechanism
- * there was different and `offersApi.ts` records it. Upstream, a throw is caught
- * by the bot's supervised cycle guard, logged as `outcome: 'threw'` and fails the heartbeat,
- * so a portal change pages a human within about five minutes instead of decaying quietly.
+ * ## A bad entry costs that entry — revised 2026-09-17, after it cost seventeen cycles
+ *
+ * This file used to let a throw reject the **whole read**, deliberately: dropping an entry
+ * would shrink the list silently, and a silently shorter list is indistinguishable from
+ * offers vanishing, which stamps fabricated lifetimes on live offers. That is the silent-zero
+ * family the XTM bot's 38-minute outage belongs to.
+ *
+ * **The reasoning was sound and the blast radius was wrong.** On 2026-09-17 a DTP offer
+ * arrived with `target_lang: null`, `parseOffer` threw on it correctly, and the caller's
+ * `raw.map` took every *other* offer in the batch down with it. The offer was still there on
+ * the next poll, so it happened again: seventeen consecutive cycles, 07:06:18 to 07:09:19,
+ * each one losing offers that parsed perfectly well. The read was not protected from a bad
+ * entry; it was destroyed by one.
+ *
+ * So the loss is now bounded to the entry. The silent-shrinkage argument is answered instead
+ * by making the drop **loud**: each unreadable entry logs and fires `onUnreadable`, which
+ * raises an `offer_unreadable` alert (FR-023a) keyed on the offer id, so a permanently broken
+ * offer pages once rather than every ten seconds. A shorter list still reaches a human — it
+ * just no longer takes the readable offers with it on the way.
+ *
+ * What still rejects the whole read is an envelope this file never sees: `listOpenOffers`
+ * refuses a reply whose entry has no `obj_id` before parsing begins. An identity-less entry
+ * therefore *does* still blind the read — loudly (cycle fails, heartbeat fails), not
+ * silently, and the {@link StrakerOfferShapeError} branch for a null `objId` here is
+ * unreachable from the portal today. Anything that is not a `StrakerOfferShapeError` — a
+ * genuine bug in this module — is rethrown and still takes the cycle down, which is the
+ * distinction worth keeping.
  *
  * ## The assumptions encoded here, all four of them
  *
@@ -125,6 +144,13 @@ export interface OfferParseOptions {
   readonly logger: Logger;
   /** Defaults to {@link STRAKER_DEADLINE_ZONE}. A parameter so a test can prove it is used. */
   readonly deadlineZone?: DeadlineZone;
+  /**
+   * Called for each entry that cannot be read, instead of the whole read failing.
+   *
+   * `objId` is null when the entry is broken enough to have no identity — there is then
+   * nothing to record it against, and the caller has only the reason to alert on.
+   */
+  readonly onUnreadable?: (objId: string | null, reason: string) => void;
 }
 
 /**
@@ -138,10 +164,22 @@ export function parseOffer(entry: unknown, options: OfferParseOptions): OfferFor
   requireObservedValue(record, 'listing_type', CLAIMABLE_LISTING_TYPE, objId);
   requireObservedValue(record, 'status', OPEN_STATUS, objId);
 
-  const languageDirection = formatLanguageDirection(
-    requireNonEmptyString(record, 'source_lang', objId),
-    requireNonEmptyString(record, 'target_lang', objId),
-  );
+  const sourceLang = requireNonEmptyString(record, 'source_lang', objId);
+  // `target_lang: null` is not a broken payload — it is work with no target language.
+  //
+  // The portal offered a DTP preparation job on 2026-09-17 (`Members Co Ltd Q3.docx`, 956
+  // words, Japanese to Japanese) with an explicit null here. Refusing it threw away the whole
+  // reading for seventeen cycles and lost the job. Null now means monolingual.
+  //
+  // Only null. A missing key, an empty string or a number still fail: those are a payload
+  // this parser does not understand, and the difference between "no target" and "the target
+  // field is wrong" is exactly what keeps this from being a blanket relaxation.
+  const monolingual = 'target_lang' in record && record['target_lang'] === null;
+  const languageDirection = monolingual
+    ? // Source repeated, so the same job reads identically here and in the assigned-work
+      // list — that endpoint does carry a target and reports `ja>ja` for this very job.
+      formatLanguageDirection(sourceLang, sourceLang)
+    : formatLanguageDirection(sourceLang, requireNonEmptyString(record, 'target_lang', objId));
   if (!isFamiliarDirectionShape(languageDirection)) {
     // Not a refusal: `eligibility.ts` infers that anything the portal offers is a direction
     // the account is registered for, and refusing an unrecognised one would drop real work.
@@ -162,6 +200,7 @@ export function parseOffer(entry: unknown, options: OfferParseOptions): OfferFor
   return {
     objId,
     languageDirection,
+    monolingual,
     eligible: isEligibleDirection(languageDirection, options.excludedLanguagePairs),
     effortWords: parseEffort(record['words'], objId),
     deadlineMs: parseDeadline(
@@ -198,7 +237,52 @@ export function createOfferExtractor(
   // Resolved once, not rebuilt per offer: the zone announced in the line above is then
   // provably the same object every parse runs against.
   const resolved: OfferParseOptions = { ...options, deadlineZone: zone };
-  return (raw) => raw.map((entry) => parseOffer(entry, resolved));
+  return (raw) => {
+    const parsed: OfferForDecision[] = [];
+    for (const entry of raw) {
+      try {
+        parsed.push(parseOffer(entry, resolved));
+      } catch (error) {
+        // ONE unreadable entry costs that entry, not the read.
+        //
+        // This threw until 2026-09-17, and the reasoning was sound as far as it went: silently
+        // dropping a bad entry shrinks the list, and a shrinking list is indistinguishable from
+        // offers vanishing. But those were not the only two options. That morning the portal
+        // offered a DTP job carrying `target_lang: null`; the throw took down the whole read for
+        // **17 consecutive cycles across three minutes**, in which the bot saw nothing at all —
+        // and since a parse failure is not a transport failure, nothing alerted either.
+        //
+        // Reporting the entry is the third option: not silent, and not fatal to the offers that
+        // parsed correctly beside it. A claimable offer sitting in the same response as an
+        // unreadable one is no longer collateral damage.
+        if (!(error instanceof StrakerOfferShapeError)) throw error;
+        resolved.logger.error(
+          {
+            module: 'offerParse',
+            action: 'parse',
+            outcome: 'unreadable',
+            objId: error.objId,
+            field: error.field,
+          },
+          error.message,
+        );
+        // The report is guarded, and the irony is the reason: `onUnreadable` writes to
+        // SQLite, this loop runs inside the read's own try, and a throw from here would
+        // abort the read and lose every offer beside the bad one — the exact failure the
+        // per-entry catch above exists to prevent, re-entering through the fix for it.
+        // The log line above has already landed, so a failed enqueue is noisy, not silent.
+        try {
+          resolved.onUnreadable?.(error.objId, error.message);
+        } catch (reportFailed) {
+          resolved.logger.error(
+            { module: 'offerParse', action: 'alert', outcome: 'failed', objId: error.objId },
+            reportFailed instanceof Error ? reportFailed.message : String(reportFailed),
+          );
+        }
+      }
+    }
+    return parsed;
+  };
 }
 
 function asRecord(entry: unknown): Record<string, unknown> {
@@ -228,11 +312,16 @@ function requireNonEmptyString(
  * A field whose every observed value is one single value. Anything else stops the read.
  *
  * This is the deliberately brittle part, and the trade is worth naming: a new `listing_type`
- * or a new `status` takes the bot dark (every read throws, the heartbeat fails, someone is
- * paged) rather than letting it claim work whose terms nobody has established. Three offers
- * of one type cannot show that every type behaves this way — the spec says so in as many
- * words — and claiming is irreversible. Loosening either is a one-line change here, to be
- * made knowingly once Straker has answered what the other values mean (U3/Q3).
+ * or a new `status` is refused rather than claimed on terms nobody has established. Three
+ * offers of one type cannot show that every type behaves this way — the spec says so in as
+ * many words — and claiming is irreversible.
+ *
+ * **What refusal costs, since 2026-09-17**: that offer and no other. The entry is skipped,
+ * logged, and raised as an `offer_unreadable` alert; the rest of the read survives. It no
+ * longer takes the bot dark, which is a smaller consequence than this comment used to
+ * promise — deliberately so, because the version that took the bot dark did exactly that for
+ * seventeen cycles over a `target_lang` of `null`. Loosening either value is still a one-line
+ * change here, to be made knowingly once Straker has answered what the others mean (U3/Q3).
  */
 function requireObservedValue(
   record: Record<string, unknown>,
