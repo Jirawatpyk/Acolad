@@ -70,7 +70,7 @@
  * this task.
  */
 
-import { formatLanguageDirection } from './eligibility.js';
+import { formatLanguageDirection, isMonolingualDirection } from './eligibility.js';
 import { isBudgetSuspended, isSessionExpired, type StrakerHttpClient } from './httpClient.js';
 import type { HoldResult, StrakerLedger } from './ledger.js';
 import type { Logger } from '../monitoring/logger.js';
@@ -686,6 +686,14 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         ? deps.ledger.hold(
             {
               objId: item.objId,
+              // Read back from the direction the assigned list reports, because the offer that
+              // produced this work is long gone. `ja>ja` is DTP preparation; anything with two
+              // different sides is translation. An unreadable direction falls to translation —
+              // the stricter budget, so an unknown kind cannot quietly buy extra capacity.
+              kind:
+                item.languageDirection !== null && isMonolingualDirection(item.languageDirection)
+                  ? 'monolingual'
+                  : 'translation',
               // Zero, not a guess. An unreadable effort makes the day under-state by an
               // unknown amount, which is what the alert's detail says in words.
               effortWords: item.effortWords ?? 0,

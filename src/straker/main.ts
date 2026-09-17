@@ -26,6 +26,7 @@ import {
   createStrakerAlertsSender,
   createStrakerOffersSender,
   createTransportAlertHooks,
+  type StrakerSystemAlert,
   type TransportAlertHooks,
 } from './notifier.js';
 import { GoogleChatSender } from '../reporting/googleChat.js';
@@ -462,10 +463,14 @@ export function assembleStrakerBot(
   const reconciler = createStrakerReconciler({
     portal,
     store,
-    ledger: new StrakerLedger(store, cfg.maxWordsPerDay, {
-      hoursStartMin: cfg.hoursStartMin,
-      workdays: cfg.workdays,
-    }),
+    ledger: new StrakerLedger(
+      store,
+      { translation: cfg.maxWordsPerDay, monolingual: cfg.dtpMaxWordsPerDay },
+      {
+        hoursStartMin: cfg.hoursStartMin,
+        workdays: cfg.workdays,
+      },
+    ),
     outbox,
     logger,
     now,
@@ -478,10 +483,14 @@ export function assembleStrakerBot(
     // appearances a previous run already closed — see `StrakerStore.trackerState`.
     tracker: createSightingTracker(store.trackerState()),
     store,
-    ledger: new StrakerLedger(store, cfg.maxWordsPerDay, {
-      hoursStartMin: cfg.hoursStartMin,
-      workdays: cfg.workdays,
-    }),
+    ledger: new StrakerLedger(
+      store,
+      { translation: cfg.maxWordsPerDay, monolingual: cfg.dtpMaxWordsPerDay },
+      {
+        hoursStartMin: cfg.hoursStartMin,
+        workdays: cfg.workdays,
+      },
+    ),
     outbox,
     logger,
     settings: {
@@ -493,6 +502,28 @@ export function assembleStrakerBot(
     extractOffers: createOfferExtractor({
       excludedLanguagePairs: cfg.excludedLanguagePairs,
       logger,
+      // An offer the parser cannot read is passed over rather than taking the whole reading
+      // down with it — but silently passing it over would be the other half of the same
+      // failure, so it raises an alert. Keyed by offer identity, not by time: the portal
+      // lists the same unreadable offer every ten seconds for as long as it stands, and on
+      // 2026-09-17 that would have been seventeen identical pages in three minutes.
+      onUnreadable: (objId, reason) => {
+        const occurredAtMs = now();
+        outbox.enqueue(
+          `offer_unreadable:${objId ?? 'no-identity'}`,
+          'alerts',
+          JSON.stringify({
+            kind: 'system',
+            condition: 'offer_unreadable',
+            subsystem: 'Straker offer parsing',
+            occurredAtMs,
+            consecutiveFailures: 1,
+            failingSinceMs: occurredAtMs,
+            detail: reason,
+          } satisfies StrakerSystemAlert),
+          occurredAtMs,
+        );
+      },
     }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
   });

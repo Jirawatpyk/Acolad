@@ -107,7 +107,7 @@ function fixture(opts: FixtureOptions = {}): Fixture {
   const outbox = new StrakerOutbox(opened.db);
   const ledger = new StrakerLedger(
     store,
-    opts.ceiling ?? CEILING,
+    { translation: opts.ceiling ?? CEILING, monolingual: opts.ceiling ?? CEILING },
     { hoursStartMin: 9 * 60, workdays: new Set([1, 2, 3, 4, 5]) },
     // Fixed rather than the curated calendar: this suite is about reconciliation, and a
     // holiday moving under it would change which day the ledger buckets into.
@@ -893,6 +893,7 @@ describe('T049 recovered work is counted even past the ceiling, and warns (FR-01
     f.store.hold({
       objId: 'earlier-win',
       effortWords: CEILING - room,
+      kind: 'translation',
       deadlineMs: DEADLINE_MS,
       heldSinceMs: NOW_MS - 3_600_000,
     });
@@ -946,7 +947,10 @@ describe('T049 recovered work is counted even past the ceiling, and warns (FR-01
     await f.reconciler.runIfDue();
 
     expect(
-      f.ledger.checkCapacity({ objId: 'next', effortWords: 1, deadlineMs: DEADLINE_MS }, NOW_MS),
+      f.ledger.checkCapacity(
+        { objId: 'next', effortWords: 1, deadlineMs: DEADLINE_MS, kind: 'translation' },
+        NOW_MS,
+      ),
     ).toMatchObject({ fits: false, reason: 'ceiling_reached' });
   });
 
@@ -1238,7 +1242,7 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
 
     // A second 100-word offer for the same day does not fit under a 150 ceiling.
     const before = f.ledger.checkCapacity(
-      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS },
+      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
       NOW_MS,
     );
     expect(before.fits).toBe(false);
@@ -1254,7 +1258,7 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     // The load-bearing assertion: the budget came back, so the day can be claimed against
     // again. Kills a mutation that marks the row released without the ledger noticing.
     const after = f.ledger.checkCapacity(
-      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS },
+      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
       NOW_MS + RECONCILE_INTERVAL_MS,
     );
     expect(after.fits).toBe(true);

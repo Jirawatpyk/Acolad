@@ -53,6 +53,19 @@ export function normalizeLanguageTag(tag: string): string {
 }
 
 /** `source>target`, in the portal's own identifiers — never display names (FR-011). */
+/**
+ * Is this direction the same language on both sides?
+ *
+ * That is what DTP preparation looks like once it is written down: the portal sends
+ * `target_lang: null` on the offer, the assigned-jobs endpoint reports `ja>ja` for the same
+ * work, and both arrive here as one string. Kept beside the formatter so the two can never
+ * disagree about what a direction is.
+ */
+export function isMonolingualDirection(direction: string): boolean {
+  const [source, target] = normalizeLanguageTag(direction).split(DIRECTION_SEPARATOR);
+  return source !== undefined && source === target;
+}
+
 export function formatLanguageDirection(sourceLang: string, targetLang: string): string {
   return `${normalizeLanguageTag(sourceLang)}${DIRECTION_SEPARATOR}${normalizeLanguageTag(targetLang)}`;
 }

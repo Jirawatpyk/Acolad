@@ -125,6 +125,13 @@ export interface OfferParseOptions {
   readonly logger: Logger;
   /** Defaults to {@link STRAKER_DEADLINE_ZONE}. A parameter so a test can prove it is used. */
   readonly deadlineZone?: DeadlineZone;
+  /**
+   * Called for each entry that cannot be read, instead of the whole read failing.
+   *
+   * `objId` is null when the entry is broken enough to have no identity — there is then
+   * nothing to record it against, and the caller has only the reason to alert on.
+   */
+  readonly onUnreadable?: (objId: string | null, reason: string) => void;
 }
 
 /**
@@ -138,10 +145,22 @@ export function parseOffer(entry: unknown, options: OfferParseOptions): OfferFor
   requireObservedValue(record, 'listing_type', CLAIMABLE_LISTING_TYPE, objId);
   requireObservedValue(record, 'status', OPEN_STATUS, objId);
 
-  const languageDirection = formatLanguageDirection(
-    requireNonEmptyString(record, 'source_lang', objId),
-    requireNonEmptyString(record, 'target_lang', objId),
-  );
+  const sourceLang = requireNonEmptyString(record, 'source_lang', objId);
+  // `target_lang: null` is not a broken payload — it is work with no target language.
+  //
+  // The portal offered a DTP preparation job on 2026-09-17 (`Members Co Ltd Q3.docx`, 956
+  // words, Japanese to Japanese) with an explicit null here. Refusing it threw away the whole
+  // reading for seventeen cycles and lost the job. Null now means monolingual.
+  //
+  // Only null. A missing key, an empty string or a number still fail: those are a payload
+  // this parser does not understand, and the difference between "no target" and "the target
+  // field is wrong" is exactly what keeps this from being a blanket relaxation.
+  const monolingual = 'target_lang' in record && record['target_lang'] === null;
+  const languageDirection = monolingual
+    ? // Source repeated, so the same job reads identically here and in the assigned-work
+      // list — that endpoint does carry a target and reports `ja>ja` for this very job.
+      formatLanguageDirection(sourceLang, sourceLang)
+    : formatLanguageDirection(sourceLang, requireNonEmptyString(record, 'target_lang', objId));
   if (!isFamiliarDirectionShape(languageDirection)) {
     // Not a refusal: `eligibility.ts` infers that anything the portal offers is a direction
     // the account is registered for, and refusing an unrecognised one would drop real work.
@@ -162,6 +181,7 @@ export function parseOffer(entry: unknown, options: OfferParseOptions): OfferFor
   return {
     objId,
     languageDirection,
+    monolingual,
     eligible: isEligibleDirection(languageDirection, options.excludedLanguagePairs),
     effortWords: parseEffort(record['words'], objId),
     deadlineMs: parseDeadline(
@@ -198,7 +218,40 @@ export function createOfferExtractor(
   // Resolved once, not rebuilt per offer: the zone announced in the line above is then
   // provably the same object every parse runs against.
   const resolved: OfferParseOptions = { ...options, deadlineZone: zone };
-  return (raw) => raw.map((entry) => parseOffer(entry, resolved));
+  return (raw) => {
+    const parsed: OfferForDecision[] = [];
+    for (const entry of raw) {
+      try {
+        parsed.push(parseOffer(entry, resolved));
+      } catch (error) {
+        // ONE unreadable entry costs that entry, not the read.
+        //
+        // This threw until 2026-09-17, and the reasoning was sound as far as it went: silently
+        // dropping a bad entry shrinks the list, and a shrinking list is indistinguishable from
+        // offers vanishing. But those were not the only two options. That morning the portal
+        // offered a DTP job carrying `target_lang: null`; the throw took down the whole read for
+        // **17 consecutive cycles across three minutes**, in which the bot saw nothing at all —
+        // and since a parse failure is not a transport failure, nothing alerted either.
+        //
+        // Reporting the entry is the third option: not silent, and not fatal to the offers that
+        // parsed correctly beside it. A claimable offer sitting in the same response as an
+        // unreadable one is no longer collateral damage.
+        if (!(error instanceof StrakerOfferShapeError)) throw error;
+        options.logger.error(
+          {
+            module: 'offerParse',
+            action: 'parse',
+            outcome: 'unreadable',
+            objId: error.objId,
+            field: error.field,
+          },
+          error.message,
+        );
+        resolved.onUnreadable?.(error.objId, error.message);
+      }
+    }
+    return parsed;
+  };
 }
 
 function asRecord(entry: unknown): Record<string, unknown> {

@@ -53,6 +53,7 @@ export const eligible = (id: string): OfferForDecision => ({
   objId: id,
   languageDirection: 'en-us>ms-my',
   eligible: true,
+  monolingual: false,
   effortWords: 4,
   deadlineMs: Date.parse('2026-09-16T17:00:00+07:00'),
 });

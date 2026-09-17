@@ -39,7 +39,7 @@ import { effectiveDeadlineDay } from '../schedule/deadlineDay.js';
 import { holidaysForEffectiveDay } from '../schedule/thaiHolidays.js';
 import { STRAKER_EFFORT_UNIT } from './outcomePolicy.js';
 import type { SkipReason } from './types.js';
-import type { HeldWork, StrakerStore } from './strakerStore.js';
+import { WORK_KINDS, type HeldWork, type StrakerStore, type WorkKind } from './strakerStore.js';
 
 /** Exactly what the ledger touches on the store — declared so the dependency is visible
  *  and so a reader can see that the ledger keeps no state of its own. */
@@ -61,14 +61,20 @@ export interface LedgerCandidate {
   readonly objId: string;
   readonly effortWords: number;
   readonly deadlineMs: number;
+  readonly kind: WorkKind;
 }
 
 /** Work being recorded **after** it is committed. The deadline may be unreadable — a
  *  recovery cannot be refused just because a number was missing from it. */
+/** One daily budget per kind of work — see {@link committedByDay} for why they are separate. */
+export type CeilingPerKind = Readonly<Record<WorkKind, number>>;
+
 export interface CommittedWork {
   readonly objId: string;
   readonly effortWords: number;
   readonly deadlineMs: number | null;
+  /** Which daily budget this work is charged to. Translation and DTP do not share one. */
+  readonly kind: WorkKind;
 }
 
 /** The two capacity outcomes are kept apart because they need different human responses:
@@ -130,7 +136,7 @@ export class StrakerLedger {
   constructor(
     private readonly store: LedgerStore,
     /** Straker's own daily ceiling, in raw words. */
-    private readonly dailyCeiling: number,
+    private readonly ceilings: CeilingPerKind,
     private readonly calendar: LedgerWorkCalendar,
     /** The curated Thai work calendar, injectable for tests. Note this is the *reporting*
      *  resolution (`holidaysForEffectiveDay`), which merges what it has: refusing to claim
@@ -144,16 +150,19 @@ export class StrakerLedger {
     // A zero ceiling is a misconfiguration, not "unlimited". The XTM bot carries a
     // neighbouring knob where 0 does mean unlimited, and reading this one the same way
     // would silently remove the ceiling on an irreversible action.
-    if (!Number.isFinite(dailyCeiling) || dailyCeiling <= 0) {
-      throw new Error(
-        `Straker daily ceiling must be a positive word count, got ${String(dailyCeiling)}`,
-      );
+    for (const kind of WORK_KINDS) {
+      const ceiling = ceilings[kind];
+      if (!Number.isFinite(ceiling) || ceiling <= 0) {
+        throw new Error(
+          `Straker daily ceiling for ${kind} must be a positive word count, got ${String(ceiling)}`,
+        );
+      }
     }
   }
 
   /** Straker's own daily ceiling, in raw words. */
-  get ceiling(): number {
-    return this.dailyCeiling;
+  ceilingFor(kind: WorkKind): number {
+    return this.ceilings[kind];
   }
 
   /**
@@ -166,10 +175,15 @@ export class StrakerLedger {
   committedByDay(
     nowMs: number,
     held: readonly HeldWork[] = this.store.heldWork(),
+    kind: WorkKind = 'translation',
   ): ReadonlyMap<string, number> {
     const holidays = this.holidaysAt(nowMs);
     const byDay = new Map<string, number>();
     for (const work of held) {
+      // Each kind is summed against its own budget. A word of DTP preparation and a word of
+      // translation are both "a word" and are not remotely the same commitment, so adding
+      // them would let a morning of formatting refuse an afternoon of translation.
+      if (work.kind !== kind) continue;
       const day = this.dayOf(work.deadlineMs, holidays);
       if (day === null) continue; // surfaced by heldWorkMissingDeadline, never silently dropped
       byDay.set(day, (byDay.get(day) ?? 0) + work.effortWords);
@@ -177,15 +191,25 @@ export class StrakerLedger {
     return byDay;
   }
 
-  /** Committed effort against one effective deadline day. */
-  committedOn(deadlineDay: string, nowMs: number, held?: readonly HeldWork[]): number {
-    return this.committedByDay(nowMs, held).get(deadlineDay) ?? 0;
+  /** Committed effort against one effective deadline day, for one kind of work. */
+  committedOn(
+    deadlineDay: string,
+    nowMs: number,
+    held?: readonly HeldWork[],
+    kind: WorkKind = 'translation',
+  ): number {
+    return this.committedByDay(nowMs, held, kind).get(deadlineDay) ?? 0;
   }
 
   /** Ceiling minus what is committed, floored at zero — a day past its ceiling has no
    *  negative room to offer, it simply has none. */
-  remainingOn(deadlineDay: string, nowMs: number, held?: readonly HeldWork[]): number {
-    return Math.max(0, this.dailyCeiling - this.committedOn(deadlineDay, nowMs, held));
+  remainingOn(
+    deadlineDay: string,
+    nowMs: number,
+    held?: readonly HeldWork[],
+    kind: WorkKind = 'translation',
+  ): number {
+    return Math.max(0, this.ceilings[kind] - this.committedOn(deadlineDay, nowMs, held, kind));
   }
 
   /**
@@ -225,11 +249,12 @@ export class StrakerLedger {
       );
     }
 
-    const byDay = this.committedByDay(nowMs, held);
+    const byDay = this.committedByDay(nowMs, held, candidate.kind);
+    const ceiling = this.ceilings[candidate.kind];
     const verdict = decideGroupCapacity(
       [{ effort: candidate.effortWords, deadlineDate: deadlineDay }],
       (day) => byDay.get(day) ?? 0,
-      this.dailyCeiling,
+      ceiling,
       STRAKER_EFFORT_UNIT,
     );
 
@@ -239,7 +264,7 @@ export class StrakerLedger {
         fits: true,
         deadlineDay,
         committedEffort,
-        remaining: Math.max(0, this.dailyCeiling - committedEffort),
+        remaining: Math.max(0, ceiling - committedEffort),
       };
     }
     return {
@@ -268,6 +293,7 @@ export class StrakerLedger {
       effortWords: work.effortWords,
       deadlineMs: work.deadlineMs,
       heldSinceMs: nowMs,
+      kind: work.kind,
     });
 
     const day = this.dayOf(work.deadlineMs, this.holidaysAt(nowMs));
@@ -277,17 +303,18 @@ export class StrakerLedger {
         // No day means no day total and no day to have breached. The row is surfaced by
         // heldWorkMissingDeadline instead, which is the honest signal here.
         committedEffort: null,
-        ceiling: this.dailyCeiling,
+        ceiling: this.ceilings[work.kind],
         ceilingExceeded: false,
       };
     }
 
-    const committedEffort = this.committedOn(day, nowMs);
+    const ceiling = this.ceilings[work.kind];
+    const committedEffort = this.committedOn(day, nowMs, undefined, work.kind);
     return {
       deadlineDay: day,
       committedEffort,
-      ceiling: this.dailyCeiling,
-      ceilingExceeded: committedEffort > this.dailyCeiling,
+      ceiling,
+      ceilingExceeded: committedEffort > ceiling,
     };
   }
 

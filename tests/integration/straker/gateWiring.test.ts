@@ -91,6 +91,7 @@ const ROOMY = 100_000;
 function offer(objId: string, over: Partial<OfferForDecision> = {}): OfferForDecision {
   return {
     objId,
+    monolingual: false,
     languageDirection: 'en-GB>ms-MY',
     eligible: true,
     effortWords: 100,
@@ -108,7 +109,14 @@ function freshLedger(ceiling: number): { ledger: StrakerLedger; store: StrakerSt
   const opened = openStrakerDatabase(dir, WED_10AM);
   openDbs.push(opened.db);
   const store = new StrakerStore(opened.db);
-  return { ledger: new StrakerLedger(store, ceiling, LEDGER_CALENDAR), store };
+  return {
+    ledger: new StrakerLedger(
+      store,
+      { translation: ceiling, monolingual: ceiling },
+      LEDGER_CALENDAR,
+    ),
+    store,
+  };
 }
 
 afterEach(() => {
@@ -133,7 +141,14 @@ function ctx(
 
 /** A held row, for seeding a day that is already partly (or wholly) spent. */
 function heldRow(objId: string, effortWords: number, deadlineMs: number): HeldWork {
-  return { objId, effortWords, deadlineMs, heldSinceMs: WED_10AM, releasedAtMs: null };
+  return {
+    objId,
+    effortWords,
+    deadlineMs,
+    heldSinceMs: WED_10AM,
+    kind: 'translation',
+    releasedAtMs: null,
+  };
 }
 
 /**

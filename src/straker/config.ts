@@ -75,6 +75,16 @@ const botSchema = z
     STRAKER_MAX_WORDS_PER_DAY: z.coerce.number().int().positive(),
     STRAKER_THROUGHPUT_WORDS_PER_HOUR: z.coerce.number().positive().optional(),
 
+    // --- The same two knobs again, for work that is not translation (2026-09-17) ---------
+    // The portal offers DTP preparation: source and target are the same language, and the
+    // offer carries `target_lang: null` because there is nothing to translate into. Word
+    // count is a poor measure of that work — a 956-word document might be an hour of
+    // formatting or four — so it gets its OWN budget rather than spending the translation
+    // one. Without this, three DTP jobs would exhaust the translation ceiling for the day
+    // and the bot would refuse real translation work it had capacity for.
+    STRAKER_DTP_MAX_WORDS_PER_DAY: z.coerce.number().int().positive(),
+    STRAKER_DTP_THROUGHPUT_WORDS_PER_HOUR: z.coerce.number().positive().optional(),
+
     // --- Isolation from the live XTM bot (FR-024) ----------------------------------
     STRAKER_SINGLE_INSTANCE_PORT: z.coerce.number().int().min(1).max(65_535).default(47812),
     STRAKER_STATE_DIR: z.string().min(1).default('state/straker'),
@@ -162,6 +172,9 @@ export interface StrakerBotConfig {
   readonly serviceAccountKeyPath: string;
   readonly maxWordsPerDay: number;
   readonly throughputWordsPerHour: number;
+  /** The separate budget for non-translation work (DTP), and its derived rate. */
+  readonly dtpMaxWordsPerDay: number;
+  readonly dtpThroughputWordsPerHour: number;
 
   readonly singleInstancePort: number;
   readonly stateDir: string;
@@ -204,6 +217,18 @@ export function loadStrakerBotConfig(env: NodeJS.ProcessEnv): StrakerBotConfig {
         ? {}
         : { explicit: c.STRAKER_THROUGHPUT_WORDS_PER_HOUR }),
       maxWordsPerDay: c.STRAKER_MAX_WORDS_PER_DAY,
+      hoursStartMin,
+      hoursEndMin,
+    }),
+
+    dtpMaxWordsPerDay: c.STRAKER_DTP_MAX_WORDS_PER_DAY,
+    // Derived the same way, from the DTP ceiling — one knob per kind of work, matching how
+    // the XTM bot resolves its own throughput.
+    dtpThroughputWordsPerHour: resolveThroughput({
+      ...(c.STRAKER_DTP_THROUGHPUT_WORDS_PER_HOUR === undefined
+        ? {}
+        : { explicit: c.STRAKER_DTP_THROUGHPUT_WORDS_PER_HOUR }),
+      maxWordsPerDay: c.STRAKER_DTP_MAX_WORDS_PER_DAY,
       hoursStartMin,
       hoursEndMin,
     }),

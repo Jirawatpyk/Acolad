@@ -374,6 +374,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
                   objId: decision.objId,
                   effortWords: decision.effortWords,
                   deadlineMs: decision.deadlineMs,
+                  kind: decision.monolingual ? 'monolingual' : 'translation',
                 },
                 atMs,
               );

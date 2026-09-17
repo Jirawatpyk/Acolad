@@ -55,6 +55,7 @@ function env(overrides: Record<string, string> = {}): Record<string, string> {
     STRAKER_LOGIN_ID: 'user@example.test',
     STRAKER_PASSWORD: 'pw',
     STRAKER_MAX_WORDS_PER_DAY: '2000',
+    STRAKER_DTP_MAX_WORDS_PER_DAY: '30000',
     STRAKER_SHEETS_ID: 'sheet-straker',
     STRAKER_CHAT_WEBHOOK_OFFERS: 'https://chat.example.test/offers',
     GOOGLE_CHAT_WEBHOOK_SYSTEM: 'https://chat.example.test/ops',

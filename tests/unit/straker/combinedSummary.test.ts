@@ -1074,6 +1074,7 @@ describe('readStrakerWorkload — a state directory that has never existed', () 
     store.hold({
       objId: 'offer-1',
       effortWords: 800,
+      kind: 'translation',
       deadlineMs: Date.parse('2026-09-17T17:00:00+07:00'),
       heldSinceMs: NOW_MS,
     });
@@ -1189,6 +1190,7 @@ describe('combinedReportRows — the rows the XTM 09:00 report renders (T060a, F
     new StrakerStore(straker.db).hold({
       objId: 'a',
       effortWords: 120,
+      kind: 'translation',
       deadlineMs: Date.parse('2026-09-17T17:00:00+07:00'),
       heldSinceMs: NOW_MS,
     });

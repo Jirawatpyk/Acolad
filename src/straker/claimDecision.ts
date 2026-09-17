@@ -78,6 +78,13 @@ export interface OfferForDecision {
   readonly effortWords: number | null;
   /** Deadline as epoch ms, or null when the payload carried none. */
   readonly deadlineMs: number | null;
+  /**
+   * True when the offer is not a translation — source and target are the same language,
+   * which the portal signals by sending `target_lang: null` (observed 2026-09-17 on a DTP
+   * preparation job). Such work is measured against its own daily budget and its own rate,
+   * because a word count says much less about how long it takes.
+   */
+  readonly monolingual: boolean;
 }
 
 /** Claim it, or skip it and say which rule turned it away. There is no third answer. */
@@ -86,6 +93,8 @@ export type ClaimDecision =
       readonly objId: string;
       readonly languageDirection: string;
       readonly action: 'claim';
+      /** Carried through so the hold is charged to the budget the decision was made against. */
+      readonly monolingual: boolean;
       /** Non-null by construction: the gate refuses an offer with no effort. */
       readonly effortWords: number;
       /** Non-null by construction: the gate refuses an offer with no deadline. */
@@ -195,6 +204,7 @@ export function decideClaims(
         effortWords: decision.effortWords,
         deadlineMs: decision.deadlineMs,
         heldSinceMs: nowMs,
+        kind: offer.monolingual ? 'monolingual' : 'translation',
         releasedAtMs: null,
       });
     }
@@ -281,7 +291,12 @@ function decideOne(
   // decision could reinstate the check — see spec.md §Clarifications, 2026-09-15.
 
   const capacity = ledger.checkCapacity(
-    { objId: offer.objId, effortWords, deadlineMs },
+    {
+      objId: offer.objId,
+      effortWords,
+      deadlineMs,
+      kind: offer.monolingual ? 'monolingual' : 'translation',
+    },
     nowMs,
     held,
   );
@@ -291,6 +306,7 @@ function decideOne(
     objId: offer.objId,
     languageDirection: offer.languageDirection,
     action: 'claim',
+    monolingual: offer.monolingual,
     effortWords,
     deadlineMs,
     deadlineDay: capacity.deadlineDay,

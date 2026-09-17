@@ -147,6 +147,7 @@ const sightingEvent = (over: Partial<SightingEvent> = {}): SightingEvent => ({
 const hold = (over: Partial<NewHold> = {}): NewHold => ({
   objId: 'e3b0c442-98fc-1c14-9afb-f4c8996fb924',
   effortWords: 1_200,
+  kind: 'translation',
   deadlineMs: Date.parse('2026-09-17T17:00:00+07:00'),
   heldSinceMs: NOW_MS,
   ...over,

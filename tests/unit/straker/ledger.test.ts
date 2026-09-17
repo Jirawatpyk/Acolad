@@ -96,8 +96,13 @@ function freshLedger(
   const store = new StrakerStore(opened.db);
   const ledger =
     holidaysAt === undefined
-      ? new StrakerLedger(store, ceiling, CALENDAR)
-      : new StrakerLedger(store, ceiling, CALENDAR, holidaysAt);
+      ? new StrakerLedger(store, { translation: ceiling, monolingual: ceiling }, CALENDAR)
+      : new StrakerLedger(
+          store,
+          { translation: ceiling, monolingual: ceiling },
+          CALENDAR,
+          holidaysAt,
+        );
   return { ledger, store, dir };
 }
 
@@ -126,7 +131,10 @@ describe('keyed by effective deadline day', () => {
   it('charges the work to its deadline day, not to the day it was claimed', () => {
     const { ledger } = freshLedger();
     // Claimed on Monday; due Thursday afternoon.
-    ledger.hold({ objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
 
     expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(400);
     expect(ledger.committedOn('2026-09-14', NOW_MS)).toBe(0);
@@ -135,7 +143,10 @@ describe('keyed by effective deadline day', () => {
   it('charges a deadline that falls before the working day starts to the previous one', () => {
     const { ledger } = freshLedger();
     // 08:00 Wednesday leaves zero working minutes on Wednesday, so the work is Tuesday's.
-    ledger.hold({ objId: 'offer-1', effortWords: 400, deadlineMs: WED_BEFORE_WORK }, NOW_MS);
+    ledger.hold(
+      { objId: 'offer-1', effortWords: 400, deadlineMs: WED_BEFORE_WORK, kind: 'translation' },
+      NOW_MS,
+    );
 
     expect(ledger.committedOn('2026-09-15', NOW_MS)).toBe(400);
     expect(ledger.committedOn('2026-09-16', NOW_MS)).toBe(0);
@@ -143,7 +154,10 @@ describe('keyed by effective deadline day', () => {
 
   it('charges a weekend deadline to the working day before it', () => {
     const { ledger } = freshLedger();
-    ledger.hold({ objId: 'offer-1', effortWords: 400, deadlineMs: SAT_MIDDAY }, NOW_MS);
+    ledger.hold(
+      { objId: 'offer-1', effortWords: 400, deadlineMs: SAT_MIDDAY, kind: 'translation' },
+      NOW_MS,
+    );
 
     expect(ledger.committedOn('2026-09-18', NOW_MS)).toBe(400);
     expect(ledger.committedOn('2026-09-19', NOW_MS)).toBe(0);
@@ -152,7 +166,10 @@ describe('keyed by effective deadline day', () => {
   it('honours the work calendar, so a holiday deadline lands on the working day before it', () => {
     const holidays = new Map([['2026-09-18', 'Invented Day']]);
     const { ledger } = freshLedger(CEILING, () => holidays);
-    ledger.hold({ objId: 'offer-1', effortWords: 400, deadlineMs: FRI_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'offer-1', effortWords: 400, deadlineMs: FRI_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
 
     expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(400);
     expect(ledger.committedOn('2026-09-18', NOW_MS)).toBe(0);
@@ -160,9 +177,18 @@ describe('keyed by effective deadline day', () => {
 
   it('sums several offers due on the same day and keeps different days apart', () => {
     const { ledger } = freshLedger();
-    ledger.hold({ objId: 'a', effortWords: 300, deadlineMs: THU_AFTERNOON }, NOW_MS);
-    ledger.hold({ objId: 'b', effortWords: 250, deadlineMs: THU_AFTERNOON }, NOW_MS);
-    ledger.hold({ objId: 'c', effortWords: 100, deadlineMs: FRI_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'a', effortWords: 300, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
+    ledger.hold(
+      { objId: 'b', effortWords: 250, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
+    ledger.hold(
+      { objId: 'c', effortWords: 100, deadlineMs: FRI_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
 
     expect([...ledger.committedByDay(NOW_MS)].sort()).toEqual([
       ['2026-09-17', 550],
@@ -178,7 +204,10 @@ describe('keyed by effective deadline day', () => {
 describe('derived from held work', () => {
   it('gives the budget back when the work is finished, which a counter cannot do', () => {
     const { ledger } = freshLedger();
-    ledger.hold({ objId: 'offer-1', effortWords: 500, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'offer-1', effortWords: 500, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
     expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(500);
 
     expect(ledger.release('offer-1', NOW_MS + 3_600_000)).toBe(true);
@@ -191,11 +220,15 @@ describe('derived from held work', () => {
     // ledger's back, through a second store on the same database, and the ledger's answer
     // moves with it. A counter would still be reporting the old number.
     const { ledger, store } = freshLedger();
-    ledger.hold({ objId: 'offer-1', effortWords: 500, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'offer-1', effortWords: 500, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
 
     store.hold({
       objId: 'offer-2',
       effortWords: 200,
+      kind: 'translation',
       deadlineMs: THU_AFTERNOON,
       heldSinceMs: NOW_MS,
     });
@@ -207,8 +240,14 @@ describe('derived from held work', () => {
 
   it('counts an offer held twice once, so a re-run after a crash does not double the day', () => {
     const { ledger } = freshLedger();
-    ledger.hold({ objId: 'offer-1', effortWords: 500, deadlineMs: THU_AFTERNOON }, NOW_MS);
-    ledger.hold({ objId: 'offer-1', effortWords: 500, deadlineMs: THU_AFTERNOON }, NOW_MS + 1_000);
+    ledger.hold(
+      { objId: 'offer-1', effortWords: 500, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
+    ledger.hold(
+      { objId: 'offer-1', effortWords: 500, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS + 1_000,
+    );
 
     expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(500);
   });
@@ -218,7 +257,10 @@ describe('derived from held work', () => {
     // Reconciliation can hand back work the portal says is ours without a readable
     // deadline. Refusing to record it would lose it (FR-016d); bucketing it under a
     // guessed day would corrupt the ceiling. It is recorded, excluded, and named.
-    ledger.hold({ objId: 'offer-1', effortWords: 500, deadlineMs: null }, NOW_MS);
+    ledger.hold(
+      { objId: 'offer-1', effortWords: 500, deadlineMs: null, kind: 'translation' },
+      NOW_MS,
+    );
 
     expect([...ledger.committedByDay(NOW_MS)]).toEqual([]);
     expect(ledger.heldWorkMissingDeadline(NOW_MS)).toEqual(['offer-1']);
@@ -232,7 +274,7 @@ describe('derived from held work', () => {
 describe('a ceiling of its own', () => {
   it('uses the ceiling it was given and reads no figure from the XTM bot', () => {
     const { ledger } = freshLedger(2_500);
-    expect(ledger.ceiling).toBe(2_500);
+    expect(ledger.ceilingFor('translation')).toBe(2_500);
     expect(ledger.remainingOn('2026-09-17', NOW_MS)).toBe(2_500);
     expect(readFileSync(LEDGER_SOURCE, 'utf8')).not.toMatch(/ACCEPT_MAX/);
   });
@@ -251,12 +293,18 @@ describe('a ceiling of its own', () => {
     process.env.ACCEPT_EFFORT_METRIC = 'wwc';
     try {
       const { ledger } = freshLedger(1_000);
-      ledger.hold({ objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON }, NOW_MS);
+      ledger.hold(
+        { objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+        NOW_MS,
+      );
 
-      expect(ledger.ceiling).toBe(1_000);
+      expect(ledger.ceilingFor('translation')).toBe(1_000);
       expect(ledger.remainingOn('2026-09-17', NOW_MS)).toBe(600);
       expect(
-        ledger.checkCapacity({ objId: 'big', effortWords: 900, deadlineMs: THU_AFTERNOON }, NOW_MS),
+        ledger.checkCapacity(
+          { objId: 'big', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+          NOW_MS,
+        ),
       ).toMatchObject({ fits: false });
     } finally {
       restoreEnv('ACCEPT_MAX_WORDS_PER_DAY', before.words);
@@ -282,10 +330,20 @@ describe('a ceiling of its own', () => {
 
     const opened = openStrakerDatabase(strakerDir, NOW_MS);
     openDbs.push(opened.db);
-    const ledger = new StrakerLedger(new StrakerStore(opened.db), CEILING, CALENDAR);
+    const ledger = new StrakerLedger(
+      new StrakerStore(opened.db),
+      { translation: CEILING, monolingual: CEILING },
+      CALENDAR,
+    );
 
-    ledger.hold({ objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON }, NOW_MS);
-    ledger.checkCapacity({ objId: 'offer-2', effortWords: 400, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
+    ledger.checkCapacity(
+      { objId: 'offer-2', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
     ledger.committedByDay(NOW_MS);
     ledger.heldWorkMissingDeadline(NOW_MS);
     ledger.release('offer-1', NOW_MS + 3_600_000);
@@ -323,13 +381,22 @@ describe('a ceiling of its own', () => {
     // The boundary is where an off-by-one turns into an over-commitment, and an
     // irreversible claim is a poor place to discover one.
     const { ledger } = freshLedger();
-    ledger.hold({ objId: 'held', effortWords: 600, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'held', effortWords: 600, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
 
     expect(
-      ledger.checkCapacity({ objId: 'exact', effortWords: 400, deadlineMs: THU_AFTERNOON }, NOW_MS),
+      ledger.checkCapacity(
+        { objId: 'exact', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+        NOW_MS,
+      ),
     ).toMatchObject({ fits: true });
     expect(
-      ledger.checkCapacity({ objId: 'over', effortWords: 401, deadlineMs: THU_AFTERNOON }, NOW_MS),
+      ledger.checkCapacity(
+        { objId: 'over', effortWords: 401, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+        NOW_MS,
+      ),
     ).toMatchObject({ fits: false, reason: 'ceiling_reached' });
   });
 
@@ -340,16 +407,28 @@ describe('a ceiling of its own', () => {
     openDbs.push(opened.db);
     const store = new StrakerStore(opened.db);
 
-    expect(() => new StrakerLedger(store, 0, CALENDAR)).toThrow(/ceiling/i);
-    expect(() => new StrakerLedger(store, -1, CALENDAR)).toThrow(/ceiling/i);
+    expect(() => new StrakerLedger(store, { translation: 0, monolingual: 0 }, CALENDAR)).toThrow(
+      /ceiling/i,
+    );
+    expect(() => new StrakerLedger(store, { translation: -1, monolingual: 100 }, CALENDAR)).toThrow(
+      /ceiling/i,
+    );
+    // And the other budget is checked too — a valid translation ceiling must not excuse a
+    // nonsensical DTP one, which is the shape a half-configured second budget would take.
+    expect(() => new StrakerLedger(store, { translation: 100, monolingual: 0 }, CALENDAR)).toThrow(
+      /monolingual/i,
+    );
   });
 
   it('measures effort in raw words, and says so in the reason a human reads', () => {
     const { ledger } = freshLedger();
-    ledger.hold({ objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
 
     const verdict = ledger.checkCapacity(
-      { objId: 'next', effortWords: 300, deadlineMs: THU_AFTERNOON },
+      { objId: 'next', effortWords: 300, deadlineMs: THU_AFTERNOON, kind: 'translation' },
       NOW_MS,
     );
     expect(verdict.fits).toBe(false);
@@ -365,7 +444,7 @@ describe('capacity decisions', () => {
   it('lets an offer through while the day has room', () => {
     const { ledger } = freshLedger();
     const verdict = ledger.checkCapacity(
-      { objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON },
+      { objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
       NOW_MS,
     );
 
@@ -375,10 +454,13 @@ describe('capacity decisions', () => {
 
   it('blocks with ceiling_reached once the day is spent, which frees up as work finishes', () => {
     const { ledger } = freshLedger();
-    ledger.hold({ objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
 
     const verdict = ledger.checkCapacity(
-      { objId: 'offer-1', effortWords: 300, deadlineMs: THU_AFTERNOON },
+      { objId: 'offer-1', effortWords: 300, deadlineMs: THU_AFTERNOON, kind: 'translation' },
       NOW_MS,
     );
     expect(verdict).toMatchObject({ fits: false, reason: 'ceiling_reached' });
@@ -387,7 +469,12 @@ describe('capacity decisions', () => {
   it('blocks an offer larger than a whole day with its own reason, because it needs a human', () => {
     const { ledger } = freshLedger();
     const verdict = ledger.checkCapacity(
-      { objId: 'offer-1', effortWords: CEILING + 1, deadlineMs: THU_AFTERNOON },
+      {
+        objId: 'offer-1',
+        effortWords: CEILING + 1,
+        deadlineMs: THU_AFTERNOON,
+        kind: 'translation',
+      },
       NOW_MS,
     );
 
@@ -398,20 +485,32 @@ describe('capacity decisions', () => {
 
   it('applies the ceiling per day, so a full Thursday does not block a Friday deadline', () => {
     const { ledger } = freshLedger();
-    ledger.hold({ objId: 'held', effortWords: CEILING, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'held', effortWords: CEILING, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
 
     expect(
-      ledger.checkCapacity({ objId: 'a', effortWords: 100, deadlineMs: THU_AFTERNOON }, NOW_MS),
+      ledger.checkCapacity(
+        { objId: 'a', effortWords: 100, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+        NOW_MS,
+      ),
     ).toMatchObject({ fits: false });
     expect(
-      ledger.checkCapacity({ objId: 'b', effortWords: 100, deadlineMs: FRI_AFTERNOON }, NOW_MS),
+      ledger.checkCapacity(
+        { objId: 'b', effortWords: 100, deadlineMs: FRI_AFTERNOON, kind: 'translation' },
+        NOW_MS,
+      ),
     ).toMatchObject({ fits: true });
   });
 
   it('treats a deadline it cannot read as a hard failure, never as a day with room', () => {
     const { ledger } = freshLedger();
     expect(() =>
-      ledger.checkCapacity({ objId: 'offer-1', effortWords: 100, deadlineMs: Number.NaN }, NOW_MS),
+      ledger.checkCapacity(
+        { objId: 'offer-1', effortWords: 100, deadlineMs: Number.NaN, kind: 'translation' },
+        NOW_MS,
+      ),
     ).toThrow(/deadline/i);
   });
 });
@@ -423,13 +522,16 @@ describe('capacity decisions', () => {
 describe('work recovered by reconciliation (FR-016d, V25)', () => {
   it('records work that pushes the day past its ceiling, and reports that it did', () => {
     const { ledger } = freshLedger();
-    ledger.hold({ objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
 
     // Reconciliation found an offer the portal says is already ours. The ledger is
     // recording reality here, not deciding anything — refusing it would leave the team
     // holding work that counts against nothing.
     const result = ledger.hold(
-      { objId: 'recovered', effortWords: 300, deadlineMs: THU_AFTERNOON },
+      { objId: 'recovered', effortWords: 300, deadlineMs: THU_AFTERNOON, kind: 'translation' },
       NOW_MS,
     );
 
@@ -444,15 +546,27 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
 
   it('then blocks further claims for that day as normal, leaving other days alone', () => {
     const { ledger } = freshLedger();
-    ledger.hold({ objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON }, NOW_MS);
-    ledger.hold({ objId: 'recovered', effortWords: 300, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
+    ledger.hold(
+      { objId: 'recovered', effortWords: 300, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
 
     expect(ledger.remainingOn('2026-09-17', NOW_MS)).toBe(0); // never negative — spent is spent
     expect(
-      ledger.checkCapacity({ objId: 'next', effortWords: 1, deadlineMs: THU_AFTERNOON }, NOW_MS),
+      ledger.checkCapacity(
+        { objId: 'next', effortWords: 1, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+        NOW_MS,
+      ),
     ).toMatchObject({ fits: false, reason: 'ceiling_reached' });
     expect(
-      ledger.checkCapacity({ objId: 'next', effortWords: 500, deadlineMs: FRI_AFTERNOON }, NOW_MS),
+      ledger.checkCapacity(
+        { objId: 'next', effortWords: 500, deadlineMs: FRI_AFTERNOON, kind: 'translation' },
+        NOW_MS,
+      ),
     ).toMatchObject({ fits: true });
   });
 
@@ -461,17 +575,23 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
     // day that is precisely within its budget, and an FR-016d warning that cries wolf is a
     // warning nobody reads on the day it matters.
     const { ledger } = freshLedger();
-    ledger.hold({ objId: 'held', effortWords: 600, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    ledger.hold(
+      { objId: 'held', effortWords: 600, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
 
     const exact = ledger.hold(
-      { objId: 'exact', effortWords: 400, deadlineMs: THU_AFTERNOON },
+      { objId: 'exact', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
       NOW_MS,
     );
     expect(exact.committedEffort).toBe(CEILING);
     expect(exact.ceilingExceeded).toBe(false);
 
     // And one word past it is a breach.
-    const over = ledger.hold({ objId: 'over', effortWords: 1, deadlineMs: THU_AFTERNOON }, NOW_MS);
+    const over = ledger.hold(
+      { objId: 'over', effortWords: 1, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
     expect(over.committedEffort).toBe(CEILING + 1);
     expect(over.ceilingExceeded).toBe(true);
   });
@@ -479,7 +599,7 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
   it('reports no breach for a hold that stays inside the ceiling', () => {
     const { ledger } = freshLedger();
     const result = ledger.hold(
-      { objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON },
+      { objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
       NOW_MS,
     );
 
@@ -489,7 +609,10 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
 
   it('records work whose deadline it cannot read without claiming a day was breached', () => {
     const { ledger } = freshLedger();
-    const result = ledger.hold({ objId: 'offer-1', effortWords: 5_000, deadlineMs: null }, NOW_MS);
+    const result = ledger.hold(
+      { objId: 'offer-1', effortWords: 5_000, deadlineMs: null, kind: 'translation' },
+      NOW_MS,
+    );
 
     expect(result.deadlineDay).toBeNull();
     // No day means no day total. Reporting 0 for a 5_000-word hold reads as "that day has
@@ -497,5 +620,112 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
     expect(result.committedEffort).toBeNull();
     expect(result.ceilingExceeded).toBe(false);
     expect(ledger.heldWorkMissingDeadline(NOW_MS)).toEqual(['offer-1']);
+  });
+});
+
+describe('two budgets — DTP work does not spend the translation ceiling', () => {
+  /**
+   * From production on 2026-09-17. The portal offered a DTP preparation job of 956 words
+   * (`Members Co Ltd Q3.docx`, Japanese to Japanese). A word of formatting and a word of
+   * translation are both "a word" and are nothing like the same commitment — so on a single
+   * budget, three such documents would exhaust a 3,500-word day and the bot would then refuse
+   * real translation work it had every hour free to do.
+   */
+  const CALENDAR_ONLY: LedgerWorkCalendar = CALENDAR;
+  const THU = '2026-09-17';
+
+  function twoBudgets(
+    translation: number,
+    monolingual: number,
+  ): {
+    ledger: StrakerLedger;
+    store: StrakerStore;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), 'straker-two-budgets-'));
+    dirs.push(dir);
+    const opened = openStrakerDatabase(dir, NOW_MS);
+    openDbs.push(opened.db);
+    const store = new StrakerStore(opened.db);
+    return {
+      store,
+      ledger: new StrakerLedger(
+        store,
+        { translation, monolingual },
+        CALENDAR_ONLY,
+        () => new Map(),
+      ),
+    };
+  }
+
+  it('leaves the translation budget untouched when DTP work is held', () => {
+    const { ledger } = twoBudgets(3_500, 30_000);
+
+    ledger.hold(
+      { objId: 'dtp-1', effortWords: 3_000, deadlineMs: THU_AFTERNOON, kind: 'monolingual' },
+      NOW_MS,
+    );
+
+    // The DTP day is spent down …
+    expect(ledger.committedOn(THU, NOW_MS, undefined, 'monolingual')).toBe(3_000);
+    // … and the translation day has not moved at all. This is the whole point.
+    expect(ledger.committedOn(THU, NOW_MS, undefined, 'translation')).toBe(0);
+    expect(ledger.remainingOn(THU, NOW_MS, undefined, 'translation')).toBe(3_500);
+  });
+
+  it('still admits a translation claim on a day already full of DTP work', () => {
+    // The failure this prevents, stated as a claim rather than as a sum.
+    const { ledger } = twoBudgets(3_500, 30_000);
+    ledger.hold(
+      { objId: 'dtp-1', effortWords: 29_000, deadlineMs: THU_AFTERNOON, kind: 'monolingual' },
+      NOW_MS,
+    );
+
+    const verdict = ledger.checkCapacity(
+      { objId: 'job-1', effortWords: 1_000, deadlineMs: THU_AFTERNOON, kind: 'translation' },
+      NOW_MS,
+    );
+
+    expect(verdict.fits).toBe(true);
+  });
+
+  it('refuses DTP work once the DTP budget is full, rather than borrowing the other one', () => {
+    // Separation has to hold in both directions, or it is just a bigger single budget.
+    const { ledger } = twoBudgets(3_500, 1_000);
+    ledger.hold(
+      { objId: 'dtp-1', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'monolingual' },
+      NOW_MS,
+    );
+
+    const verdict = ledger.checkCapacity(
+      { objId: 'dtp-2', effortWords: 500, deadlineMs: THU_AFTERNOON, kind: 'monolingual' },
+      NOW_MS,
+    );
+
+    expect(verdict.fits).toBe(false);
+  });
+
+  it('reports the ceiling of the kind being held, not a single figure for both', () => {
+    const { ledger } = twoBudgets(3_500, 30_000);
+
+    const held = ledger.hold(
+      { objId: 'dtp-1', effortWords: 100, deadlineMs: THU_AFTERNOON, kind: 'monolingual' },
+      NOW_MS,
+    );
+
+    expect(held.ceiling).toBe(30_000);
+    expect(ledger.ceilingFor('translation')).toBe(3_500);
+  });
+
+  it('charges work whose kind survived a restart, because the store remembers it', () => {
+    // The kind lives in `held_work`, not in memory: a bot that restarted between claiming DTP
+    // work and reading the budget back must not silently re-file it as translation.
+    const { ledger, store } = twoBudgets(3_500, 30_000);
+    ledger.hold(
+      { objId: 'dtp-1', effortWords: 2_000, deadlineMs: THU_AFTERNOON, kind: 'monolingual' },
+      NOW_MS,
+    );
+
+    expect(store.heldWork().map((w) => w.kind)).toEqual(['monolingual']);
+    expect(ledger.committedOn(THU, NOW_MS, undefined, 'translation')).toBe(0);
   });
 });
