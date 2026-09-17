@@ -62,8 +62,12 @@ export function normalizeLanguageTag(tag: string): string {
  * disagree about what a direction is.
  */
 export function isMonolingualDirection(direction: string): boolean {
-  const [source, target] = normalizeLanguageTag(direction).split(DIRECTION_SEPARATOR);
-  return source !== undefined && source === target;
+  // Normalised per side, not once over the whole string: `' JA > ja '` lower-cases to
+  // `'ja > ja'`, whose halves still differ by a space. Our own formatter never produces
+  // that, so this is not a live bug — but the failure would be to file DTP work against the
+  // translation ceiling, and the cost of being sure is one call.
+  const [source, target] = direction.split(DIRECTION_SEPARATOR).map(normalizeLanguageTag);
+  return source !== undefined && target !== undefined && source === target;
 }
 
 export function formatLanguageDirection(sourceLang: string, targetLang: string): string {

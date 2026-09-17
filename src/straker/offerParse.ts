@@ -20,14 +20,33 @@
  * | `words` or `due_at` **absent** | that field parses to `null` | The gate turns it into an `effort_unknown` / `deadline_unknown` skip **and an alert** (FR-023a). One offer is passed over; the read is fine. |
  * | any field of the **wrong type**, an unknown `listing_type` or `status`, a missing `obj_id` | throw {@link StrakerOfferShapeError} | The shape changed. Interpreting it is how a bot claims the wrong work while looking healthy. |
  *
- * A throw rejects the **whole read**, not the one entry. That matches `listOpenOffers`, which
- * already rejects an entire reply over a single entry with no `obj_id`, and it is deliberate:
- * dropping a bad entry would shrink the list silently, and a silently shorter list is
- * indistinguishable from offers vanishing — which stamps fabricated lifetimes on live offers.
- * That is the silent-zero family the XTM bot's 38-minute outage belongs to; the mechanism
- * there was different and `offersApi.ts` records it. Upstream, a throw is caught
- * by the bot's supervised cycle guard, logged as `outcome: 'threw'` and fails the heartbeat,
- * so a portal change pages a human within about five minutes instead of decaying quietly.
+ * ## A bad entry costs that entry — revised 2026-09-17, after it cost seventeen cycles
+ *
+ * This file used to let a throw reject the **whole read**, deliberately: dropping an entry
+ * would shrink the list silently, and a silently shorter list is indistinguishable from
+ * offers vanishing, which stamps fabricated lifetimes on live offers. That is the silent-zero
+ * family the XTM bot's 38-minute outage belongs to.
+ *
+ * **The reasoning was sound and the blast radius was wrong.** On 2026-09-17 a DTP offer
+ * arrived with `target_lang: null`, `parseOffer` threw on it correctly, and the caller's
+ * `raw.map` took every *other* offer in the batch down with it. The offer was still there on
+ * the next poll, so it happened again: seventeen consecutive cycles, 07:06:18 to 07:09:19,
+ * each one losing offers that parsed perfectly well. The read was not protected from a bad
+ * entry; it was destroyed by one.
+ *
+ * So the loss is now bounded to the entry. The silent-shrinkage argument is answered instead
+ * by making the drop **loud**: each unreadable entry logs and fires `onUnreadable`, which
+ * raises an `offer_unreadable` alert (FR-023a) keyed on the offer id, so a permanently broken
+ * offer pages once rather than every ten seconds. A shorter list still reaches a human — it
+ * just no longer takes the readable offers with it on the way.
+ *
+ * What still rejects the whole read is an envelope this file never sees: `listOpenOffers`
+ * refuses a reply whose entry has no `obj_id` before parsing begins. An identity-less entry
+ * therefore *does* still blind the read — loudly (cycle fails, heartbeat fails), not
+ * silently, and the {@link StrakerOfferShapeError} branch for a null `objId` here is
+ * unreachable from the portal today. Anything that is not a `StrakerOfferShapeError` — a
+ * genuine bug in this module — is rethrown and still takes the cycle down, which is the
+ * distinction worth keeping.
  *
  * ## The assumptions encoded here, all four of them
  *
@@ -247,7 +266,19 @@ export function createOfferExtractor(
           },
           error.message,
         );
-        resolved.onUnreadable?.(error.objId, error.message);
+        // The report is guarded, and the irony is the reason: `onUnreadable` writes to
+        // SQLite, this loop runs inside the read's own try, and a throw from here would
+        // abort the read and lose every offer beside the bad one — the exact failure the
+        // per-entry catch above exists to prevent, re-entering through the fix for it.
+        // The log line above has already landed, so a failed enqueue is noisy, not silent.
+        try {
+          resolved.onUnreadable?.(error.objId, error.message);
+        } catch (reportFailed) {
+          options.logger.error(
+            { module: 'offerParse', action: 'alert', outcome: 'failed', objId: error.objId },
+            reportFailed instanceof Error ? reportFailed.message : String(reportFailed),
+          );
+        }
       }
     }
     return parsed;
@@ -281,11 +312,16 @@ function requireNonEmptyString(
  * A field whose every observed value is one single value. Anything else stops the read.
  *
  * This is the deliberately brittle part, and the trade is worth naming: a new `listing_type`
- * or a new `status` takes the bot dark (every read throws, the heartbeat fails, someone is
- * paged) rather than letting it claim work whose terms nobody has established. Three offers
- * of one type cannot show that every type behaves this way — the spec says so in as many
- * words — and claiming is irreversible. Loosening either is a one-line change here, to be
- * made knowingly once Straker has answered what the other values mean (U3/Q3).
+ * or a new `status` is refused rather than claimed on terms nobody has established. Three
+ * offers of one type cannot show that every type behaves this way — the spec says so in as
+ * many words — and claiming is irreversible.
+ *
+ * **What refusal costs, since 2026-09-17**: that offer and no other. The entry is skipped,
+ * logged, and raised as an `offer_unreadable` alert; the rest of the read survives. It no
+ * longer takes the bot dark, which is a smaller consequence than this comment used to
+ * promise — deliberately so, because the version that took the bot dark did exactly that for
+ * seventeen cycles over a `target_lang` of `null`. Loosening either value is still a one-line
+ * change here, to be made knowingly once Straker has answered what the others mean (U3/Q3).
  */
 function requireObservedValue(
   record: Record<string, unknown>,

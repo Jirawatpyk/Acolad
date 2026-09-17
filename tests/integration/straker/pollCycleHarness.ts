@@ -202,6 +202,12 @@ export function harness(opts: HarnessOptions): Harness {
     logger: logger as never,
     settings: {
       throughputWordsPerHour: 100,
+      // Deliberately NOT equal to the translation rate. Every offer these tests drive is a
+      // translation, so this figure should never be consulted — and if the gate ever reaches
+      // for it by mistake, an absurd rate makes that visible as a wrong verdict rather than
+      // hiding behind a matching number. Two ceilings set equal is what kept the DTP rate
+      // unreachable through a whole suite.
+      dtpThroughputWordsPerHour: 9_999,
       hoursStartMin: 9 * 60,
       hoursEndMin: 18 * 60,
       workdays: new Set([1, 2, 3, 4, 5]),

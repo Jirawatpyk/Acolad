@@ -592,3 +592,32 @@ describe('createOfferExtractor', () => {
     expect(extract([])).toEqual([]);
   });
 });
+
+describe('reporting an unreadable entry must not become the failure it reports', () => {
+  it('keeps the readable offers when raising the alert itself throws', () => {
+    // `onUnreadable` writes to SQLite from inside the read's own guard. If that write
+    // throws — a locked file, a quarantined database — an unguarded call aborts the read
+    // and loses the good offers: the 2026-09-17 failure arriving through the fix for the
+    // 2026-09-17 failure. The report is best-effort; the read is not.
+    const logger = recordingLogger();
+    const extract = createOfferExtractor({
+      excludedLanguagePairs: [],
+      logger,
+      onUnreadable: () => {
+        throw new Error('outbox is unwritable');
+      },
+    });
+    const raw = [
+      captured(AJ_265_MS),
+      withField(captured(AJ_267_ZH), 'listing_type', 'auction'),
+    ] as unknown as RawOffer[];
+
+    const parsed = extract(raw);
+
+    expect(parsed.map((o) => o.objId)).toEqual([captured(AJ_265_MS).obj_id]);
+    // Not swallowed either — a lost alert has to leave a trace somebody can find.
+    expect(
+      logger.lines.some((l) => l.fields['action'] === 'alert' && l.fields['outcome'] === 'failed'),
+    ).toBe(true);
+  });
+});

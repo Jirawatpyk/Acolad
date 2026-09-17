@@ -6,6 +6,7 @@ import {
   formatLanguageDirection,
   isEligibleDirection,
   isFamiliarDirectionShape,
+  isMonolingualDirection,
 } from '../../../src/straker/eligibility.js';
 
 /**
@@ -145,5 +146,34 @@ describe('isFamiliarDirectionShape', () => {
     expect(isFamiliarDirectionShape('en-us>')).toBe(false); // half a direction
     expect(isFamiliarDirectionShape('english>thai')).toBe(false); // display names
     expect(isFamiliarDirectionShape('en-us>th>ms-my')).toBe(false); // two separators
+  });
+});
+
+describe('isMonolingualDirection — which budget a piece of work is charged to', () => {
+  it('calls a direction with the same language on both sides monolingual', () => {
+    // This is what DTP preparation looks like written down. Getting it wrong does not
+    // misfile a label: it charges the work to the wrong daily ceiling, and claiming is
+    // irreversible.
+    expect(isMonolingualDirection('ja>ja')).toBe(true);
+    expect(isMonolingualDirection('en-us>en-us')).toBe(true);
+  });
+
+  it('normalises both sides before comparing them', () => {
+    // The portal is not consistent about case or padding, and a case-sensitive compare
+    // would file half the DTP work as translation.
+    expect(isMonolingualDirection(' JA > ja ')).toBe(true);
+    expect(isMonolingualDirection('EN-US>en-us')).toBe(true);
+  });
+
+  it('calls two different languages translation', () => {
+    expect(isMonolingualDirection('en-us>ms-my')).toBe(false);
+    expect(isMonolingualDirection('ja>ja-jp')).toBe(false); // a region IS a difference
+  });
+
+  it('does not call a malformed direction monolingual', () => {
+    // The fallback everywhere else is translation, the stricter budget. A string with no
+    // separator must not answer true and buy the larger one.
+    expect(isMonolingualDirection('ja')).toBe(false);
+    expect(isMonolingualDirection('')).toBe(false);
   });
 });

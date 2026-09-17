@@ -171,11 +171,16 @@ export class StrakerLedger {
    * `held` may be passed so that one snapshot of the held set serves a whole cycle — the
    * bucket, the decision and `heldWorkMissingDeadline` must never be able to disagree
    * about what is held (the XTM bot's C6 lesson).
+   *
+   * `kind` is required and sits ahead of that optional snapshot on purpose. It used to
+   * default to `'translation'`, which on a two-budget ledger means a caller that forgets it
+   * gets a confidently wrong number rather than a compiler error — and the wrong number
+   * here ends in an irreversible over-claim.
    */
   committedByDay(
     nowMs: number,
+    kind: WorkKind,
     held: readonly HeldWork[] = this.store.heldWork(),
-    kind: WorkKind = 'translation',
   ): ReadonlyMap<string, number> {
     const holidays = this.holidaysAt(nowMs);
     const byDay = new Map<string, number>();
@@ -195,10 +200,10 @@ export class StrakerLedger {
   committedOn(
     deadlineDay: string,
     nowMs: number,
+    kind: WorkKind,
     held?: readonly HeldWork[],
-    kind: WorkKind = 'translation',
   ): number {
-    return this.committedByDay(nowMs, held, kind).get(deadlineDay) ?? 0;
+    return this.committedByDay(nowMs, kind, held).get(deadlineDay) ?? 0;
   }
 
   /** Ceiling minus what is committed, floored at zero — a day past its ceiling has no
@@ -206,10 +211,10 @@ export class StrakerLedger {
   remainingOn(
     deadlineDay: string,
     nowMs: number,
+    kind: WorkKind,
     held?: readonly HeldWork[],
-    kind: WorkKind = 'translation',
   ): number {
-    return Math.max(0, this.ceilings[kind] - this.committedOn(deadlineDay, nowMs, held, kind));
+    return Math.max(0, this.ceilings[kind] - this.committedOn(deadlineDay, nowMs, kind, held));
   }
 
   /**
@@ -249,7 +254,7 @@ export class StrakerLedger {
       );
     }
 
-    const byDay = this.committedByDay(nowMs, held, candidate.kind);
+    const byDay = this.committedByDay(nowMs, candidate.kind, held);
     const ceiling = this.ceilings[candidate.kind];
     const verdict = decideGroupCapacity(
       [{ effort: candidate.effortWords, deadlineDate: deadlineDay }],
@@ -309,7 +314,7 @@ export class StrakerLedger {
     }
 
     const ceiling = this.ceilings[work.kind];
-    const committedEffort = this.committedOn(day, nowMs, undefined, work.kind);
+    const committedEffort = this.committedOn(day, nowMs, work.kind);
     return {
       deadlineDay: day,
       committedEffort,

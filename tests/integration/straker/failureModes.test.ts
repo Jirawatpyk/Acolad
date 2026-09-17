@@ -670,11 +670,58 @@ describe('failure mode: the reply is not the shape the contract says', () => {
     expect(callsTo(portal, 'offers')).toHaveLength(1);
   });
 
+  it('lets one unreadable entry cost itself, and raises a card naming it', async () => {
+    // The 2026-09-17 incident, end to end. A good envelope carrying one entry the parser
+    // cannot read used to take the whole read with it — seventeen cycles in a row, because
+    // the offer was still there on the next poll — and raised nothing, because the alert
+    // conditions covered transport and this was a parse.
+    //
+    // Two things are asserted because the fix has two halves and they fail independently:
+    // the readable offer beside it survives (the blast radius), and a card actually reaches
+    // the operations channel (FR-023a). The alerting half is the one that shipped untested
+    // the first time.
+    const portal = fakeStraker();
+    const bot = assemble(portal);
+    const good = offerFixture('aj-265:ms-my');
+    const unreadable = { ...good, obj_id: 'broken-1', words: 'not a number' };
+    portal.offers = async () => json([good, unreadable]);
+
+    await bot.assembly.cycle.runOnce();
+
+    // The readable one was still claimed. This is the assertion the incident would fail.
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
+
+    const cards = bot.senders.got.alerts;
+    expect(cards).toHaveLength(1);
+    expect(JSON.stringify(cards[0])).toContain('broken-1');
+  });
+
+  it('pages once for an offer that stays unreadable, not once per cycle', async () => {
+    // The offer is still on the portal next poll, and the poll is every ten seconds. An
+    // alert keyed on anything but the offer's own identity turns a broken offer into a
+    // pager storm, which is its own outage.
+    const portal = fakeStraker();
+    const bot = assemble(portal);
+    const unreadable = { ...offerFixture('aj-265:ms-my'), obj_id: 'broken-1', words: 'nope' };
+    portal.offers = async () => json([unreadable]);
+
+    await bot.assembly.cycle.runOnce();
+    await bot.assembly.cycle.runOnce();
+    await bot.assembly.cycle.runOnce();
+
+    expect(bot.senders.got.alerts).toHaveLength(1);
+  });
+
   it('reports a shape violation through the log and the liveness signal, and raises no card', async () => {
     // The same recording as the sign-in case, and for the same reason: FR-023 says "stop
-    // and report loudly", and what "loudly" means here today is an `error` line plus a
-    // failed cycle, which fails the heartbeat and pages through Healthchecks. There is no
-    // named alert saying the portal's contract changed. Pinned so that stays deliberate.
+    // and report loudly", and what "loudly" means for an ENVELOPE violation is an `error`
+    // line plus a failed cycle, which fails the heartbeat and pages through Healthchecks.
+    // No named alert for this one. Pinned so that stays deliberate.
+    //
+    // Narrowed 2026-09-17: a single unreadable *entry* inside a good envelope no longer
+    // behaves this way. It raises a named `offer_unreadable` alert and leaves the other
+    // offers alone — see the malformed-entry case below. This test is the envelope half,
+    // and the two must not be collapsed: the whole point is that the blast radius differs.
     const portal = fakeStraker();
     const bot = assemble(portal);
     portal.offers = async () => json(envelope([]));

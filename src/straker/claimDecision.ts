@@ -135,8 +135,25 @@ export type ClaimDecision =
  */
 export type ClaimDecisionSettings = Pick<
   StrakerBotConfig,
-  'throughputWordsPerHour' | 'hoursStartMin' | 'hoursEndMin' | 'workdays'
+  | 'throughputWordsPerHour'
+  | 'dtpThroughputWordsPerHour'
+  | 'hoursStartMin'
+  | 'hoursEndMin'
+  | 'workdays'
 >;
+
+/**
+ * The rate this kind of work is actually done at.
+ *
+ * Both figures are derived from their own ceiling over the working day (`config.ts`), so
+ * this is not a second knob — it is the same knob read for the right kind of work. Feeding
+ * a DTP offer the translation rate is not a rounding error: the two ceilings are an order
+ * of magnitude apart, so the wrong one refuses work that fits, or admits work that does
+ * not. Claiming is irreversible, so the second direction is the expensive one.
+ */
+function throughputFor(monolingual: boolean, settings: ClaimDecisionSettings): number {
+  return monolingual ? settings.dtpThroughputWordsPerHour : settings.throughputWordsPerHour;
+}
 
 /** Only `checkCapacity` is reachable from here — deciding must not be able to record. */
 export type CapacityChecker = Pick<StrakerLedger, 'checkCapacity'>;
@@ -181,12 +198,19 @@ export function decideClaims(
   // rather than let the gate blame each offer in turn for a misconfiguration — and rather
   // than claim on an answer nobody could defend. `config.ts` already guarantees a positive
   // figure; this is the guard for a caller that assembled its settings by hand.
-  if (!(settings.throughputWordsPerHour > 0)) {
-    throw new Error(
-      `Straker throughput must be a positive words-per-hour figure, got ${String(
-        settings.throughputWordsPerHour,
-      )}`,
-    );
+  //
+  // Both rates are checked, not just the one this batch happens to need: the defect is in
+  // the configuration either way, and a pass that happens to carry no DTP offer must not
+  // report a broken DTP rate as healthy.
+  for (const [name, rate] of [
+    ['throughput', settings.throughputWordsPerHour],
+    ['DTP throughput', settings.dtpThroughputWordsPerHour],
+  ] as const) {
+    if (!(rate > 0)) {
+      throw new Error(
+        `Straker ${name} must be a positive words-per-hour figure, got ${String(rate)}`,
+      );
+    }
   }
 
   // The pass's own copy of the held set, advanced as offers are claimed. Without the
@@ -251,7 +275,7 @@ function decideOne(
     nowMs,
     dueAtMs: offer.deadlineMs,
     effort: offer.effortWords,
-    throughputPerHour: settings.throughputWordsPerHour,
+    throughputPerHour: throughputFor(offer.monolingual, settings),
     calendar,
     holidaysCuratedForSpan: curated,
   });

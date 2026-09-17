@@ -104,7 +104,7 @@ import { parseHHMM, parseWorkdays } from '../schedule/parseSchedule.js';
 import { holidaysForEffectiveDay } from '../schedule/thaiHolidays.js';
 import type { CardRow } from '../reporting/chatCard.js';
 import { STRAKER_EFFORT_UNIT } from './outcomePolicy.js';
-import { STRAKER_DB_FILENAME, StrakerStore } from './strakerStore.js';
+import { STRAKER_DB_FILENAME, StrakerStore, type WorkKind } from './strakerStore.js';
 import { STRAKER_LOG_NAME } from './logger.js';
 import { WEAK_SIGNAL_BELOW, computeWinRate } from './winRate.js';
 
@@ -168,11 +168,44 @@ export interface PortalWorkload {
   /** Held items with no readable effort, contributing 0 to the sums above for want of a
    *  number. Same reason as the field above: a silent 0 understates the commitment. */
   readonly itemsWithoutEffort: number;
-  /** This portal's own daily ceiling, per deadline day. Unknown where it is required
-   *  configuration with no default (Straker's) and has not been set. */
+  /** This portal's own daily ceiling, per deadline day — the whole day's capacity, so for a
+   *  portal with a {@link PortalWorkload.breakdown} it is the sum of the parts' ceilings.
+   *  Unknown where it is required configuration with no default (Straker's) and unset, or
+   *  where **any** part of it is. */
   readonly ceilingPerDay: Measured<number>;
+  /** Present where one portal runs more than one budget, as Straker does since DTP work
+   *  got its own. Absent means one budget, and the fields above say all there is to say. */
+  readonly breakdown?: readonly WorkloadPart[];
   readonly retries: Measured<number>;
   readonly uptime: Measured<UptimeReading>;
+}
+
+/**
+ * One budget inside a portal, labelled.
+ *
+ * FR-018 forbids adding unlike quantities and offers two remedies — suppress, or label.
+ * This is the label. Straker's two ceilings are an order of magnitude apart and its ledger
+ * refuses to add the kinds (`ledger.ts`: adding them "would let a morning of formatting
+ * refuse an afternoon of translation"), so a single figure against a single ceiling reports
+ * one ordinary DTP job as a catastrophic breach of a budget it was never charged to.
+ */
+export interface WorkloadPart {
+  readonly label: string;
+  readonly committedEffort: number;
+  readonly heldItems: number;
+  readonly ceilingPerDay: Measured<number>;
+}
+
+/** The day's whole capacity across the parts — unknown as a whole if any part is unknown,
+ *  because a known part plus an unknown one printed as a number is the under-report this
+ *  exists to stop. */
+function totalCeiling(parts: readonly WorkloadPart[]): Measured<number> {
+  for (const part of parts) {
+    if (!part.ceilingPerDay.known) return { known: false, why: part.ceilingPerDay.why };
+  }
+  return measured(
+    parts.reduce((sum, p) => sum + (p.ceilingPerDay.known ? p.ceilingPerDay.value : 0), 0),
+  );
 }
 
 /** A record that could not be read — a live possibility now the two live in separate files. */
@@ -756,6 +789,9 @@ export interface StrakerReadSpec {
   /** Straker's ceiling is required configuration with **no default**, so it is genuinely
    *  unknown when unset — unlike XTM's, which the config loader defaults. */
   readonly ceilingPerDay: Measured<number>;
+  /** The DTP ceiling, same story. Separate because the two are separate budgets and the
+   *  report must not add them into one number (FR-018). */
+  readonly dtpCeilingPerDay: Measured<number>;
   readonly period: SummaryPeriod;
   readonly uptime: Measured<UptimeReading>;
   readonly dayOf: DayOf;
@@ -780,9 +816,25 @@ export function readStrakerWorkload(spec: StrakerReadSpec): PortalResult {
   }
 
   try {
-    const held = new StrakerStore(db)
-      .heldWork()
-      .map((w) => ({ effort: w.effortWords, deadlineMs: w.deadlineMs }));
+    const rows = new StrakerStore(db).heldWork();
+    const held = rows.map((w) => ({ effort: w.effortWords, deadlineMs: w.deadlineMs }));
+
+    // Split by kind, not summed. The totals above stay whole-portal — they answer "how much
+    // is the team holding on Straker" — while the parts answer the question a ceiling is
+    // for, which is always "against which budget".
+    const part = (label: string, kind: WorkKind, ceiling: Measured<number>): WorkloadPart => {
+      const mine = rows.filter((w) => w.kind === kind);
+      return {
+        label,
+        committedEffort: mine.reduce((sum, w) => sum + (w.effortWords ?? 0), 0),
+        heldItems: mine.length,
+        ceilingPerDay: ceiling,
+      };
+    };
+    const breakdown = [
+      part('translation', 'translation', spec.ceilingPerDay),
+      part('DTP', 'monolingual', spec.dtpCeilingPerDay),
+    ];
 
     return {
       read: true,
@@ -791,7 +843,8 @@ export function readStrakerWorkload(spec: StrakerReadSpec): PortalResult {
         source,
         unit: STRAKER_EFFORT_UNIT,
         ...summariseHeld(held, spec.dayOf),
-        ceilingPerDay: spec.ceilingPerDay,
+        ceilingPerDay: totalCeiling(breakdown),
+        breakdown,
         retries: readStrakerRetries(db, spec.period),
         uptime: spec.uptime,
       },
@@ -978,14 +1031,28 @@ export function formatCombinedDailyView(view: CombinedDailyView): string {
   for (const result of view.portals) {
     if (result.read) {
       const w = result.workload;
+      const against = (c: Measured<number>): string =>
+        `, ceiling ${c.known ? effort(c.value, w.unit) : 'unknown'}/day`;
       lines.push(
         row(
           `${w.portal}:`,
           `${effort(w.committedEffort, w.unit)} held across ${count(w.heldItems)} item(s)` +
-            `, ceiling ${w.ceilingPerDay.known ? effort(w.ceilingPerDay.value, w.unit) : 'unknown'}/day`,
+            against(w.ceilingPerDay),
         ),
-        row('', `source: ${w.source}`),
       );
+      // One line per budget, where the portal runs more than one. The portal line above
+      // stays the whole-portal answer; these say which ceiling each part is charged to, so
+      // a DTP job cannot read as a breach of the translation budget (FR-018's label remedy).
+      for (const part of w.breakdown ?? []) {
+        lines.push(
+          row(
+            `  ${part.label}:`,
+            `${effort(part.committedEffort, w.unit)} held across ${count(part.heldItems)} item(s)` +
+              against(part.ceilingPerDay),
+          ),
+        );
+      }
+      lines.push(row('', `source: ${w.source}`));
     } else {
       lines.push(
         row(`${result.failure.portal}:`, `record UNREADABLE — ${result.failure.why}`),
@@ -1147,6 +1214,7 @@ export function combinedReportRows(spec: CombinedRowsSpec): CardRow[] {
       readStrakerWorkload({
         stateDir: strakerStateDir,
         ceilingPerDay: readCeilingFromEnv('STRAKER_MAX_WORDS_PER_DAY'),
+        dtpCeilingPerDay: readCeilingFromEnv('STRAKER_DTP_MAX_WORDS_PER_DAY'),
         period,
         uptime: unmeasured('not read for this card'),
         dayOf: spec.xtm.dayOf,
@@ -1275,6 +1343,7 @@ function main(): void {
     readStrakerWorkload({
       stateDir: env('STRAKER_STATE_DIR', STRAKER_DEFAULT_STATE_DIR),
       ceilingPerDay: readCeilingFromEnv('STRAKER_MAX_WORDS_PER_DAY'),
+      dtpCeilingPerDay: readCeilingFromEnv('STRAKER_DTP_MAX_WORDS_PER_DAY'),
       period,
       uptime: computeUptime(
         readCycleTimestamps(strakerLogDir, STRAKER_LOG_NAME, period.fromMs, period.toMs),

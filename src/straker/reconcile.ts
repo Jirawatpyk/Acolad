@@ -310,9 +310,21 @@ function readEffort(value: unknown): number | null {
   return value;
 }
 
+/**
+ * The assigned list's direction, read the same way `offerParse` reads the offer list's.
+ *
+ * The two endpoints name the field identically, so they must not disagree about what it
+ * means: a `target_lang` of exactly `null` is monolingual work, and the direction doubles
+ * the source (`ja>ja`). Every assigned DTP job observed so far has arrived with the doubled
+ * tag already spelled out — the live record holds one — so the null branch here is
+ * defensive. It costs one line and it removes the case where the same portal fact produces
+ * a DTP row from one endpoint and an unreadable direction charged to the translation
+ * ceiling from the other.
+ */
 function readDirection(source: unknown, target: unknown): string | null {
-  if (typeof source !== 'string' || typeof target !== 'string') return null;
-  if (source.trim() === '' || target.trim() === '') return null;
+  if (typeof source !== 'string' || source.trim() === '') return null;
+  if (target === null) return formatLanguageDirection(source, source);
+  if (typeof target !== 'string' || target.trim() === '') return null;
   return formatLanguageDirection(source, target);
 }
 

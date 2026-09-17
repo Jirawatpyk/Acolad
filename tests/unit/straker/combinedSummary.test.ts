@@ -241,6 +241,53 @@ describe('T057 — the combined daily view reports both portals, the total, retr
     expect(view).not.toHaveProperty('uptimeTotal');
   });
 
+  it('prints each Straker budget on its own line, against its own ceiling', () => {
+    // Printing 10,400 against a 3,500 ceiling reads as a 297% breach. It is not one: 9,600
+    // of those words are DTP, charged to a 30,000 budget they sit comfortably inside. The
+    // reader has to be able to see which budget a figure belongs to, which is the labelling
+    // FR-018 asks for in place of adding unlike quantities.
+    const view = combineDailyView(PERIOD, [
+      reading(workload({ portal: 'XTM', committedEffort: 0, ceilingPerDay: known(3_500) })),
+      reading(
+        workload({
+          portal: 'Straker',
+          committedEffort: 10_400,
+          heldItems: 2,
+          ceilingPerDay: known(33_500),
+          breakdown: [
+            {
+              label: 'translation',
+              committedEffort: 800,
+              heldItems: 1,
+              ceilingPerDay: known(3_500),
+            },
+            { label: 'DTP', committedEffort: 9_600, heldItems: 1, ceilingPerDay: known(30_000) },
+          ],
+        }),
+      ),
+    ]);
+
+    const text = formatCombinedDailyView(view);
+
+    expect(text).toContain('translation:');
+    expect(text).toContain('800 words held across 1 item(s), ceiling 3,500 words/day');
+    expect(text).toContain('DTP:');
+    expect(text).toContain('9,600 words held across 1 item(s), ceiling 30,000 words/day');
+  });
+
+  it('says nothing about budgets for a portal that has only one', () => {
+    // The breakdown is optional, and XTM must not grow a stray sub-line because Straker did.
+    const view = combineDailyView(PERIOD, [
+      reading(workload({ portal: 'XTM', committedEffort: 1_200, ceilingPerDay: known(3_500) })),
+    ]);
+
+    const text = formatCombinedDailyView(view);
+
+    expect(text).toContain('1,200 words held');
+    expect(text).not.toContain('translation:');
+    expect(text).not.toContain('DTP:');
+  });
+
   it('renders all four — both portals, the total, retries and uptime — in the printed view (V17)', () => {
     const text = formatCombinedDailyView(combineDailyView(PERIOD, bothReadable()));
 
@@ -973,6 +1020,9 @@ describe('a partial record degrades to unknown, not to a wrong number', () => {
     const view = readStrakerWorkload({
       stateDir,
       ceilingPerDay: { known: true, value: 1_000 },
+      // Distinct from the translation ceiling on purpose: equal budgets cannot show which
+      // one a figure was measured against.
+      dtpCeilingPerDay: { known: true, value: 7_000 },
       period: PERIOD,
       uptime: { known: false, why: 'unmeasured' },
       dayOf: () => null,
@@ -996,6 +1046,9 @@ describe('a partial record degrades to unknown, not to a wrong number', () => {
     const view = readStrakerWorkload({
       stateDir: dir,
       ceilingPerDay: { known: true, value: 1_000 },
+      // Distinct from the translation ceiling on purpose: equal budgets cannot show which
+      // one a figure was measured against.
+      dtpCeilingPerDay: { known: true, value: 7_000 },
       period: PERIOD,
       uptime: { known: false, why: 'unmeasured' },
       dayOf: () => null,
@@ -1053,6 +1106,9 @@ describe('readStrakerWorkload — a state directory that has never existed', () 
     const view = readStrakerWorkload({
       stateDir,
       ceilingPerDay: { known: true, value: 1_000 },
+      // Distinct from the translation ceiling on purpose: equal budgets cannot show which
+      // one a figure was measured against.
+      dtpCeilingPerDay: { known: true, value: 7_000 },
       period: PERIOD,
       uptime: { known: false, why: 'unmeasured' },
       dayOf: () => null,
@@ -1061,6 +1117,84 @@ describe('readStrakerWorkload — a state directory that has never existed', () 
     expect(view.read).toBe(false);
     if (!view.read) expect(view.failure.portal).toBe('Straker');
     expect(existsSync(stateDir)).toBe(false);
+  });
+
+  it('keeps DTP and translation apart, each against its own ceiling', async () => {
+    // The two ceilings are an order of magnitude apart and the ledger refuses to add the
+    // two kinds — `ledger.ts` says so in as many words, because "a morning of formatting
+    // [must not] refuse an afternoon of translation". A report that sums them and prints
+    // the total against the translation ceiling alone says the team is 274% over budget
+    // when it is holding one ordinary DTP job. FR-018 allows exactly this remedy: label
+    // the parts rather than add unlike quantities.
+    const dir = tempDir();
+    const stateDir = join(dir, 'straker');
+    mkdirSync(stateDir, { recursive: true });
+    const { openStrakerDatabase, StrakerStore } =
+      await import('../../../src/straker/strakerStore.js');
+    const opened = openStrakerDatabase(stateDir, NOW_MS);
+    const store = new StrakerStore(opened.db);
+    const deadlineMs = Date.parse('2026-09-17T17:00:00+07:00');
+    store.hold({
+      objId: 'tr-1',
+      effortWords: 800,
+      kind: 'translation',
+      deadlineMs,
+      heldSinceMs: NOW_MS,
+    });
+    store.hold({
+      objId: 'dtp-1',
+      effortWords: 9_600,
+      kind: 'monolingual',
+      deadlineMs,
+      heldSinceMs: NOW_MS,
+    });
+    opened.db.close();
+
+    const view = readStrakerWorkload({
+      stateDir,
+      ceilingPerDay: { known: true, value: 3_500 },
+      dtpCeilingPerDay: { known: true, value: 30_000 },
+      period: PERIOD,
+      uptime: { known: false, why: 'unmeasured' },
+      dayOf: () => '2026-09-17',
+    });
+
+    expect(view.read).toBe(true);
+    if (!view.read) return;
+    expect(view.workload.breakdown).toEqual([
+      { label: 'translation', committedEffort: 800, heldItems: 1, ceilingPerDay: known(3_500) },
+      { label: 'DTP', committedEffort: 9_600, heldItems: 1, ceilingPerDay: known(30_000) },
+    ]);
+    // The portal's own ceiling is the day's whole capacity, so the combined-ceiling row
+    // stops under-reporting Straker by the entire DTP budget.
+    expect(view.workload.ceilingPerDay).toEqual(known(33_500));
+    expect(view.workload.committedEffort).toBe(10_400);
+  });
+
+  it('reports the portal ceiling as unknown when either kind is unconfigured', async () => {
+    // Adding a known 3,500 to an unknown budget and printing 3,500 is the failure this
+    // guards: a missing DTP ceiling must read as unknown, not as zero.
+    const dir = tempDir();
+    const stateDir = join(dir, 'straker');
+    mkdirSync(stateDir, { recursive: true });
+    const { openStrakerDatabase } = await import('../../../src/straker/strakerStore.js');
+    openStrakerDatabase(stateDir, NOW_MS).db.close();
+
+    const view = readStrakerWorkload({
+      stateDir,
+      ceilingPerDay: { known: true, value: 3_500 },
+      dtpCeilingPerDay: { known: false, why: 'STRAKER_DTP_MAX_WORDS_PER_DAY is not set' },
+      period: PERIOD,
+      uptime: { known: false, why: 'unmeasured' },
+      dayOf: () => '2026-09-17',
+    });
+
+    expect(view.read).toBe(true);
+    if (!view.read) return;
+    expect(view.workload.ceilingPerDay.known).toBe(false);
+    if (view.workload.ceilingPerDay.known === false) {
+      expect(view.workload.ceilingPerDay.why).toMatch(/STRAKER_DTP_MAX_WORDS_PER_DAY/);
+    }
   });
 
   it('reads held work and its retries once the bot has a record', async () => {
@@ -1090,6 +1224,9 @@ describe('readStrakerWorkload — a state directory that has never existed', () 
     const view = readStrakerWorkload({
       stateDir,
       ceilingPerDay: { known: true, value: 1_000 },
+      // Distinct from the translation ceiling on purpose: equal budgets cannot show which
+      // one a figure was measured against.
+      dtpCeilingPerDay: { known: true, value: 7_000 },
       period: PERIOD,
       uptime: { known: false, why: 'unmeasured' },
       dayOf: (ms) => (ms === null ? null : new Date(ms + 7 * 3_600_000).toISOString().slice(0, 10)),

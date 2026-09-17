@@ -460,17 +460,20 @@ export function assembleStrakerBot(
     });
 
   const dispatcher = createStrakerDispatcher(outbox, senders, logger);
+
+  /**
+   * One ceiling per kind of work, read once. The reconciler and the cycle each build their
+   * own ledger, and two copies of this literal is the pair that silently diverges the day a
+   * third kind is added to one of them.
+   */
+  const ceilings = { translation: cfg.maxWordsPerDay, monolingual: cfg.dtpMaxWordsPerDay };
   const reconciler = createStrakerReconciler({
     portal,
     store,
-    ledger: new StrakerLedger(
-      store,
-      { translation: cfg.maxWordsPerDay, monolingual: cfg.dtpMaxWordsPerDay },
-      {
-        hoursStartMin: cfg.hoursStartMin,
-        workdays: cfg.workdays,
-      },
-    ),
+    ledger: new StrakerLedger(store, ceilings, {
+      hoursStartMin: cfg.hoursStartMin,
+      workdays: cfg.workdays,
+    }),
     outbox,
     logger,
     now,
@@ -483,18 +486,17 @@ export function assembleStrakerBot(
     // appearances a previous run already closed — see `StrakerStore.trackerState`.
     tracker: createSightingTracker(store.trackerState()),
     store,
-    ledger: new StrakerLedger(
-      store,
-      { translation: cfg.maxWordsPerDay, monolingual: cfg.dtpMaxWordsPerDay },
-      {
-        hoursStartMin: cfg.hoursStartMin,
-        workdays: cfg.workdays,
-      },
-    ),
+    ledger: new StrakerLedger(store, ceilings, {
+      hoursStartMin: cfg.hoursStartMin,
+      workdays: cfg.workdays,
+    }),
     outbox,
     logger,
     settings: {
       throughputWordsPerHour: cfg.throughputWordsPerHour,
+      // Both rates, because the gate picks by the kind of work in front of it. Passing only
+      // the translation rate is how the DTP ceiling shipped configurable but unreachable.
+      dtpThroughputWordsPerHour: cfg.dtpThroughputWordsPerHour,
       hoursStartMin: cfg.hoursStartMin,
       hoursEndMin: cfg.hoursEndMin,
       workdays: cfg.workdays,

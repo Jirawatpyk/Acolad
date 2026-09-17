@@ -136,8 +136,8 @@ describe('keyed by effective deadline day', () => {
       NOW_MS,
     );
 
-    expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(400);
-    expect(ledger.committedOn('2026-09-14', NOW_MS)).toBe(0);
+    expect(ledger.committedOn('2026-09-17', NOW_MS, 'translation')).toBe(400);
+    expect(ledger.committedOn('2026-09-14', NOW_MS, 'translation')).toBe(0);
   });
 
   it('charges a deadline that falls before the working day starts to the previous one', () => {
@@ -148,8 +148,8 @@ describe('keyed by effective deadline day', () => {
       NOW_MS,
     );
 
-    expect(ledger.committedOn('2026-09-15', NOW_MS)).toBe(400);
-    expect(ledger.committedOn('2026-09-16', NOW_MS)).toBe(0);
+    expect(ledger.committedOn('2026-09-15', NOW_MS, 'translation')).toBe(400);
+    expect(ledger.committedOn('2026-09-16', NOW_MS, 'translation')).toBe(0);
   });
 
   it('charges a weekend deadline to the working day before it', () => {
@@ -159,8 +159,8 @@ describe('keyed by effective deadline day', () => {
       NOW_MS,
     );
 
-    expect(ledger.committedOn('2026-09-18', NOW_MS)).toBe(400);
-    expect(ledger.committedOn('2026-09-19', NOW_MS)).toBe(0);
+    expect(ledger.committedOn('2026-09-18', NOW_MS, 'translation')).toBe(400);
+    expect(ledger.committedOn('2026-09-19', NOW_MS, 'translation')).toBe(0);
   });
 
   it('honours the work calendar, so a holiday deadline lands on the working day before it', () => {
@@ -171,8 +171,8 @@ describe('keyed by effective deadline day', () => {
       NOW_MS,
     );
 
-    expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(400);
-    expect(ledger.committedOn('2026-09-18', NOW_MS)).toBe(0);
+    expect(ledger.committedOn('2026-09-17', NOW_MS, 'translation')).toBe(400);
+    expect(ledger.committedOn('2026-09-18', NOW_MS, 'translation')).toBe(0);
   });
 
   it('sums several offers due on the same day and keeps different days apart', () => {
@@ -190,7 +190,7 @@ describe('keyed by effective deadline day', () => {
       NOW_MS,
     );
 
-    expect([...ledger.committedByDay(NOW_MS)].sort()).toEqual([
+    expect([...ledger.committedByDay(NOW_MS, 'translation')].sort()).toEqual([
       ['2026-09-17', 550],
       ['2026-09-18', 100],
     ]);
@@ -208,11 +208,11 @@ describe('derived from held work', () => {
       { objId: 'offer-1', effortWords: 500, deadlineMs: THU_AFTERNOON, kind: 'translation' },
       NOW_MS,
     );
-    expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(500);
+    expect(ledger.committedOn('2026-09-17', NOW_MS, 'translation')).toBe(500);
 
     expect(ledger.release('offer-1', NOW_MS + 3_600_000)).toBe(true);
-    expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(0);
-    expect(ledger.remainingOn('2026-09-17', NOW_MS)).toBe(CEILING);
+    expect(ledger.committedOn('2026-09-17', NOW_MS, 'translation')).toBe(0);
+    expect(ledger.remainingOn('2026-09-17', NOW_MS, 'translation')).toBe(CEILING);
   });
 
   it('reports what the held set says even when the ledger itself was never told', () => {
@@ -232,10 +232,10 @@ describe('derived from held work', () => {
       deadlineMs: THU_AFTERNOON,
       heldSinceMs: NOW_MS,
     });
-    expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(700);
+    expect(ledger.committedOn('2026-09-17', NOW_MS, 'translation')).toBe(700);
 
     store.release('offer-1', NOW_MS);
-    expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(200);
+    expect(ledger.committedOn('2026-09-17', NOW_MS, 'translation')).toBe(200);
   });
 
   it('counts an offer held twice once, so a re-run after a crash does not double the day', () => {
@@ -249,7 +249,7 @@ describe('derived from held work', () => {
       NOW_MS + 1_000,
     );
 
-    expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(500);
+    expect(ledger.committedOn('2026-09-17', NOW_MS, 'translation')).toBe(500);
   });
 
   it('names held work whose deadline it cannot read, rather than quietly under-counting', () => {
@@ -262,7 +262,7 @@ describe('derived from held work', () => {
       NOW_MS,
     );
 
-    expect([...ledger.committedByDay(NOW_MS)]).toEqual([]);
+    expect([...ledger.committedByDay(NOW_MS, 'translation')]).toEqual([]);
     expect(ledger.heldWorkMissingDeadline(NOW_MS)).toEqual(['offer-1']);
   });
 });
@@ -275,7 +275,7 @@ describe('a ceiling of its own', () => {
   it('uses the ceiling it was given and reads no figure from the XTM bot', () => {
     const { ledger } = freshLedger(2_500);
     expect(ledger.ceilingFor('translation')).toBe(2_500);
-    expect(ledger.remainingOn('2026-09-17', NOW_MS)).toBe(2_500);
+    expect(ledger.remainingOn('2026-09-17', NOW_MS, 'translation')).toBe(2_500);
     expect(readFileSync(LEDGER_SOURCE, 'utf8')).not.toMatch(/ACCEPT_MAX/);
   });
 
@@ -299,7 +299,7 @@ describe('a ceiling of its own', () => {
       );
 
       expect(ledger.ceilingFor('translation')).toBe(1_000);
-      expect(ledger.remainingOn('2026-09-17', NOW_MS)).toBe(600);
+      expect(ledger.remainingOn('2026-09-17', NOW_MS, 'translation')).toBe(600);
       expect(
         ledger.checkCapacity(
           { objId: 'big', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
@@ -344,7 +344,7 @@ describe('a ceiling of its own', () => {
       { objId: 'offer-2', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
       NOW_MS,
     );
-    ledger.committedByDay(NOW_MS);
+    ledger.committedByDay(NOW_MS, 'translation');
     ledger.heldWorkMissingDeadline(NOW_MS);
     ledger.release('offer-1', NOW_MS + 3_600_000);
 
@@ -541,7 +541,7 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
       ceiling: CEILING,
       ceilingExceeded: true,
     });
-    expect(ledger.committedOn('2026-09-17', NOW_MS)).toBe(1_200);
+    expect(ledger.committedOn('2026-09-17', NOW_MS, 'translation')).toBe(1_200);
   });
 
   it('then blocks further claims for that day as normal, leaving other days alone', () => {
@@ -555,7 +555,7 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
       NOW_MS,
     );
 
-    expect(ledger.remainingOn('2026-09-17', NOW_MS)).toBe(0); // never negative — spent is spent
+    expect(ledger.remainingOn('2026-09-17', NOW_MS, 'translation')).toBe(0); // never negative — spent is spent
     expect(
       ledger.checkCapacity(
         { objId: 'next', effortWords: 1, deadlineMs: THU_AFTERNOON, kind: 'translation' },
@@ -666,10 +666,10 @@ describe('two budgets — DTP work does not spend the translation ceiling', () =
     );
 
     // The DTP day is spent down …
-    expect(ledger.committedOn(THU, NOW_MS, undefined, 'monolingual')).toBe(3_000);
+    expect(ledger.committedOn(THU, NOW_MS, 'monolingual')).toBe(3_000);
     // … and the translation day has not moved at all. This is the whole point.
-    expect(ledger.committedOn(THU, NOW_MS, undefined, 'translation')).toBe(0);
-    expect(ledger.remainingOn(THU, NOW_MS, undefined, 'translation')).toBe(3_500);
+    expect(ledger.committedOn(THU, NOW_MS, 'translation')).toBe(0);
+    expect(ledger.remainingOn(THU, NOW_MS, 'translation')).toBe(3_500);
   });
 
   it('still admits a translation claim on a day already full of DTP work', () => {
@@ -726,6 +726,6 @@ describe('two budgets — DTP work does not spend the translation ceiling', () =
     );
 
     expect(store.heldWork().map((w) => w.kind)).toEqual(['monolingual']);
-    expect(ledger.committedOn(THU, NOW_MS, undefined, 'translation')).toBe(0);
+    expect(ledger.committedOn(THU, NOW_MS, 'translation')).toBe(0);
   });
 });
