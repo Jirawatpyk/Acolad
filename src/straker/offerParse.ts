@@ -256,7 +256,7 @@ export function createOfferExtractor(
         // parsed correctly beside it. A claimable offer sitting in the same response as an
         // unreadable one is no longer collateral damage.
         if (!(error instanceof StrakerOfferShapeError)) throw error;
-        options.logger.error(
+        resolved.logger.error(
           {
             module: 'offerParse',
             action: 'parse',
@@ -274,7 +274,7 @@ export function createOfferExtractor(
         try {
           resolved.onUnreadable?.(error.objId, error.message);
         } catch (reportFailed) {
-          options.logger.error(
+          resolved.logger.error(
             { module: 'offerParse', action: 'alert', outcome: 'failed', objId: error.objId },
             reportFailed instanceof Error ? reportFailed.message : String(reportFailed),
           );
