@@ -231,9 +231,13 @@ export function parseOffer(entry: unknown, options: OfferParseOptions): OfferFor
 /**
  * The extractor the poll cycle runs (`OfferExtractor` in `pollCycle.ts`).
  *
- * Returned from a factory rather than exported as a function so the zone assumption is
- * announced **once per process**: at a ten-second rhythm, per-cycle would be eight and a half
- * thousand identical lines a day.
+ * Returned from a factory rather than exported as a function so the zone is announced **once
+ * per process**: at a ten-second rhythm, per-cycle would be eight and a half thousand
+ * identical lines a day.
+ *
+ * The line earns its place by being the only way to check the running value without reading
+ * the source — which is how the seven-hour error would have been caught in a minute rather
+ * than a day and a half, had anyone thought to compare it against the portal.
  */
 export function createOfferExtractor(
   options: OfferParseOptions,
@@ -248,7 +252,7 @@ export function createOfferExtractor(
       excludedLanguagePairs: options.excludedLanguagePairs.length,
     },
     `offer deadlines carry no timezone and are read as ${zone.id} (${zone.utcOffset}) — ` +
-      'an unverified assumption about the portal, not a fact it states',
+      'confirmed 2026-09-17 against an assigned job the portal showed at 22:00 GMT+7',
   );
 
   // Resolved once, not rebuilt per offer: the zone announced in the line above is then
