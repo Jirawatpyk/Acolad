@@ -50,18 +50,24 @@
  *
  * ## The assumptions encoded here, all four of them
  *
- * 1. **`due_at` is Bangkok** — and this is the assumption whose error runs the wrong way.
- *    The payload carries no zone (`2026-09-15T23:20:00`) and the portal's own is unknown;
- *    Straker is a New Zealand company, and NZST is UTC+12 against Bangkok's +7. If the
- *    portal means New Zealand, every deadline here is read **five hours later than it is**
- *    (six under NZDT), so the bot believes it has five hours it does not have: it accepts
- *    work the team cannot finish and misses the deadline, rather than passing over work it
- *    could have taken. Both errors are possible; only this one costs a delivery. Pinned in
- *    {@link STRAKER_DEADLINE_ZONE}, overridable per call, never left to a bare `Date.parse`
- *    (which would silently take the host's zone: Bangkok on the office machine, UTC in CI).
- *    `createOfferExtractor` states it in the log at startup so it is visible at runtime and
- *    not only in this comment. **RP-4 settles it on the first real claim** — an assigned job
- *    shows its deadline in the portal UI, which is the observation that decides.
+ * 1. ~~**`due_at` is Bangkok**~~ — **settled 2026-09-17: it is UTC**, and this entry is kept
+ *    rather than deleted because how it was wrong is worth more than the answer.
+ *    The payload carries no zone (`2026-09-15T23:20:00`), so a zone had to be assumed. This
+ *    entry weighed Bangkok against New Zealand — Straker is a New Zealand company — and
+ *    argued the danger was reading deadlines **late**: believing in hours the team does not
+ *    have, accepting work it cannot finish, missing a delivery. "Both errors are possible;
+ *    only this one costs a delivery."
+ *    **That was the wrong half to guard.** The real answer, UTC, made every deadline read
+ *    seven hours **early**, and the error that "does not cost a delivery" cost work instead:
+ *    offers that fitted comfortably were refused as `deadline_unreachable`, quietly, with no
+ *    alert and nothing in the logs that looked like a fault. Two on 2026-09-17 alone. A
+ *    pessimistic clock is the failure mode that does not announce itself, which is exactly
+ *    why it ran for a day and a half.
+ *    Still pinned in {@link STRAKER_DEADLINE_ZONE}, still overridable per call, still never
+ *    left to a bare `Date.parse` (which would take the host's zone: Bangkok on the office
+ *    machine, UTC in CI — and note that CI would then have been *right* by accident).
+ *    `createOfferExtractor` states it in the log at startup, which is how the live value can
+ *    be checked against this comment rather than trusted.
  * 2. **Effort is the raw `words` count** (FR-009), not `total_unit` and not `budget`. What
  *    the sample shows: `total_unit` is **hours** when `rate_type` is `per_hour` and one
  *    project when it is `total_project`, so the third offer's 0.010 hours is 36 seconds —
@@ -99,18 +105,46 @@ export interface DeadlineZone {
 }
 
 /**
- * **The zone assumption, in one place.**
+ * **The zone `due_at` is read in — no longer an assumption (settled 2026-09-17).**
  *
- * `due_at` carries no timezone and two payloads cannot reveal which zone the portal means.
- * This follows the repo's existing precedent for the same problem — the XTM bot's Due cell is
- * equally zone-less and is resolved by pinning `TZ=Asia/Bangkok` (both PM2 configs do) — but
- * pins it *in the code* rather than in the environment, so a CI run in UTC and the office
- * machine agree. **If Straker turns out to mean New Zealand time, this constant is the one
- * line that changes** — and until it is confirmed, every deadline is being read in the
- * optimistic direction: five hours later than a New Zealand `due_at` would mean, which is
- * five hours of capacity the team does not have. See assumption 1 in the module docstring.
+ * `due_at` on the offer list carries no timezone. This was pinned to `Asia/Bangkok` while
+ * nothing could reveal what the portal meant, with a note that one line would change if the
+ * answer turned out to be otherwise. This is that line, and the answer is **UTC**.
+ *
+ * **What settled it**: AJ-295's own job page, which states the zone outright —
+ * `Due date  17 Sep 2026 15:00 (UTC)`. The offer list had given the same job a zone-less
+ * `2026-09-17T15:00:00`: the detail page's figure with its label removed.
+ *
+ * The comparison that raised the suspicion first is still worth recording, because it is
+ * what a running bot can notice on its own. AJ-295 was recorded through both endpoints
+ * within twenty minutes — a zone-less `15:00` from the offer list, and the same job with an
+ * explicit `Z` from the assigned list, which `reconcile.ts` read as 22:00 +07. Seven hours
+ * apart, Bangkok's own offset, which is exactly what a zone-less UTC string misread as local
+ * time produces.
+ *
+ * **What it cost.** Assumption 1 worried about the optimistic direction — reading a deadline
+ * later than it is, accepting work the team cannot finish. The error ran the other way, and
+ * that direction is quiet: every offer deadline was read **seven hours early**, so work that
+ * fitted comfortably was refused as `deadline_unreachable` and nothing looked broken. Two
+ * jobs were lost that way on 2026-09-17 alone (08:19 and 17:15), both then claimed by hand.
+ * A pessimistic clock does not page anyone; it just stops winning.
+ *
+ * **Before changing this back, read this paragraph.** The portal shows the same deadline two
+ * ways, and only one of them is about this field:
+ *
+ * - the job **list** renders it localised — "17 Sept 2026, 22:00 GMT+7"
+ * - the job **detail page** states it raw — "Due date  17 Sep 2026 15:00 (UTC)"
+ *
+ * Same instant, and the API sends the second one: `2026-09-17T15:00:00`, the detail page's
+ * figure with its `(UTC)` label dropped. Anyone who opens the list, sees GMT+7 and
+ * "corrects" this constant will reintroduce the seven-hour error with total confidence,
+ * because the screen appears to confirm it. **Open the job's detail page instead** — the
+ * portal labels the zone there itself, which is as direct as this gets.
+ *
+ * Still pinned in code rather than taken from `process.env.TZ`, so CI and the office machine
+ * cannot disagree, and still overridable per call.
  */
-export const STRAKER_DEADLINE_ZONE: DeadlineZone = { id: 'Asia/Bangkok', utcOffset: '+07:00' };
+export const STRAKER_DEADLINE_ZONE: DeadlineZone = { id: 'UTC', utcOffset: '+00:00' };
 
 /** The only listing type ever observed; the spec records that the others are unknown. */
 const CLAIMABLE_LISTING_TYPE = 'direct_po';
@@ -214,9 +248,13 @@ export function parseOffer(entry: unknown, options: OfferParseOptions): OfferFor
 /**
  * The extractor the poll cycle runs (`OfferExtractor` in `pollCycle.ts`).
  *
- * Returned from a factory rather than exported as a function so the zone assumption is
- * announced **once per process**: at a ten-second rhythm, per-cycle would be eight and a half
- * thousand identical lines a day.
+ * Returned from a factory rather than exported as a function so the zone is announced **once
+ * per process**: at a ten-second rhythm, per-cycle would be eight and a half thousand
+ * identical lines a day.
+ *
+ * The line earns its place by being the only way to check the running value without reading
+ * the source — which is how the seven-hour error would have been caught in a minute rather
+ * than a day and a half, had anyone thought to compare it against the portal.
  */
 export function createOfferExtractor(
   options: OfferParseOptions,
@@ -231,7 +269,7 @@ export function createOfferExtractor(
       excludedLanguagePairs: options.excludedLanguagePairs.length,
     },
     `offer deadlines carry no timezone and are read as ${zone.id} (${zone.utcOffset}) — ` +
-      'an unverified assumption about the portal, not a fact it states',
+      'confirmed 2026-09-17 against an assigned job the portal showed at 22:00 GMT+7',
   );
 
   // Resolved once, not rebuilt per offer: the zone announced in the line above is then
