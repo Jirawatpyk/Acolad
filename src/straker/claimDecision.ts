@@ -50,10 +50,9 @@
  * suite pins by comparing every `detail` against the gate's own output.
  */
 
-import { bangkokCalendar } from '../schedule/bangkokCalendar.js';
 import { evaluateAcceptSchedule } from '../schedule/acceptSchedule.js';
 import { resolveHolidaysForSpan } from '../schedule/thaiHolidays.js';
-import { isNonWorkingDay, type WorkCalendar } from '../schedule/workingHours.js';
+import type { WorkCalendar } from '../schedule/workingHours.js';
 import type { StrakerBotConfig } from './config.js';
 import type { StrakerLedger } from './ledger.js';
 import type { HeldWork } from './strakerStore.js';
@@ -278,9 +277,15 @@ function decideOne(
     throughputPerHour: throughputFor(offer.monolingual, settings),
     calendar,
     holidaysCuratedForSpan: curated,
+    // A weekend or holiday deadline is not a refusal by itself (owner decision,
+    // 2026-09-18). Two 43-word offers at 02:42 on a Friday were turned away for being due
+    // Saturday 12:59 with nine working hours left that day. The feasibility check already
+    // counts only working minutes before the deadline, so a day off still limits the work
+    // — by time, which is the reason that is true. The XTM bot does not pass this.
+    allowNonWorkingDeadline: true,
   });
   if (!verdict.allow) {
-    return skip(offer, classifyRefusal(offer, calendar, curated), verdict.reason);
+    return skip(offer, classifyRefusal(offer, curated), verdict.reason);
   }
 
   const { effortWords, deadlineMs } = offer;
@@ -344,19 +349,17 @@ function decideOne(
  * has already happened. The order below mirrors the gate's own precedence; the gate's
  * throughput check cannot be reached because `decideClaims` screens that once, up front.
  */
-function classifyRefusal(
-  offer: OfferForDecision,
-  calendar: WorkCalendar,
-  curated: boolean,
-): SkipReason {
+function classifyRefusal(offer: OfferForDecision, curated: boolean): SkipReason {
   if (offer.deadlineMs === null) return 'deadline_unknown';
   if (offer.effortWords === null) return 'effort_unknown';
   if (!curated) return 'holiday_calendar_uncurated';
 
-  const deadline = bangkokCalendar(offer.deadlineMs);
-  if (isNonWorkingDay(deadline.date, deadline.weekday, calendar.workdays, calendar.holidays)) {
-    return 'deadline_on_non_working_day';
-  }
+  // No weekday check here any more. The gate is called with `allowNonWorkingDeadline`, so a
+  // deadline on a day off never refuses on that ground — and reading the weekday first would
+  // mislabel the refusal it does make: weekend work that does not fit in Friday's hours
+  // would be recorded as "due on a weekend" rather than "cannot be done in time".
+  // `deadline_on_non_working_day` stays in `SKIP_REASONS` for the rows written before.
+  //
   // What is left is a deadline already past and a deadline the crew cannot reach at the
   // configured throughput. Both mean the same thing to the team: the work cannot be done
   // in time, and the gate's own sentence says which of the two it was.

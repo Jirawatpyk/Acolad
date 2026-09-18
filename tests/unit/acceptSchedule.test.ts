@@ -197,3 +197,48 @@ describe('evaluateAcceptSchedule', () => {
     if (!v.allow) expect(v.reason).toContain('cannot finish in time');
   });
 });
+
+describe('allowNonWorkingDeadline — a deadline on a day off is not, by itself, a reason', () => {
+  // Straker opts in (2026-09-18, owner decision); XTM does not. The two 43-word offers
+  // seen at 02:42 on Friday 18/09 were due Saturday 12:59 and were refused for that alone,
+  // though Friday had nine working hours left. A day off is where the TIME runs out, not
+  // a reason to refuse; the feasibility check already counts only working time before it.
+  const FRI_0242 = at('2026-09-18T02:42:00+07:00');
+  const SAT_1259 = at('2026-09-19T12:59:00+07:00');
+
+  it('is off by default, so every existing caller — XTM — still refuses', () => {
+    const v = evaluateAcceptSchedule(base({ nowMs: FRI_0242, dueAtMs: SAT_1259, effort: 43 }));
+    expect(v.allow).toBe(false);
+    if (!v.allow) expect(v.reason).toContain('non-working day');
+  });
+
+  it('allows small work due on a Saturday when Friday has the time for it', () => {
+    const v = evaluateAcceptSchedule(
+      base({ nowMs: FRI_0242, dueAtMs: SAT_1259, effort: 43, allowNonWorkingDeadline: true }),
+    );
+    expect(v).toEqual({ allow: true });
+  });
+
+  it('still refuses work Friday cannot hold — Saturday adds no working time', () => {
+    // 100 w/h × 9 working hours on Friday = 900. 1,000 words due Saturday does not fit, and
+    // the reason is the real one — time — not the weekday.
+    const v = evaluateAcceptSchedule(
+      base({ nowMs: FRI_0242, dueAtMs: SAT_1259, effort: 1_000, allowNonWorkingDeadline: true }),
+    );
+    expect(v.allow).toBe(false);
+    if (!v.allow) expect(v.reason).toContain('cannot finish in time');
+  });
+
+  it('treats a holiday deadline the same way', () => {
+    const v = evaluateAcceptSchedule(
+      base({
+        nowMs: at('2026-06-23T09:00:00+07:00'), // Tue
+        dueAtMs: at('2026-06-24T12:00:00+07:00'), // Wed, a holiday here
+        effort: 300,
+        allowNonWorkingDeadline: true,
+        calendar: { holidays: new Map([['2026-06-24', 'Test Holiday']]) },
+      }),
+    );
+    expect(v).toEqual({ allow: true });
+  });
+});
