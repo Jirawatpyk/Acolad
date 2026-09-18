@@ -89,14 +89,15 @@ export interface ClaimAttempt {
 }
 
 /**
- * The body of a claim request: empty.
+ * The body of a claim request: none.
  *
- * The identity travels in the path. The portal's web app sends no body at all; an empty
- * JSON object is the closest the one POST door can send, and names no field the portal has
- * not asked for. Exported so the transport-level tests build the same
- * request this module does, instead of keeping a second guess that can drift from it.
+ * The identity travels in the path, and the portal's web app sends its Accept with
+ * `body: undefined` — no payload and no JSON content type. `undefined` tells the POST door to
+ * send exactly that. (It had been `{}`, a guess that the endpoint would ignore an empty
+ * object; matching the real client leaves nothing to guess.) Exported so the transport-level
+ * tests build the same request this module does.
  */
-export const CLAIM_REQUEST_BODY: Readonly<Record<string, never>> = Object.freeze({});
+export const CLAIM_REQUEST_BODY: undefined = undefined;
 
 /**
  * Where a claim is sent: `POST /api/vendors/{vendorId}/job-offers/{obj_id}/accept`.

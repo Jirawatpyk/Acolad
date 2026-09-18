@@ -75,6 +75,8 @@ The client reads the remainder after every response and responds in defined step
 
 ## 4a. Account blocked or suspended — NOT OBSERVED
 
+**What the web app says (2026-09-18):** nothing that equates a 403 with a barred account. Its API layer special-cases only a 401 (back to sign-in); its `/403` page is a *route* guard for impersonation and agency-translator accounts; and a failed accept that is not a 409 shows a generic "Something went wrong". So a 403 on accept means "forbidden" — possibly for this one offer — not proven to mean "banned". The bot still stops claiming on any 403 until `straker:unbar` (the conservative reading, kept deliberately), which means a per-offer 403 would halt claiming until a human looks.
+
 Distinct from an expired session, which self-heals by signing in again. A rejection meaning the account itself is barred must alert immediately and stop claiming; it must never be retried around as though it were transient. The two are easy to conflate because both arrive as a refusal on an authenticated request — and conflating them turns a suspension into a sign-in loop against a portal that has already said no.
 
 ## 5. Reading work already assigned to the team — NOT YET EXERCISED

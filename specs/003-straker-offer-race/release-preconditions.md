@@ -82,7 +82,7 @@ never been able to verify, because no claim has ever been made against this port
 | ~~The claim endpoint's **path and body**~~ — **CLOSED 2026-09-18** | `claim.ts` — `claimRequestPath` | `POST …/job-offers/{obj_id}/accept`, read from the portal's web app. The guess `/claim` got a 404 on the first real claim. |
 | ~~The **lost-race signal**~~ — **CLOSED 2026-09-18: HTTP 409** | `claimOutcome.ts` — `CONFIRMED_LOST_RACE_SIGNALS = ['http_409']` | The web app shows "Offer no longer available" for a 409 only. Still to observe: one **won** claim end to end. |
 | ~~Whether `due_at` is **Bangkok or New Zealand**~~ — **CLOSED 2026-09-17: it is UTC** | `offerParse.ts` — `STRAKER_DEADLINE_ZONE` | Settled exactly as this row said it would be, by an assigned job's deadline in the portal UI. It was neither option offered here. See below. |
-| Whether `words` is really the **effort** field | `offerParse.ts` assumption 2 | Confirmed on one independent offer and contradicted by a cent on the other. Effort is what the whole ceiling rests on. |
+| Whether `words` is really the **effort** field — **answered 2026-09-18 from the web app** | `offerParse.ts` assumption 2 | The portal itself displays `words` as the offer's size ("Units: N words"; "N w" in the list). A `weighted_words` field exists only on the per-offer **detail** read, which the bot never makes before claiming (contract §6); the list carries `words` alone. Whether the crew's capacity should be measured in weighted words is a policy question, not a parsing one. |
 
 ### The zone question closed itself, 2026-09-17 — and the answer was a third option
 

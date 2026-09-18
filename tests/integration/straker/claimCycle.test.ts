@@ -249,6 +249,21 @@ describe('claim.ts — nothing is asked about an offer before it is claimed (FR-
     expect(methodsUsed(fetchImpl)).toEqual(['POST']);
   });
 
+  it('sends the claim with no body, exactly as the portal web app does', async () => {
+    // The web app's Accept button POSTs with `body: undefined` — no payload, no content type.
+    // Sending `{}` as JSON was a guess that the endpoint would ignore it; matching the real
+    // client removes the question. Kills a claim that grows a body or a JSON content type.
+    const fetchImpl = alwaysAccepting();
+    const { client } = harness(fetchImpl);
+
+    await claimOffer(client, TARGET);
+
+    const init = fetchImpl.mock.calls[0]?.[1];
+    expect(init?.method).toBe('POST');
+    expect(init?.body).toBeUndefined();
+    expect(new Headers(init?.headers).has('content-type')).toBe(false);
+  });
+
   it('asks nothing extra after a refusal either', async () => {
     // The tempting place to add an enquiry is the failure branch — "find out why we lost".
     // It costs a round trip on the race path all the same, and the answer changes nothing:
