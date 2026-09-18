@@ -89,6 +89,8 @@ interface Fixture {
   readonly signIns: () => number;
   setNow(ms: number): void;
   setAssigned(work: readonly AssignedWork[]): void;
+  /** What the fake portal's assigned list currently reports. */
+  assigned(): readonly AssignedWork[];
 }
 
 function tempStrakerDir(): string {
@@ -210,6 +212,7 @@ function fixture(opts: FixtureOptions = {}): Fixture {
     signIns: () => signIns,
     setNow: (ms) => void (now = ms),
     setAssigned: (work) => void (assigned = work),
+    assigned: () => assigned,
   };
 }
 
@@ -911,7 +914,14 @@ describe('T048 three consecutive reconciliation failures raise an alert (FR-016c
 // ---------------------------------------------------------------------------
 
 describe('T049 recovered work is counted even past the ceiling, and warns (FR-016d, V25)', () => {
-  /** Seed the day to within `room` words of the ceiling, as earlier wins would have. */
+  /**
+   * Seed the day to within `room` words of the ceiling, as earlier wins would have.
+   *
+   * A win is held in our record AND listed on the portal's assigned list — that is what
+   * having won it means. This used to seed only the record, which was harmless while absence
+   * released nothing. Once it does, a win the portal does not list is a job the client
+   * cancelled, and it is released like one: the fixture has to say what reality says.
+   */
   function seedNearlyFull(f: Fixture, room: number): void {
     f.store.hold({
       objId: 'earlier-win',
@@ -920,6 +930,7 @@ describe('T049 recovered work is counted even past the ceiling, and warns (FR-01
       deadlineMs: DEADLINE_MS,
       heldSinceMs: NOW_MS - 3_600_000,
     });
+    f.setAssigned([...f.assigned(), assignedWork('earlier-win', { effortWords: CEILING - room })]);
   }
 
   it('records and counts work that pushes the day past its ceiling', async () => {
@@ -1069,6 +1080,33 @@ describe('reading the portal assigned-work list (contract 5)', () => {
 
     expect(work.map((w) => w.objId)).toEqual(['a', 'b', 'c']);
     expect(c.paths).toHaveLength(2);
+  });
+
+  it('refuses a short page that does not account for the total the portal claims', async () => {
+    // The guard that makes release-on-absence safe, and the one gap the old positive-evidence
+    // rule was really protecting against. A page shorter than `limit` is normally the
+    // portal's own end-of-list signal — but when it arrives alongside a `total` it does not
+    // reach, the two disagree and nothing here can say which is right. Returning the short
+    // list would tell the reconciler that everything missing from it has been cancelled, and
+    // it would hand back the ceiling for work the team still owes.
+    const c = client([{ items: [item('a')], total: 2, limit: 100, offset: 0 }]);
+
+    await expect(readAssignedWork(c, 'v1')).rejects.toThrow(/1 of 2|short list/i);
+  });
+
+  it('accepts a short page that does account for the total', async () => {
+    // The ordinary case, and the control for the test above: one item, and the portal says
+    // there is one. A guard that also refused this would fail every normal read.
+    const c = client([{ items: [item('a')], total: 1, limit: 100, offset: 0 }]);
+
+    expect((await readAssignedWork(c, 'v1')).map((w) => w.objId)).toEqual(['a']);
+  });
+
+  it('accepts an empty list the portal says is empty', async () => {
+    // The steady state on a quiet day. `0 < 0` is false, so the guard must not fire here.
+    const c = client([{ items: [], total: 0, limit: 100, offset: 0 }]);
+
+    expect(await readAssignedWork(c, 'v1')).toEqual([]);
   });
 
   it('stops rather than looping forever when the portal never finishes the list', async () => {
@@ -1287,10 +1325,24 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     expect(after.fits).toBe(true);
   });
 
-  it('never releases work the read simply did not mention', async () => {
-    // The partial-read safety property, and the reason the rule is phrased positively.
-    // A truncated page looks exactly like "the job is gone" — and treating it that way
-    // would free capacity for work the team still owes.
+  it('releases work a complete read does not mention, because the portal no longer has it', async () => {
+    /**
+     * This test asserted the OPPOSITE until 2026-09-17, on the argument that "a truncated
+     * page looks exactly like 'the job is gone' — and treating it that way would free
+     * capacity for work the team still owes."
+     *
+     * The danger was real; the remedy was in the wrong place. Refusing to read absence did
+     * not make a short read safe, it only moved the cost: a job the CLIENT CANCELS vanishes
+     * from the list with no status and no final page, so nothing could ever release it and
+     * its words stayed charged against its deadline day permanently. `b7000ad1` — 956 words,
+     * cancelled — did exactly that, and `released` had been `0` on all 132 reconciliation
+     * passes the bot had ever run. Rule 1 had never fired once.
+     *
+     * Completeness is now checked where it is knowable: `readAssignedWork` throws on a list
+     * shorter than the `total` the portal claims, so a truncated page fails the pass and
+     * releases nothing — see the test below. A list that reaches the rule is one the portal
+     * vouched for.
+     */
     const f = fixture();
 
     f.setAssigned([assignedWork('job-1'), assignedWork('job-2')]);
@@ -1298,18 +1350,89 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     await f.reconciler.runIfDue();
     expect(f.store.heldWork()).toHaveLength(2);
 
-    // Page 2 never arrived: job-2 is absent, not finished.
+    // The portal now lists only job-1, and says so completely: job-2 is gone.
     f.setAssigned([assignedWork('job-1')]);
     f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
     const outcome = await f.reconciler.runIfDue();
 
+    expect(outcome).toMatchObject({ ran: true, ok: true, released: ['job-2'] });
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['job-1']);
+  });
+
+  it('does not release a job it has just won that the portal has not listed yet', async () => {
+    // The race release-on-absence opens, and the reason for its grace. A claim writes
+    // `held_work` the moment the portal answers; the job reaches the assigned list some
+    // moments later. A pass landing in between sees "held, not listed" — and releasing it
+    // would free the ceiling for a job the bot has JUST WON, so the next offer claimed
+    // against that ceiling is an over-commitment that cannot be undone.
+    const f = fixture({ ceiling: 150 });
+    f.store.hold({
+      objId: 'just-won',
+      effortWords: 100,
+      kind: 'translation',
+      deadlineMs: DEADLINE_MS,
+      heldSinceMs: NOW_MS - 5_000, // claimed five seconds ago
+    });
+    f.setAssigned([]); // the portal has not caught up
+    f.setNow(NOW_MS);
+
+    const outcome = await f.reconciler.runIfDue();
+
     expect(outcome).toMatchObject({ ran: true, ok: true, released: [] });
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['just-won']);
+    // And the ceiling it occupies is still occupied — the assertion that matters.
     expect(
-      f.store
-        .heldWork()
-        .map((w) => w.objId)
-        .sort(),
-    ).toEqual(['job-1', 'job-2']);
+      f.ledger.checkCapacity(
+        { objId: 'next', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
+        NOW_MS,
+      ).fits,
+    ).toBe(false);
+  });
+
+  it('releases it once it has been absent for a full interval', async () => {
+    // The other edge of the grace: it delays a release, it does not prevent one. Work held
+    // for a whole interval and still unlisted really has gone.
+    const f = fixture();
+    f.store.hold({
+      objId: 'long-gone',
+      effortWords: 100,
+      kind: 'translation',
+      deadlineMs: DEADLINE_MS,
+      heldSinceMs: NOW_MS - RECONCILE_INTERVAL_MS,
+    });
+    f.setAssigned([]);
+    f.setNow(NOW_MS);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, released: ['long-gone'] });
+    expect(f.store.heldWork()).toEqual([]);
+  });
+
+  it('gives the ceiling back when the absent work is released, not just the row', async () => {
+    // The load-bearing half. Marking the row released without the ledger noticing leaves the
+    // day exactly as blocked as before, which is the failure this whole change exists to fix.
+    const f = fixture({ ceiling: 150 });
+
+    f.setAssigned([assignedWork('job-1')]);
+    f.setNow(NOW_MS);
+    await f.reconciler.runIfDue();
+
+    const blocked = f.ledger.checkCapacity(
+      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
+      NOW_MS,
+    );
+    expect(blocked.fits).toBe(false);
+
+    f.setAssigned([]); // the client cancelled it
+    f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    await f.reconciler.runIfDue();
+
+    const freed = f.ledger.checkCapacity(
+      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
+      NOW_MS + RECONCILE_INTERVAL_MS,
+    );
+    expect(freed.fits).toBe(true);
   });
 
   it('never releases on a status it does not recognise', async () => {
