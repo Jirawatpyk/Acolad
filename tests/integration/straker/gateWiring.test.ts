@@ -183,6 +183,9 @@ function gateOracle(
       holidays,
     },
     holidaysCuratedForSpan: curated,
+    // As the production call passes it (owner decision, 2026-09-18) — an oracle that
+    // disagreed with the caller on this would be testing a different gate.
+    allowNonWorkingDeadline: true,
   });
 }
 
@@ -228,27 +231,38 @@ describe('T026 the gate refuses and the decision honours it', () => {
     });
   });
 
-  it('refuses a deadline that falls on a weekend, in the gate’s own words', () => {
-    // Kills: dropping the gate call and claiming on eligibility alone.
+  it('claims work due on a weekend when the working days before it have the time', () => {
+    // Owner decision, 2026-09-18, after two 43-word offers seen at 02:42 on a Friday were
+    // refused for being due Saturday 12:59 — with nine working hours still left that day.
+    // A day off is where the working time runs out, not a reason to refuse.
+    // Kills: dropping `allowNonWorkingDeadline` from the production call.
     const { ledger } = freshLedger(ROOMY);
     const o = offer('a', { deadlineMs: SAT_DEADLINE });
 
-    const decision = skipOf(decideClaims([o], ctx(WED_10AM, ledger)));
-
-    expect(decision.reason).toBe('deadline_on_non_working_day');
-    expect(decision.detail).toBe(gateRefusal(o, WED_10AM));
-    expect(decision.detail).toContain('weekend');
+    expect(only(decideClaims([o], ctx(WED_10AM, ledger))).action).toBe('claim');
   });
 
-  it('refuses a deadline that falls on a curated Thai holiday, naming the holiday', () => {
+  it('claims work due on a curated Thai holiday on the same terms', () => {
     const { ledger } = freshLedger(ROOMY);
     const o = offer('a', { deadlineMs: HOLIDAY_DEADLINE });
 
-    const decision = skipOf(decideClaims([o], ctx(WED_10AM, ledger)));
+    expect(only(decideClaims([o], ctx(WED_10AM, ledger))).action).toBe('claim');
+  });
 
-    expect(decision.reason).toBe('deadline_on_non_working_day');
-    expect(decision.detail).toBe(gateRefusal(o, WED_10AM));
-    expect(decision.detail).toContain('King Bhumibol Memorial Day');
+  it('refuses weekend work the working days cannot hold — as unreachable, not as a weekday', () => {
+    // Saturday adds no working time. From Friday 09:00 there are nine working hours to a
+    // Saturday deadline: 900 words at 100/h. 1,000 does not fit, and the reason recorded is
+    // the real one. Kills: classifying by the deadline's weekday before the gate's verdict,
+    // which would label this `deadline_on_non_working_day` and hide why it was refused.
+    const { ledger } = freshLedger(ROOMY);
+    const o = offer('a', { effortWords: 1_000, deadlineMs: SAT_DEADLINE });
+    const fri9 = at('2026-09-18T09:00:00+07:00');
+
+    const decision = skipOf(decideClaims([o], ctx(fri9, ledger)));
+
+    expect(decision.reason).toBe('deadline_unreachable');
+    expect(decision.detail).toBe(gateRefusal(o, fri9));
+    expect(decision.detail).toContain('cannot finish in time');
   });
 
   it('refuses a deadline the crew cannot reach at the configured throughput', () => {
@@ -531,7 +545,7 @@ describe('T027 reaching the ceiling does not stop the pass', () => {
     const held = [heldRow('earlier', 990, THU_5PM)];
     const offers = [
       offer('ineligible', { eligible: false }),
-      offer('weekend', { deadlineMs: SAT_DEADLINE }),
+      offer('passed', { deadlineMs: ALREADY_PASSED }),
       offer('uncurated', { deadlineMs: UNCURATED_DEADLINE }),
       offer('nofields', { effortWords: null }),
       offer('ceiling'),
@@ -545,7 +559,7 @@ describe('T027 reaching the ceiling does not stop the pass', () => {
     expect(decisions.map((d) => d.objId)).toEqual(offers.map((o) => o.objId));
     expect(decisions.map((d) => (d.action === 'skip' ? d.reason : 'claimed'))).toEqual([
       'ineligible_language',
-      'deadline_on_non_working_day',
+      'deadline_unreachable',
       'holiday_calendar_uncurated',
       'effort_unknown',
       'ceiling_reached',
@@ -661,8 +675,9 @@ describe('T029 nothing the gate rejected is ever claimed', () => {
       expect(gateOracle(source, WED_10AM).allow, `${source.objId} was claimed`).toBe(true);
       expect(source.eligible).toBe(true);
     }
-    // Guards the assertion above against passing vacuously.
-    expect(claimed).toBe(2);
+    // Guards the assertion above against passing vacuously. Four: the two good offers, and
+    // the weekend and holiday deadlines, reachable since 2026-09-18.
+    expect(claimed).toBe(4);
   });
 
   it('still refuses on a later pass, and on the pass after that', () => {
@@ -670,12 +685,12 @@ describe('T029 nothing the gate rejected is ever claimed', () => {
     // offers it has already turned away, so a rejected offer is re-decided repeatedly;
     // none of those passes may reach a different answer.
     const { ledger } = freshLedger(ROOMY);
-    const rejected = offer('weekend', { deadlineMs: SAT_DEADLINE });
+    const rejected = offer('passed', { deadlineMs: ALREADY_PASSED });
     const snapshots: HeldWork[][] = [[], [heldRow('x', 10, THU_5PM)], [heldRow('y', 90, FRI_5PM)]];
 
     for (const held of snapshots) {
       const decision = skipOf(decideClaims([rejected], ctx(WED_10AM, ledger, held)));
-      expect(decision.reason).toBe('deadline_on_non_working_day');
+      expect(decision.reason).toBe('deadline_unreachable');
     }
   });
 
@@ -683,7 +698,7 @@ describe('T029 nothing the gate rejected is ever claimed', () => {
     // A pass that reused the previous offer's verdict, or that kept a "gate already
     // checked" flag across iterations, would claim the second one here.
     const { ledger } = freshLedger(ROOMY);
-    const offers = [offer('good'), offer('weekend', { deadlineMs: SAT_DEADLINE })];
+    const offers = [offer('good'), offer('passed', { deadlineMs: ALREADY_PASSED })];
 
     const decisions = decideClaims(offers, ctx(WED_10AM, ledger));
 
@@ -694,11 +709,9 @@ describe('T029 nothing the gate rejected is ever claimed', () => {
     // The ceiling is the LAST gate, not the only one. An empty ledger must not turn a
     // gate refusal into a claim.
     const { ledger } = freshLedger(ROOMY);
-    const o = offer('weekend', { effortWords: 1, deadlineMs: SAT_DEADLINE });
+    const o = offer('passed', { effortWords: 1, deadlineMs: ALREADY_PASSED });
 
-    expect(skipOf(decideClaims([o], ctx(WED_10AM, ledger))).reason).toBe(
-      'deadline_on_non_working_day',
-    );
+    expect(skipOf(decideClaims([o], ctx(WED_10AM, ledger))).reason).toBe('deadline_unreachable');
   });
 
   it('refuses everything outright when the throughput figure is unusable', () => {

@@ -15,6 +15,18 @@ export interface AcceptScheduleInput {
    *  Defaults to WORDS_UNIT (words mode) when omitted so all existing callers
    *  continue to emit the same byte-for-byte strings they do today. */
   unit?: Pick<EffortUnit, 'adj'>;
+  /**
+   * Let a deadline that falls on a weekend or holiday through to the feasibility check
+   * instead of refusing it outright. Off by default, so the XTM bot — every caller that
+   * does not pass it — behaves byte-for-byte as before.
+   *
+   * Straker turns it on (owner decision, 2026-09-18). A day off is where the working time
+   * runs out, not a reason to refuse: `workingMinutesBetween` already counts only working
+   * minutes before the deadline, so a Saturday deadline gets exactly Friday's remaining
+   * hours and no more. Work that fits in them is claimable; work that does not is refused
+   * for the real reason, time.
+   */
+  allowNonWorkingDeadline?: boolean;
 }
 
 export type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: string };
@@ -46,7 +58,10 @@ export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVe
   }
 
   const dl = bangkokCalendar(i.dueAtMs);
-  if (isNonWorkingDay(dl.date, dl.weekday, i.calendar.workdays, i.calendar.holidays)) {
+  if (
+    i.allowNonWorkingDeadline !== true &&
+    isNonWorkingDay(dl.date, dl.weekday, i.calendar.workdays, i.calendar.holidays)
+  ) {
     const why = i.calendar.holidays.has(dl.date)
       ? `holiday: ${i.calendar.holidays.get(dl.date)}`
       : 'weekend';
