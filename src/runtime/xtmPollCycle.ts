@@ -110,6 +110,12 @@ export interface XtmCycleSummary {
     effort: number | null;
     /** The effort metric active this cycle (from cfg.ACCEPT_EFFORT_METRIC). */
     metric: EffortMetric;
+    /**
+     * Capacity blocks only: the window figures behind the refusal, kept out of `reason` so it
+     * does not change every minute (#15) — the day judged, the effort due by it, and what the
+     * working time left through it holds at this moment.
+     */
+    window?: { day: string; demand: number; capacity: number };
   }[];
   /**
    * §9 audit trail for the held-read → over-accept residual risk (deadline-bucketed capacity).
@@ -282,7 +288,7 @@ export class XtmPollCycle {
           this.outbox,
           'held_job_no_deadline',
           snapshot.capturedAt,
-          `${heldNoDeadline.length} accepted job(s) have no parseable deadline — the per-deadline-day capacity may under-count; accept same-day jobs manually / fix the due date`,
+          `${heldNoDeadline.length} accepted job(s) have no parseable deadline — capacity may under-count for their day and every later deadline; accept jobs manually / fix the due date`,
           {},
           `held_job_no_deadline:${bangkokDateString(detectedMs)}`,
           this.cfg.unit,
@@ -305,7 +311,7 @@ export class XtmPollCycle {
           this.outbox,
           'held_job_no_effort',
           snapshot.capturedAt,
-          `${heldNoEffort.length} accepted job(s) have no effort count under the active metric — the per-deadline-day capacity may under-count; accept same-day jobs manually / fix the words/WWC count`,
+          `${heldNoEffort.length} accepted job(s) have no effort count under the active metric — capacity may under-count for their day and every later deadline; accept jobs manually / fix the words/WWC count`,
           {},
           `held_job_no_effort:${bangkokDateString(detectedMs)}`,
           this.cfg.unit,
@@ -427,6 +433,7 @@ export class XtmPollCycle {
         // it — everything due by each day must fit the working time left through that day.
         // Buckets are the held effort per deadline day, advanced optimistically per day.
         let capExhaustedDay: string | undefined;
+        let blockWindow: { day: string; demand: number; capacity: number } | undefined;
         if (blockReason === null && cap > 0) {
           // I2 (fail loud, never guess): feasibility ran first and rejects a null deadline, so
           // every member here has a known deadline day. That invariant is enforced by ordering,
@@ -468,6 +475,11 @@ export class XtmPollCycle {
               // the member on the overflowing day, so it blamed the wrong file). The feasibility
               // path below still prefixes the actual failing member.
               blockReason = v.reason;
+              blockWindow = {
+                day: v.kind === 'budget_reached' ? v.capExhaustedDay : v.day,
+                demand: v.demand,
+                capacity: v.capacity,
+              };
               // T1: only the retryable 'budget_reached' verdict carries an exhausted day (and so
               // raises daily_cap_reached below); 'over_cap_permanent' (a single over-cap job) does
               // not. Switch on the explicit discriminant, not a presence test of an optional field.
@@ -506,6 +518,7 @@ export class XtmPollCycle {
               dueDate: s.dueDate,
               effort: eff(s),
               metric,
+              ...(blockWindow ? { window: blockWindow } : {}),
             });
           }
           // I3b: a deadline day's budget is genuinely exhausted (not a single over-cap job) —
@@ -518,7 +531,7 @@ export class XtmPollCycle {
               this.outbox,
               'daily_cap_reached',
               snapshot.capturedAt,
-              `the ${cap}-${this.cfg.unit.adj} daily cap is reached for ${capExhaustedDay}`,
+              `${this.cfg.unit.noun} due by ${capExhaustedDay} fill the working time left before it (${cap} ${this.cfg.unit.noun} a working day)`,
               {},
               `daily_cap_reached:${capExhaustedDay}`,
               this.cfg.unit,

@@ -196,6 +196,24 @@ describe('decideWindowCapacity', () => {
     ).toMatchObject({ accept: false, kind: 'budget_reached' });
   });
 
+  it('weighs new work already past its deadline day as due today, never as nothing', () => {
+    // Callers screen this out with feasibility first (no working time is left before such a
+    // deadline), but the standard must not depend on that: a new bot calling it alone would
+    // otherwise see its work vanish from every sum and accept any amount of it.
+    const MON_0600 = at('2026-09-14T06:00:00+07:00');
+    const late = [{ effort: 99_999, deadlineDay: '2026-09-11' }]; // last Friday
+
+    expect(decide(MON_0600, {}, late)).toMatchObject({
+      accept: false,
+      kind: 'over_cap_permanent',
+      day: '2026-09-14',
+    });
+    // …and still permanent, not merely "full", when later held work exists.
+    expect(decide(MON_0600, { '2026-09-18': 100 }, late)).toMatchObject({
+      kind: 'over_cap_permanent',
+    });
+  });
+
   it('gives the same reason a minute later, so a standing refusal is not re-announced', () => {
     // The working time left shrinks every working minute; a reason that quoted it would read as
     // a new refusal on every poll, and XTM reposts a rejection whose reason text changes.

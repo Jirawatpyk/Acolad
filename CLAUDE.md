@@ -150,7 +150,7 @@ main/once → bootstrap.createXtmBot() ประกอบทุกชิ้น (
 | `runtime/` | orchestration + entry points | (ดู Entry points ด้านบน) + `rateLimiter.ts`, `scheduler.ts` |
 | `monitoring/` | สุขภาพระบบ | `heartbeat.ts` (Healthchecks), `logger.ts` (pino + redaction) |
 | `shared/` | ใช้ร่วมกัน**สองบอท** (มี coverage gate) | `outboxRetry.ts` (ตารางเวลา retry), `rollingLogger.ts` (rotation/retention/censor), `sqliteOpen.ts` (open→WAL→migrate→quarantine) |
-| `straker/` | **บอทตัวที่สอง ครบวงจรในตัวเอง** (มี coverage gate) | `httpClient.ts` (transport ที่เดียว — DC-4), `pollCycle.ts` (fetch→diff→gate→act→persist→notify — ชื่อ step เดียวกับ XTM จงใจ), `claim.ts`/`claimDecision.ts`/`claimOutcome.ts`, `reconcile.ts` (ทุก 15 นาที — คืนโควต้างานที่เสร็จ), `ledger.ts` (เพดานรายวันทำงาน ตัดแบบ earliest-deadline-first — ต่างจาก XTM), `strakerStore.ts`/`outbox.ts`, `notifier.ts`/`trackingSink.ts`/`dispatcher.ts`, `combinedSummary.ts` (อ่านสองพอร์ทัล read-only), `main.ts` (composition root) |
+| `straker/` | **บอทตัวที่สอง ครบวงจรในตัวเอง** (มี coverage gate) | `httpClient.ts` (transport ที่เดียว — DC-4), `pollCycle.ts` (fetch→diff→gate→act→persist→notify — ชื่อ step เดียวกับ XTM จงใจ), `claim.ts`/`claimDecision.ts`/`claimOutcome.ts`, `reconcile.ts` (ทุก 15 นาที — คืนโควต้างานที่เสร็จ), `ledger.ts` (เพดานรายวันทำงาน — เรียก `schedule/windowCapacity` ตัวเดียวกับ XTM), `strakerStore.ts`/`outbox.ts`, `notifier.ts`/`trackingSink.ts`/`dispatcher.ts`, `combinedSummary.ts` (อ่านสองพอร์ทัล read-only), `main.ts` (composition root) |
 
 **R11 bulkhead — กฎที่ test บังคับ ไม่ใช่สไตล์**: ไฟล์ใน `src/straker/**` **ห้าม
 value-import** `src/state/` หรือ `src/config/` (ข้อยกเว้น type-only ตัวเดียวที่บันทึกไว้:
@@ -295,6 +295,10 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   → page** (auto-accept ดับทั้งระบบ); `daily_cap_reached` = warn (Chat) แจ้งครั้งเดียว/**วัน DL
   (deadline day)** ที่ budget คำเต็มจริง (dedup `daily_cap_reached:<วันDL>` — 2 วัน DL ล้นในวัน
   Bangkok เดียวกันได้ 2 alert; PR #15); ไม่ใช่งานเดี่ยวใหญ่เกิน cap (อันนั้น = "accept manually").
+  **ตั้งแต่ window (2026-09-18):** วันที่ใน alert/เหตุผล = วันที่ **เวลาทำงานไม่พอ** ซึ่งอาจเป็น**วันหลัง**
+  ที่งานใหม่ไปเบียด (EDF) หรือวันนี้ที่เต็มเพราะงาน overdue; "accept manually" = ใหญ่กว่า**เวลาทั้งหมด**
+  ก่อน DL ไม่ใช่แค่วันเดียว. ตัวเลข demand/capacity อยู่ใน log `scheduleGate` field `window`
+  (ไม่อยู่ในเหตุผล เพราะเหตุผลที่เปลี่ยนทุกนาทีจะทำให้แจ้ง Chat ซ้ำทุกรอบ).
 
 ## jobcatch-straker (live 2026-09-16 — runbook)
 
@@ -308,7 +312,7 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   **จงใจว่างเปล่า** จนกว่า RP-4 จะยืนยันสัญญาณจริงจากพอร์ทัล. ระหว่างนี้ทุกการถูกปฏิเสธ
   ถูกจัดเป็น `failed` ซึ่งเป็นฝั่งที่ปลอดภัย (FR-005a) แต่เสียงดัง. **ปิดเคสนี้ = เติมค่า
   เดียวลง array นั้น** หลังเห็นของจริงหนึ่งครั้ง (SC-007 ติดป้าย conditional ไว้แล้ว)
-- **เพดานคือ "ต่อวันทำงาน" และ DL มีทุกวันทำงานก่อนหน้าให้ใช้** (2026-09-18 — ต่างจาก XTM):
+- **เพดานคือ "ต่อวันทำงาน" และ DL มีทุกวันทำงานก่อนหน้าให้ใช้** (2026-09-18 — มาตรฐานกลาง ใช้เหมือน XTM):
   งานรับได้เมื่อ ทุกวันครบกำหนด d ตั้งแต่ DL ของงานนี้เป็นต้นไป งานที่ครบกำหนดภายใน d
   ≤ **เวลาทำงานที่เหลือจริงถึงสิ้นวัน d × (เพดาน ÷ 9 ชม.)** แต่ไม่ต่ำกว่าเพดานหนึ่งวัน.
   เช่น จันทร์ 09:00 รับงาน 4,000 คำ DL พุธได้ (27 ชม. = 10,500) แต่ถ้าเห็นตอนจันทร์ 17:45

@@ -313,6 +313,9 @@ export class XtmPollLoop {
             effort: r.effort,
             metric: r.metric,
             dueDate: r.dueDate,
+            // Capacity blocks: the window figures the reason leaves out (it must not change
+            // every minute) — which day was judged, what is due by it, what it holds now.
+            window: r.window,
           },
           'job blocked by schedule gate',
         );

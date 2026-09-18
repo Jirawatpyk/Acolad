@@ -152,14 +152,18 @@ export function decideWindowCapacity(i: WindowCapacityInput): WindowVerdict {
   if (subtotalsByDay.size === 0) return { accept: true, subtotalsByDay };
 
   const today = bangkokDateString(i.nowMs);
-  const addedDays = [...subtotalsByDay.keys()].sort();
+  // Judge days never earlier than today: `dueThrough` already counts work past its deadline as
+  // due today, so a past-day addition must be checked AT today, or it drops out of every sum.
+  const addedDays = [
+    ...new Set([...subtotalsByDay.keys()].map((d) => (d < today ? today : d))),
+  ].sort();
   const fromDay = addedDays[0] as string;
   const capacity = (day: string): number =>
     capacityThrough(i.nowMs, day, i.dayCapacity, i.calendar);
   // Reasons carry no figure that moves with the clock. XTM re-announces a still-rejected job
   // whenever its reason text changes (#15), so the working-time capacity — which shrinks every
-  // working minute — would repost the same refusal to Chat on every poll. It is on the verdict
-  // as `capacity` for logs instead.
+  // working minute — would repost the same refusal to Chat on every poll. The figures are on
+  // the verdict (`demand`, `capacity`) for the caller to log instead; XTM does.
   const perDay = Math.floor(i.dayCapacity);
 
   for (const day of addedDays) {

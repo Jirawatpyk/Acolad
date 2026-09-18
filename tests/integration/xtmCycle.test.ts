@@ -753,10 +753,16 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     fresh();
     new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 200 })]);
     const acc = new StubAcceptor();
-    await new XtmPollCycle(db, schedCfg({ throughputPerHour: 50 }), acc).run(
+    const summary = await new XtmPollCycle(db, schedCfg({ throughputPerHour: 50 }), acc).run(
       snapAt([xraw({ dueDate: dueWed18, words: 300 })], WED_9),
     );
     expect(acc.calls.flat()).toHaveLength(0);
+    // The figures the reason leaves out reach the log: 500 due by Wednesday, 450 of room.
+    expect(summary.scheduleRejects[0]?.window).toEqual({
+      day: '2026-06-24',
+      demand: 500,
+      capacity: 450,
+    });
     expect(only('a.docx').lifecycleStatus).toBe('rejected');
     expect(sheetRows().find((r) => r.file === 'a.docx')?.note ?? '').toContain('word cap reached');
   });
