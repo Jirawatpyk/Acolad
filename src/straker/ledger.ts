@@ -47,9 +47,9 @@
  * for like with the XTM bot.
  */
 
-import { bangkokCalendar, bangkokEpochMs } from '../schedule/bangkokCalendar.js';
+import { bangkokDateString, bangkokEpochMs } from '../schedule/bangkokCalendar.js';
 import { effectiveDeadlineDay } from '../schedule/deadlineDay.js';
-import { workingMinutesBetween } from '../schedule/workingHours.js';
+import { workingMinutesBetween, type WorkCalendar } from '../schedule/workingHours.js';
 import { holidaysForEffectiveDay } from '../schedule/thaiHolidays.js';
 import type { SkipReason } from './types.js';
 import { WORK_KINDS, type HeldWork, type StrakerStore, type WorkKind } from './strakerStore.js';
@@ -60,15 +60,9 @@ export type LedgerStore = Pick<StrakerStore, 'heldWork' | 'hold' | 'release'>;
 
 /** The team's working calendar. Read from the SAME settings the XTM bot reads: only the
  *  ceiling and throughput are Straker's own, never the question of when the team works. */
-export interface LedgerWorkCalendar {
-  /** Minutes past midnight at which the working day starts (Bangkok). */
-  readonly hoursStartMin: number;
-  /** Minutes past midnight at which it ends. Capacity is the working time left before a
-   *  deadline day ends, so the ledger has to know when a day does. */
-  readonly hoursEndMin: number;
-  /** ISO weekday numbers that are working days (1 = Monday). */
-  readonly workdays: ReadonlySet<number>;
-}
+/** `WorkCalendar` without the holidays, which the ledger resolves per call from the clock.
+ *  Derived rather than restated, so a field added to the shared calendar reaches this one. */
+export type LedgerWorkCalendar = Readonly<Omit<WorkCalendar, 'holidays'>>;
 
 /** An offer being weighed **before** the claim. A decision needs a deadline; an offer
  *  without one is skipped with `deadline_unknown` and alerted (FR-023a) long before it
@@ -220,7 +214,7 @@ export class StrakerLedger {
   }
 
   /** Committed effort against one effective deadline day, for one kind of work. A per-day
-   *  total for display and tests — NOT what `checkCapacity` decides on, which sums every
+   *  total for tests and inspection — NOT what `checkCapacity` decides on, which sums every
    *  day up to a deadline against the working time left. */
   committedOn(
     deadlineDay: string,
@@ -229,18 +223,6 @@ export class StrakerLedger {
     held?: readonly HeldWork[],
   ): number {
     return this.committedByDay(nowMs, kind, held).get(deadlineDay) ?? 0;
-  }
-
-  /** One day's ceiling minus what is due on that day alone, floored at zero. A per-day
-   *  figure kept for display and tests; it can read 0 while `checkCapacity` says an offer
-   *  fits, because a deadline also has the days before it. Do not decide on it. */
-  remainingOn(
-    deadlineDay: string,
-    nowMs: number,
-    kind: WorkKind,
-    held?: readonly HeldWork[],
-  ): number {
-    return Math.max(0, this.ceilings[kind] - this.committedOn(deadlineDay, nowMs, kind, held));
   }
 
   /**
@@ -284,7 +266,7 @@ export class StrakerLedger {
 
     const ceiling = this.ceilings[candidate.kind];
     const byDay = this.committedByDay(nowMs, candidate.kind, held);
-    const today = bangkokCalendar(nowMs).date;
+    const today = bangkokDateString(nowMs);
     const capacity = this.capacityThrough(nowMs, deadlineDay, ceiling, holidays);
 
     // Bigger than all the working time left before its deadline: waiting only shrinks that,
@@ -301,12 +283,17 @@ export class StrakerLedger {
       };
     }
 
-    const breach = this.firstBreach(nowMs, holidays, byDay, ceiling, {
-      day: deadlineDay,
-      effort: candidate.effortWords,
-    });
-    const before = this.demandThrough(deadlineDay, byDay, today);
+    const breach = this.firstBreach(
+      nowMs,
+      today,
+      holidays,
+      byDay,
+      ceiling,
+      deadlineDay,
+      candidate.effortWords,
+    );
     if (breach === null) {
+      const before = this.demandThrough(deadlineDay, byDay, today);
       return {
         fits: true,
         deadlineDay,
@@ -342,7 +329,8 @@ export class StrakerLedger {
       kind: work.kind,
     });
 
-    const day = this.dayOf(work.deadlineMs, this.holidaysAt(nowMs));
+    const holidays = this.holidaysAt(nowMs);
+    const day = this.dayOf(work.deadlineMs, holidays);
     if (day === null) {
       return {
         deadlineDay: null,
@@ -356,11 +344,10 @@ export class StrakerLedger {
 
     // The warning follows the same rule the claim path does. Judged per deadline day it
     // would page on every legitimately multi-day job reconciliation finds.
-    const holidays = this.holidaysAt(nowMs);
     const ceiling = this.ceilings[work.kind];
     const byDay = this.committedByDay(nowMs, work.kind);
-    const today = bangkokCalendar(nowMs).date;
-    const breach = this.firstBreach(nowMs, holidays, byDay, ceiling, { day, effort: 0 });
+    const today = bangkokDateString(nowMs);
+    const breach = this.firstBreach(nowMs, today, holidays, byDay, ceiling, day);
     if (breach !== null) {
       return {
         deadlineDay: breach.day,
@@ -386,27 +373,28 @@ export class StrakerLedger {
   }
 
   /**
-   * The earliest deadline day, on or after `from.day`, by which more work is due than the
-   * working days up to it can hold — or null when every such day is within its capacity.
+   * The earliest deadline day, on or after `fromDay`, by which more work is due than the
+   * working time left through it can hold (`capacityThrough`) — or null when none is.
    *
    * Earliest-deadline-first: for every deadline day d, the work due on or before d must fit
-   * in `ceiling × working days from today through d`. Adding work due on `from.day` changes
-   * the sum for that day and every later one, which is why a job due early can be refused
-   * on account of a commitment due later — it would be worked first and eat that time.
-   * Days before `from.day` are not re-checked: they are unchanged by this work, and a day
-   * already over (recovered work can put it there) does not make a later day any fuller.
+   * in the working time left through d. Adding work due on `fromDay` changes the sum for that
+   * day and every later one, which is why a job due early can be refused on account of a
+   * commitment due later — it would be worked first and eat that time. Days before
+   * `fromDay` are not re-checked: they are unchanged by this work, and a day already over
+   * (recovered work can put it there) does not make a later day any fuller.
    */
   private firstBreach(
     nowMs: number,
+    today: string,
     holidays: ReadonlyMap<string, string>,
     byDay: ReadonlyMap<string, number>,
     ceiling: number,
-    from: { readonly day: string; readonly effort: number },
+    fromDay: string,
+    addedEffort = 0,
   ): { day: string; demand: number; capacity: number } | null {
-    const today = bangkokCalendar(nowMs).date;
-    const days = [...new Set([...byDay.keys(), from.day])].filter((d) => d >= from.day).sort();
+    const days = [...new Set([...byDay.keys(), fromDay])].filter((d) => d >= fromDay).sort();
     for (const day of days) {
-      const demand = this.demandThrough(day, byDay, today) + from.effort;
+      const demand = this.demandThrough(day, byDay, today) + addedEffort;
       const capacity = this.capacityThrough(nowMs, day, ceiling, holidays);
       if (demand > capacity) return { day, demand, capacity: Math.floor(capacity) };
     }
@@ -448,9 +436,7 @@ export class StrakerLedger {
   ): number {
     const perDay = this.calendar.hoursEndMin - this.calendar.hoursStartMin;
     const left = workingMinutesBetween(nowMs, bangkokEpochMs(day, this.calendar.hoursEndMin), {
-      workdays: this.calendar.workdays,
-      hoursStartMin: this.calendar.hoursStartMin,
-      hoursEndMin: this.calendar.hoursEndMin,
+      ...this.calendar,
       holidays,
     });
     return Math.max(ceiling, (ceiling * left) / perDay);

@@ -221,7 +221,6 @@ describe('derived from held work', () => {
 
     expect(ledger.release('offer-1', NOW_MS + 3_600_000)).toBe(true);
     expect(ledger.committedOn('2026-09-17', NOW_MS, 'translation')).toBe(0);
-    expect(ledger.remainingOn('2026-09-17', NOW_MS, 'translation')).toBe(CEILING);
   });
 
   it('reports what the held set says even when the ledger itself was never told', () => {
@@ -284,7 +283,6 @@ describe('a ceiling of its own', () => {
   it('uses the ceiling it was given and reads no figure from the XTM bot', () => {
     const { ledger } = freshLedger(2_500);
     expect(ledger.ceilingFor('translation')).toBe(2_500);
-    expect(ledger.remainingOn('2026-09-17', NOW_MS, 'translation')).toBe(2_500);
     expect(readFileSync(LEDGER_SOURCE, 'utf8')).not.toMatch(/ACCEPT_MAX/);
   });
 
@@ -308,7 +306,7 @@ describe('a ceiling of its own', () => {
       );
 
       expect(ledger.ceilingFor('translation')).toBe(1_000);
-      expect(ledger.remainingOn('2026-09-17', THU_MORNING, 'translation')).toBe(600);
+      expect(ledger.committedOn('2026-09-17', THU_MORNING, 'translation')).toBe(400);
       expect(
         ledger.checkCapacity(
           { objId: 'big', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
@@ -566,7 +564,6 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
       THU_MORNING,
     );
 
-    expect(ledger.remainingOn('2026-09-17', THU_MORNING, 'translation')).toBe(0); // never negative — spent is spent
     expect(
       ledger.checkCapacity(
         { objId: 'next', effortWords: 1, deadlineMs: THU_AFTERNOON, kind: 'translation' },
@@ -680,7 +677,6 @@ describe('two budgets — DTP work does not spend the translation ceiling', () =
     expect(ledger.committedOn(THU, NOW_MS, 'monolingual')).toBe(3_000);
     // … and the translation day has not moved at all. This is the whole point.
     expect(ledger.committedOn(THU, NOW_MS, 'translation')).toBe(0);
-    expect(ledger.remainingOn(THU, NOW_MS, 'translation')).toBe(3_500);
   });
 
   it('still admits a translation claim on a day already full of DTP work', () => {

@@ -17,14 +17,10 @@ export interface AcceptScheduleInput {
   unit?: Pick<EffortUnit, 'adj'>;
   /**
    * Let a deadline that falls on a weekend or holiday through to the feasibility check
-   * instead of refusing it outright. Off by default, so the XTM bot — every caller that
-   * does not pass it — behaves byte-for-byte as before.
-   *
-   * Straker turns it on (owner decision, 2026-09-18). A day off is where the working time
-   * runs out, not a reason to refuse: `workingMinutesBetween` already counts only working
-   * minutes before the deadline, so a Saturday deadline gets exactly Friday's remaining
-   * hours and no more. Work that fits in them is claimable; work that does not is refused
-   * for the real reason, time.
+   * instead of refusing it outright; the feasibility check still counts only working
+   * minutes before it. Off by default, so every caller that does not pass it — the XTM
+   * bot — behaves byte-for-byte as before. Why the one caller that sets it does so is
+   * recorded at that call site, `straker/claimDecision.ts`.
    */
   allowNonWorkingDeadline?: boolean;
 }
