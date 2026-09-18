@@ -74,6 +74,14 @@ const THU_AFTERNOON = at('2026-09-17T17:00:00+07:00');
 const WED_BEFORE_WORK = at('2026-09-16T08:00:00+07:00');
 const SAT_MIDDAY = at('2026-09-19T12:00:00+07:00');
 const FRI_AFTERNOON = at('2026-09-18T17:00:00+07:00');
+/**
+ * The deadline day itself, first working minute. The single-day boundary tests below are
+ * judged from here: since 2026-09-18 a deadline has every working day before it, so judged
+ * from Monday a Thursday deadline has four days of room and no boundary to test. From
+ * Thursday morning the window is one day and the ceiling is the ceiling. The multi-day
+ * window has its own block at the end of this file.
+ */
+const THU_MORNING = at('2026-09-17T09:00:00+07:00');
 
 const CALENDAR: LedgerWorkCalendar = {
   hoursStartMin: 9 * 60,
@@ -295,15 +303,15 @@ describe('a ceiling of its own', () => {
       const { ledger } = freshLedger(1_000);
       ledger.hold(
         { objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-        NOW_MS,
+        THU_MORNING,
       );
 
       expect(ledger.ceilingFor('translation')).toBe(1_000);
-      expect(ledger.remainingOn('2026-09-17', NOW_MS, 'translation')).toBe(600);
+      expect(ledger.remainingOn('2026-09-17', THU_MORNING, 'translation')).toBe(600);
       expect(
         ledger.checkCapacity(
           { objId: 'big', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-          NOW_MS,
+          THU_MORNING,
         ),
       ).toMatchObject({ fits: false });
     } finally {
@@ -372,8 +380,10 @@ describe('a ceiling of its own', () => {
     const imports = importedModules(LEDGER_SOURCE);
 
     // Guard the guard: an extractor that silently found nothing would "pass" everything.
-    expect(imports.some((m) => m.endsWith('/src/schedule/acceptCapacity.js'))).toBe(true);
-    expect(imports.some((m) => m.endsWith('/src/straker/outcomePolicy.js'))).toBe(true);
+    // Two imports the ledger is known to have. `acceptCapacity.js` served here until the
+    // ledger stopped delegating to it (2026-09-18) — the control only needs to be real.
+    expect(imports.some((m) => m.endsWith('/src/schedule/deadlineDay.js'))).toBe(true);
+    expect(imports.some((m) => m.endsWith('/src/straker/strakerStore.js'))).toBe(true);
     expect(imports.filter((m) => /(^|\/)(state|config)(\/|$)/.test(m))).toEqual([]);
   });
 
@@ -383,19 +393,19 @@ describe('a ceiling of its own', () => {
     const { ledger } = freshLedger();
     ledger.hold(
       { objId: 'held', effortWords: 600, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
 
     expect(
       ledger.checkCapacity(
         { objId: 'exact', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-        NOW_MS,
+        THU_MORNING,
       ),
     ).toMatchObject({ fits: true });
     expect(
       ledger.checkCapacity(
         { objId: 'over', effortWords: 401, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-        NOW_MS,
+        THU_MORNING,
       ),
     ).toMatchObject({ fits: false, reason: 'ceiling_reached' });
   });
@@ -424,12 +434,12 @@ describe('a ceiling of its own', () => {
     const { ledger } = freshLedger();
     ledger.hold(
       { objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
 
     const verdict = ledger.checkCapacity(
       { objId: 'next', effortWords: 300, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
     expect(verdict.fits).toBe(false);
     if (!verdict.fits) expect(verdict.detail).toMatch(/word/);
@@ -445,7 +455,7 @@ describe('capacity decisions', () => {
     const { ledger } = freshLedger();
     const verdict = ledger.checkCapacity(
       { objId: 'offer-1', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
 
     expect(verdict).toMatchObject({ fits: true, deadlineDay: '2026-09-17' });
@@ -456,17 +466,17 @@ describe('capacity decisions', () => {
     const { ledger } = freshLedger();
     ledger.hold(
       { objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
 
     const verdict = ledger.checkCapacity(
       { objId: 'offer-1', effortWords: 300, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
     expect(verdict).toMatchObject({ fits: false, reason: 'ceiling_reached' });
   });
 
-  it('blocks an offer larger than a whole day with its own reason, because it needs a human', () => {
+  it('blocks an offer larger than every working day before its deadline, because it needs a human', () => {
     const { ledger } = freshLedger();
     const verdict = ledger.checkCapacity(
       {
@@ -475,7 +485,7 @@ describe('capacity decisions', () => {
         deadlineMs: THU_AFTERNOON,
         kind: 'translation',
       },
-      NOW_MS,
+      THU_MORNING,
     );
 
     // Distinct from an ordinary ceiling skip: no amount of waiting clears it, so it would
@@ -487,19 +497,19 @@ describe('capacity decisions', () => {
     const { ledger } = freshLedger();
     ledger.hold(
       { objId: 'held', effortWords: CEILING, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
 
     expect(
       ledger.checkCapacity(
         { objId: 'a', effortWords: 100, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-        NOW_MS,
+        THU_MORNING,
       ),
     ).toMatchObject({ fits: false });
     expect(
       ledger.checkCapacity(
         { objId: 'b', effortWords: 100, deadlineMs: FRI_AFTERNOON, kind: 'translation' },
-        NOW_MS,
+        THU_MORNING,
       ),
     ).toMatchObject({ fits: true });
   });
@@ -524,7 +534,7 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
     const { ledger } = freshLedger();
     ledger.hold(
       { objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
 
     // Reconciliation found an offer the portal says is already ours. The ledger is
@@ -532,7 +542,7 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
     // holding work that counts against nothing.
     const result = ledger.hold(
       { objId: 'recovered', effortWords: 300, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
 
     expect(result).toMatchObject({
@@ -541,31 +551,31 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
       ceiling: CEILING,
       ceilingExceeded: true,
     });
-    expect(ledger.committedOn('2026-09-17', NOW_MS, 'translation')).toBe(1_200);
+    expect(ledger.committedOn('2026-09-17', THU_MORNING, 'translation')).toBe(1_200);
   });
 
   it('then blocks further claims for that day as normal, leaving other days alone', () => {
     const { ledger } = freshLedger();
     ledger.hold(
       { objId: 'held', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
     ledger.hold(
       { objId: 'recovered', effortWords: 300, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
 
-    expect(ledger.remainingOn('2026-09-17', NOW_MS, 'translation')).toBe(0); // never negative — spent is spent
+    expect(ledger.remainingOn('2026-09-17', THU_MORNING, 'translation')).toBe(0); // never negative — spent is spent
     expect(
       ledger.checkCapacity(
         { objId: 'next', effortWords: 1, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-        NOW_MS,
+        THU_MORNING,
       ),
     ).toMatchObject({ fits: false, reason: 'ceiling_reached' });
     expect(
       ledger.checkCapacity(
         { objId: 'next', effortWords: 500, deadlineMs: FRI_AFTERNOON, kind: 'translation' },
-        NOW_MS,
+        THU_MORNING,
       ),
     ).toMatchObject({ fits: true });
   });
@@ -577,12 +587,12 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
     const { ledger } = freshLedger();
     ledger.hold(
       { objId: 'held', effortWords: 600, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
 
     const exact = ledger.hold(
       { objId: 'exact', effortWords: 400, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
     expect(exact.committedEffort).toBe(CEILING);
     expect(exact.ceilingExceeded).toBe(false);
@@ -590,7 +600,7 @@ describe('work recovered by reconciliation (FR-016d, V25)', () => {
     // And one word past it is a breach.
     const over = ledger.hold(
       { objId: 'over', effortWords: 1, deadlineMs: THU_AFTERNOON, kind: 'translation' },
-      NOW_MS,
+      THU_MORNING,
     );
     expect(over.committedEffort).toBe(CEILING + 1);
     expect(over.ceilingExceeded).toBe(true);
@@ -693,12 +703,12 @@ describe('two budgets — DTP work does not spend the translation ceiling', () =
     const { ledger } = twoBudgets(3_500, 1_000);
     ledger.hold(
       { objId: 'dtp-1', effortWords: 900, deadlineMs: THU_AFTERNOON, kind: 'monolingual' },
-      NOW_MS,
+      THU_MORNING,
     );
 
     const verdict = ledger.checkCapacity(
       { objId: 'dtp-2', effortWords: 500, deadlineMs: THU_AFTERNOON, kind: 'monolingual' },
-      NOW_MS,
+      THU_MORNING,
     );
 
     expect(verdict.fits).toBe(false);
@@ -709,7 +719,7 @@ describe('two budgets — DTP work does not spend the translation ceiling', () =
 
     const held = ledger.hold(
       { objId: 'dtp-1', effortWords: 100, deadlineMs: THU_AFTERNOON, kind: 'monolingual' },
-      NOW_MS,
+      THU_MORNING,
     );
 
     expect(held.ceiling).toBe(30_000);
@@ -727,5 +737,185 @@ describe('two budgets — DTP work does not spend the translation ceiling', () =
 
     expect(store.heldWork().map((w) => w.kind)).toEqual(['monolingual']);
     expect(ledger.committedOn(THU, NOW_MS, 'translation')).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Capacity across the days before a deadline (owner decision, 2026-09-18)
+// ---------------------------------------------------------------------------
+
+describe('the ceiling is per working day, and a deadline has every working day before it', () => {
+  /**
+   * Charging a whole job to its deadline day made a 4,000-word job due Wednesday
+   * unclaimable on Monday against a 3,500/day ceiling — though Monday, Tuesday and
+   * Wednesday together hold 10,500 — and it did so for good: `exceeds_daily_ceiling_entirely`
+   * never clears. The owner's ruling was that such a job must be claimable.
+   *
+   * The rule now is the earliest-deadline-first one: for every deadline day d, the work due
+   * on or before d must fit in `ceiling × working days from today through d`. That is what
+   * "3,500 words a day" means if the team works the nearest deadline first, which is what a
+   * team does. It is more generous for a far deadline than the old rule and exactly as strict
+   * for one due today.
+   */
+  const MON_0900 = at('2026-09-14T09:00:00+07:00');
+  const MON_1700 = at('2026-09-14T17:00:00+07:00');
+  const WED_1800 = at('2026-09-16T18:00:00+07:00');
+  const DAY = 3_500;
+
+  it('claims 4,000 words due Wednesday on the Monday before — case E', () => {
+    const { ledger } = freshLedger(DAY);
+
+    const verdict = ledger.checkCapacity(
+      { objId: 'e', effortWords: 4_000, deadlineMs: WED_1800, kind: 'translation' },
+      MON_0900,
+    );
+
+    expect(verdict).toMatchObject({ fits: true, deadlineDay: '2026-09-16' });
+  });
+
+  it('is exactly as strict as before for work due today', () => {
+    // One working day in the window: the ceiling is the ceiling.
+    const { ledger } = freshLedger(DAY);
+    ledger.hold(
+      { objId: 'held', effortWords: 3_300, deadlineMs: MON_1700, kind: 'translation' },
+      MON_0900,
+    );
+
+    expect(
+      ledger.checkCapacity(
+        { objId: 'd', effortWords: 300, deadlineMs: MON_1700, kind: 'translation' },
+        MON_0900,
+      ),
+    ).toMatchObject({ fits: false, reason: 'ceiling_reached' });
+  });
+
+  it('counts everything due on or before the day, not only what is due on it', () => {
+    // Monday is full. Monday to Wednesday holds 10,500, so 7,000 more due Wednesday fits and
+    // 7,001 does not — the day before's work is in the sum.
+    const { ledger } = freshLedger(DAY);
+    ledger.hold(
+      { objId: 'mon', effortWords: DAY, deadlineMs: MON_1700, kind: 'translation' },
+      MON_0900,
+    );
+
+    const fits = ledger.checkCapacity(
+      { objId: 'a', effortWords: 7_000, deadlineMs: WED_1800, kind: 'translation' },
+      MON_0900,
+    );
+    const over = ledger.checkCapacity(
+      { objId: 'b', effortWords: 7_001, deadlineMs: WED_1800, kind: 'translation' },
+      MON_0900,
+    );
+
+    expect(fits.fits).toBe(true);
+    expect(over).toMatchObject({ fits: false, reason: 'ceiling_reached' });
+  });
+
+  it('refuses early work that would eat the time later work was counting on', () => {
+    // The direction that is easy to miss. 10,000 words are held for Wednesday — nearly the
+    // whole Monday-to-Wednesday window. A 600-word job due MONDAY fits Monday on its own,
+    // but it would be worked first and leave Wednesday's 10,000 with 9,900 of room. Checking
+    // only the new job's own day would claim it, and break a commitment already made.
+    const { ledger } = freshLedger(DAY);
+    ledger.hold(
+      { objId: 'wed', effortWords: 10_000, deadlineMs: WED_1800, kind: 'translation' },
+      MON_0900,
+    );
+
+    expect(
+      ledger.checkCapacity(
+        { objId: 'early', effortWords: 600, deadlineMs: MON_1700, kind: 'translation' },
+        MON_0900,
+      ),
+    ).toMatchObject({ fits: false, reason: 'ceiling_reached' });
+  });
+
+  it('refuses a job bigger than every working day before its deadline put together', () => {
+    // Still a permanent refusal, still needing a human — but only when no amount of waiting
+    // could make room, which is now "bigger than the whole window", not "bigger than a day".
+    const { ledger } = freshLedger(DAY);
+
+    expect(
+      ledger.checkCapacity(
+        { objId: 'huge', effortWords: 10_501, deadlineMs: WED_1800, kind: 'translation' },
+        MON_0900,
+      ),
+    ).toMatchObject({ fits: false, reason: 'exceeds_daily_ceiling_entirely' });
+    expect(
+      ledger.checkCapacity(
+        { objId: 'today', effortWords: 3_501, deadlineMs: MON_1700, kind: 'translation' },
+        MON_0900,
+      ),
+    ).toMatchObject({ fits: false, reason: 'exceeds_daily_ceiling_entirely' });
+  });
+
+  it('counts overdue work that is still held as due today', () => {
+    // Work past its deadline is still owed, and it is what the team does first. Dropping it
+    // because its day is behind us would hand its words back to today.
+    const { ledger } = freshLedger(DAY);
+    ledger.hold(
+      {
+        objId: 'late',
+        effortWords: 3_000,
+        deadlineMs: at('2026-09-11T17:00:00+07:00'), // last Friday
+        kind: 'translation',
+      },
+      MON_0900,
+    );
+
+    expect(
+      ledger.checkCapacity(
+        { objId: 'new', effortWords: 600, deadlineMs: MON_1700, kind: 'translation' },
+        MON_0900,
+      ),
+    ).toMatchObject({ fits: false, reason: 'ceiling_reached' });
+  });
+
+  it('gives a weekend no working days of its own', () => {
+    // Seen Saturday 03:00, due Monday: the window is Monday alone.
+    const { ledger } = freshLedger(DAY);
+    const sat = at('2026-09-19T03:00:00+07:00');
+    const mon = at('2026-09-21T17:00:00+07:00');
+
+    expect(
+      ledger.checkCapacity(
+        { objId: 'fits', effortWords: DAY, deadlineMs: mon, kind: 'translation' },
+        sat,
+      ).fits,
+    ).toBe(true);
+    expect(
+      ledger.checkCapacity(
+        { objId: 'over', effortWords: DAY + 1, deadlineMs: mon, kind: 'translation' },
+        sat,
+      ),
+    ).toMatchObject({ fits: false, reason: 'exceeds_daily_ceiling_entirely' });
+  });
+
+  it('keeps the two budgets apart across the window as well', () => {
+    const { ledger } = freshLedger(DAY);
+    ledger.hold(
+      { objId: 'dtp', effortWords: 10_500, deadlineMs: WED_1800, kind: 'monolingual' },
+      MON_0900,
+    );
+
+    expect(
+      ledger.checkCapacity(
+        { objId: 'tr', effortWords: 4_000, deadlineMs: WED_1800, kind: 'translation' },
+        MON_0900,
+      ).fits,
+    ).toBe(true);
+  });
+
+  it('does not warn on recovering work the window can hold', () => {
+    // FR-016d's warning follows the same rule, or a legitimately multi-day job found by
+    // reconciliation would page as a ceiling breach every time.
+    const { ledger } = freshLedger(DAY);
+
+    const result = ledger.hold(
+      { objId: 'found', effortWords: 4_000, deadlineMs: WED_1800, kind: 'translation' },
+      MON_0900,
+    );
+
+    expect(result.ceilingExceeded).toBe(false);
   });
 });

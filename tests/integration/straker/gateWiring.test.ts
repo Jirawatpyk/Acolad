@@ -68,6 +68,12 @@ const HOLIDAY_NOON = at('2026-10-13T12:00:00+07:00'); // King Bhumibol Memorial 
 
 const THU_5PM = at('2026-09-17T17:00:00+07:00');
 const FRI_5PM = at('2026-09-18T17:00:00+07:00');
+/**
+ * Thursday's first working minute. Budget tests that are about ONE day's ceiling are judged
+ * from here: since 2026-09-18 a deadline has every working day before it, so judged from
+ * Wednesday a Thursday deadline has two days of room. From Thursday morning it has one.
+ */
+const THU_9AM = at('2026-09-17T09:00:00+07:00');
 const SAT_DEADLINE = at('2026-09-19T12:00:00+07:00');
 const HOLIDAY_DEADLINE = at('2026-10-13T12:00:00+07:00');
 const UNCURATED_DEADLINE = at('2028-03-15T12:00:00+07:00');
@@ -332,7 +338,7 @@ describe('T026 the gate refuses and the decision honours it', () => {
     const { ledger } = freshLedger(1_000);
     const held = [heldRow('earlier', 950, THU_5PM)];
 
-    const decision = skipOf(decideClaims([offer('a')], ctx(WED_10AM, ledger, held)));
+    const decision = skipOf(decideClaims([offer('a')], ctx(THU_9AM, ledger, held)));
 
     expect(decision.reason).toBe('ceiling_reached');
     expect(decision.detail).toContain('2026-09-17');
@@ -341,7 +347,9 @@ describe('T026 the gate refuses and the decision honours it', () => {
   it('keeps an offer larger than a whole day distinct from an ordinary ceiling skip', () => {
     // `ceiling_reached` clears itself as held work finishes; this one recurs every day
     // forever and needs a human. Collapsing the two would hide that difference.
-    const { ledger } = freshLedger(1_000);
+    // 1,500 words at 100/h fit the 16 working hours from Wednesday 10:00 to Thursday 17:00,
+    // so the gate lets it through; at 500 words a day the two days in its window hold 1,000.
+    const { ledger } = freshLedger(500);
 
     const decision = skipOf(
       decideClaims([offer('a', { effortWords: 1_500 })], ctx(WED_10AM, ledger)),
@@ -513,7 +521,7 @@ describe('T027 reaching the ceiling does not stop the pass', () => {
     const held = [heldRow('earlier', 1_000, THU_5PM)];
     const offers = [offer('a'), offer('b'), offer('c'), offer('d')];
 
-    const decisions = decideClaims(offers, ctx(WED_10AM, ledger, held));
+    const decisions = decideClaims(offers, ctx(THU_9AM, ledger, held));
 
     expect(decisions.map((d) => d.objId)).toEqual(['a', 'b', 'c', 'd']);
     expect(decisions.every((d) => d.action === 'skip')).toBe(true);
@@ -533,7 +541,7 @@ describe('T027 reaching the ceiling does not stop the pass', () => {
     const held = [heldRow('earlier', 1_000, THU_5PM)];
     const offers = [offer('full-1'), offer('full-2'), offer('other-day', { deadlineMs: FRI_5PM })];
 
-    const decisions = decideClaims(offers, ctx(WED_10AM, ledger, held));
+    const decisions = decideClaims(offers, ctx(THU_9AM, ledger, held));
 
     expect(decisions.map((d) => d.action)).toEqual(['skip', 'skip', 'claim']);
     expect(decisions[2]).toMatchObject({ objId: 'other-day', deadlineDay: '2026-09-18' });
@@ -549,12 +557,13 @@ describe('T027 reaching the ceiling does not stop the pass', () => {
       offer('uncurated', { deadlineMs: UNCURATED_DEADLINE }),
       offer('nofields', { effortWords: null }),
       offer('ceiling'),
-      // Reachable in working time (900 min needed, 1500 available) but larger than the
-      // whole 1,000-word day — so the gate allows it and only the ceiling refuses it.
-      offer('toobig', { effortWords: 1_500, deadlineMs: FRI_5PM }),
+      // DTP, so its throughput reaches it in working time and the gate allows it — but 2,500
+      // words are more than the two 1,000-word days (Thursday, Friday) in its window can
+      // hold even empty, so only the ceiling refuses it, and permanently.
+      offer('toobig', { effortWords: 2_500, deadlineMs: FRI_5PM, monolingual: true }),
     ];
 
-    const decisions = decideClaims(offers, ctx(WED_10AM, ledger, held));
+    const decisions = decideClaims(offers, ctx(THU_9AM, ledger, held));
 
     expect(decisions.map((d) => d.objId)).toEqual(offers.map((o) => o.objId));
     expect(decisions.map((d) => (d.action === 'skip' ? d.reason : 'claimed'))).toEqual([
@@ -590,7 +599,7 @@ describe('T028 several offers in one read are weighed in the order the portal re
       offer('c', { effortWords: 30 }),
     ];
 
-    const decisions = decideClaims(offers, ctx(WED_10AM, ledger));
+    const decisions = decideClaims(offers, ctx(THU_9AM, ledger));
 
     expect(decisions.map((d) => d.objId)).toEqual(['a', 'b', 'c']);
     expect(decisions.map((d) => d.action)).toEqual(['claim', 'skip', 'claim']);
@@ -604,14 +613,20 @@ describe('T028 several offers in one read are weighed in the order the portal re
     const { ledger } = freshLedger(100);
     const offers = [offer('a', { effortWords: 80 }), offer('b', { effortWords: 80 })];
 
-    const decisions = decideClaims(offers, ctx(WED_10AM, ledger));
+    const decisions = decideClaims(offers, ctx(THU_9AM, ledger));
 
     expect(decisions.map((d) => d.action)).toEqual(['claim', 'skip']);
   });
 
-  it('keeps each day’s budget its own', () => {
-    // The ceiling is per effective deadline day, so exhausting Thursday says nothing about
-    // Friday. A single global running total would wrongly refuse the Friday pair.
+  it('lets a full Thursday leave Friday its own day, and carries Thursday’s spare room forward', () => {
+    // Since 2026-09-18 the rule is earliest-deadline-first: work due by Friday must fit in
+    // Thursday + Friday. Judged from Thursday morning at 100 a day:
+    //   thu-1 80  -> by Thu 80  of 100  claim
+    //   fri-1 80  -> by Fri 160 of 200  claim
+    //   thu-2 80  -> by Thu 160 of 100  skip   (Thursday is full)
+    //   fri-2 30  -> by Fri 190 of 200  claim  (Thursday's unused 20 is Friday's too)
+    // It used to read "each day's budget is its own" and refuse fri-2; a global running
+    // total would refuse fri-1 as well.
     const { ledger } = freshLedger(100);
     const offers = [
       offer('thu-1', { effortWords: 80, deadlineMs: THU_5PM }),
@@ -620,9 +635,9 @@ describe('T028 several offers in one read are weighed in the order the portal re
       offer('fri-2', { effortWords: 30, deadlineMs: FRI_5PM }),
     ];
 
-    const decisions = decideClaims(offers, ctx(WED_10AM, ledger));
+    const decisions = decideClaims(offers, ctx(THU_9AM, ledger));
 
-    expect(decisions.map((d) => d.action)).toEqual(['claim', 'claim', 'skip', 'skip']);
+    expect(decisions.map((d) => d.action)).toEqual(['claim', 'claim', 'skip', 'claim']);
   });
 
   it('leaves the ledger untouched — deciding is not recording', () => {
