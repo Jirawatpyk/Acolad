@@ -467,13 +467,16 @@ export function assembleStrakerBot(
    * third kind is added to one of them.
    */
   const ceilings = { translation: cfg.maxWordsPerDay, monolingual: cfg.dtpMaxWordsPerDay };
+  // Same reason as `ceilings`: two ledgers, one calendar, declared once.
+  const ledgerCalendar = {
+    hoursStartMin: cfg.hoursStartMin,
+    hoursEndMin: cfg.hoursEndMin,
+    workdays: cfg.workdays,
+  };
   const reconciler = createStrakerReconciler({
     portal,
     store,
-    ledger: new StrakerLedger(store, ceilings, {
-      hoursStartMin: cfg.hoursStartMin,
-      workdays: cfg.workdays,
-    }),
+    ledger: new StrakerLedger(store, ceilings, ledgerCalendar),
     outbox,
     logger,
     now,
@@ -486,10 +489,7 @@ export function assembleStrakerBot(
     // appearances a previous run already closed — see `StrakerStore.trackerState`.
     tracker: createSightingTracker(store.trackerState()),
     store,
-    ledger: new StrakerLedger(store, ceilings, {
-      hoursStartMin: cfg.hoursStartMin,
-      workdays: cfg.workdays,
-    }),
+    ledger: new StrakerLedger(store, ceilings, ledgerCalendar),
     outbox,
     logger,
     settings: {

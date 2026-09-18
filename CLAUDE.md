@@ -150,7 +150,7 @@ main/once → bootstrap.createXtmBot() ประกอบทุกชิ้น (
 | `runtime/` | orchestration + entry points | (ดู Entry points ด้านบน) + `rateLimiter.ts`, `scheduler.ts` |
 | `monitoring/` | สุขภาพระบบ | `heartbeat.ts` (Healthchecks), `logger.ts` (pino + redaction) |
 | `shared/` | ใช้ร่วมกัน**สองบอท** (มี coverage gate) | `outboxRetry.ts` (ตารางเวลา retry), `rollingLogger.ts` (rotation/retention/censor), `sqliteOpen.ts` (open→WAL→migrate→quarantine) |
-| `straker/` | **บอทตัวที่สอง ครบวงจรในตัวเอง** (มี coverage gate) | `httpClient.ts` (transport ที่เดียว — DC-4), `pollCycle.ts` (fetch→diff→gate→act→persist→notify — ชื่อ step เดียวกับ XTM จงใจ), `claim.ts`/`claimDecision.ts`/`claimOutcome.ts`, `reconcile.ts` (ทุก 15 นาที — คืนโควต้างานที่เสร็จ), `ledger.ts` (เพดานราย deadline day), `strakerStore.ts`/`outbox.ts`, `notifier.ts`/`trackingSink.ts`/`dispatcher.ts`, `combinedSummary.ts` (อ่านสองพอร์ทัล read-only), `main.ts` (composition root) |
+| `straker/` | **บอทตัวที่สอง ครบวงจรในตัวเอง** (มี coverage gate) | `httpClient.ts` (transport ที่เดียว — DC-4), `pollCycle.ts` (fetch→diff→gate→act→persist→notify — ชื่อ step เดียวกับ XTM จงใจ), `claim.ts`/`claimDecision.ts`/`claimOutcome.ts`, `reconcile.ts` (ทุก 15 นาที — คืนโควต้างานที่เสร็จ), `ledger.ts` (เพดานรายวันทำงาน ตัดแบบ earliest-deadline-first — ต่างจาก XTM), `strakerStore.ts`/`outbox.ts`, `notifier.ts`/`trackingSink.ts`/`dispatcher.ts`, `combinedSummary.ts` (อ่านสองพอร์ทัล read-only), `main.ts` (composition root) |
 
 **R11 bulkhead — กฎที่ test บังคับ ไม่ใช่สไตล์**: ไฟล์ใน `src/straker/**` **ห้าม
 value-import** `src/state/` หรือ `src/config/` (ข้อยกเว้น type-only ตัวเดียวที่บันทึกไว้:
@@ -306,6 +306,14 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
   **จงใจว่างเปล่า** จนกว่า RP-4 จะยืนยันสัญญาณจริงจากพอร์ทัล. ระหว่างนี้ทุกการถูกปฏิเสธ
   ถูกจัดเป็น `failed` ซึ่งเป็นฝั่งที่ปลอดภัย (FR-005a) แต่เสียงดัง. **ปิดเคสนี้ = เติมค่า
   เดียวลง array นั้น** หลังเห็นของจริงหนึ่งครั้ง (SC-007 ติดป้าย conditional ไว้แล้ว)
+- **เพดานคือ "ต่อวันทำงาน" และ DL มีทุกวันทำงานก่อนหน้าให้ใช้** (2026-09-18 — ต่างจาก XTM):
+  งานรับได้เมื่อ ทุกวันครบกำหนด d ตั้งแต่ DL ของงานนี้เป็นต้นไป งานที่ครบกำหนดภายใน d
+  ≤ **เวลาทำงานที่เหลือจริงถึงสิ้นวัน d × (เพดาน ÷ 9 ชม.)** แต่ไม่ต่ำกว่าเพดานหนึ่งวัน.
+  เช่น จันทร์ 09:00 รับงาน 4,000 คำ DL พุธได้ (27 ชม. = 10,500) แต่ถ้าเห็นตอนจันทร์ 17:45
+  จะเหลือแค่ ~3,600. **อย่าเปลี่ยนเป็นนับ "จำนวนวัน"** — รอบแรกทำแบบนั้นแล้ว review เจอว่า
+  รับ 6,800 คำตอน 17:45 ได้ (C-1). งานค้างที่เลย DL แล้วนับเป็นงานวันนี้.
+  `exceeds_daily_ceiling_entirely` = ใหญ่กว่า**เวลาที่เหลือทั้งหมดก่อน DL** ไม่ใช่ใหญ่กว่าวันเดียว.
+  รายงานรวม 09:00 ยังแสดงยอดรายวันครบกำหนด — วันเดียวอาจดูเกินเพดานได้ตามปกติ
 - **มีสองเพดาน แยกกันเด็ดขาด** (ตั้งแต่ 2026-09-17): งานแปลใช้
   `STRAKER_MAX_WORDS_PER_DAY` (live = 3,500) งาน DTP/monolingual ใช้
   `STRAKER_DTP_MAX_WORDS_PER_DAY` (live = 30,000) — คนละ ledger คนละ budget

@@ -99,7 +99,8 @@ export const SKIP_REASONS = [
   'deadline_on_non_working_day',
   'deadline_unreachable',
   'ceiling_reached',
-  /** Distinct from `ceiling_reached`: this one recurs every day forever and needs a human. */
+  /** Distinct from `ceiling_reached`: waiting cannot clear it — the working time before the
+   *  deadline only shrinks — so it needs a human. */
   'exceeds_daily_ceiling_entirely',
   'holiday_calendar_uncurated',
   'effort_unknown',

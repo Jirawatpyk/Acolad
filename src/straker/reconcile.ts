@@ -1024,10 +1024,13 @@ function describeRecovery(item: AssignedWork, hold: HoldResult | null): string {
   // the ceiling breach is a fact about this offer at this moment, and a separate alert
   // would page the same person twice about the same discovery.
   if (hold !== null && hold.deadlineDay !== null && hold.ceilingExceeded) {
+    // `ceiling` here is what the working time left through that day holds — not the
+    // per-day figure — and what the breach blocks is every claim due on or before it.
     gaps.push(
-      `counting it has taken ${hold.deadlineDay} past its ceiling ` +
-        `(${hold.committedEffort} of ${hold.ceiling} words). The team already owes the work, ` +
-        'so it is counted rather than refused; further claims for that day are blocked as normal',
+      `counting it has taken ${hold.deadlineDay} past its ceiling: ` +
+        `${hold.committedEffort} words are now due by then, against the ${hold.ceiling} the ` +
+        `working time left through it can hold. The team already owes the work, so it is ` +
+        `counted rather than refused; claims due on or before ${hold.deadlineDay} are blocked`,
     );
   }
   if (!isObservedStatus(item.status)) {

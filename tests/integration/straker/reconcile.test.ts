@@ -110,7 +110,7 @@ function fixture(opts: FixtureOptions = {}): Fixture {
   const ledger = new StrakerLedger(
     store,
     { translation: opts.ceiling ?? CEILING, monolingual: opts.ceiling ?? CEILING },
-    { hoursStartMin: 9 * 60, workdays: new Set([1, 2, 3, 4, 5]) },
+    { hoursStartMin: 9 * 60, hoursEndMin: 18 * 60, workdays: new Set([1, 2, 3, 4, 5]) },
     // Fixed rather than the curated calendar: this suite is about reconciliation, and a
     // holiday moving under it would change which day the ledger buckets into.
     () => new Map<string, string>(),
@@ -958,7 +958,8 @@ describe('T049 recovered work is counted even past the ceiling, and warns (FR-01
     const warning = delivered(f).find((q) => q.channel === 'alerts');
     expect(warning?.payload).toMatchObject({ condition: 'work_recovered', objId: 'a' });
     expect(String(warning?.payload['detail'])).toContain(
-      `taken ${DEADLINE_DAY} past its ceiling (${CEILING + 400} of ${CEILING} words)`,
+      `taken ${DEADLINE_DAY} past its ceiling: ${CEILING + 400} words are now due by then, ` +
+        `against the ${CEILING} the working time left through it can hold`,
     );
   });
 
