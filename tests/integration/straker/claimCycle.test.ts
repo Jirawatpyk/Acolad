@@ -264,6 +264,24 @@ describe('claim.ts — nothing is asked about an offer before it is claimed (FR-
     expect(new Headers(init?.headers).has('content-type')).toBe(false);
   });
 
+  it('reads a success with no reply body as won — 204 and an empty 200 alike', async () => {
+    // A 2xx is the portal saying yes; what the accept call returns is unobserved, and the web
+    // app ignores it. Parsing an empty body as JSON used to throw, which turned a won claim
+    // into `unknown` and an alert until reconciliation. Kills a claim path that needs a body.
+    for (const reply of [
+      () => new Response(null, { status: 204 }),
+      () => new Response('', { status: 200 }),
+    ]) {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(reply()));
+      const { client } = harness(fetchImpl);
+
+      const attempt = await claimOffer(client, TARGET);
+
+      expect(attempt.response).toEqual({ kind: 'accepted' });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it('asks nothing extra after a refusal either', async () => {
     // The tempting place to add an enquiry is the failure branch — "find out why we lost".
     // It costs a round trip on the race path all the same, and the answer changes nothing:

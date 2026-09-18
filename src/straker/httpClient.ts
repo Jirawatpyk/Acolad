@@ -524,6 +524,14 @@ export function createHttpClient(options: HttpClientOptions): StrakerPacedHttpCl
       return { ok: false, error, retryable: isIndeterminateStatus(response.status) };
     }
     try {
+      // A POST that succeeds may say nothing more: the accept call's reply is unobserved and the
+      // portal's web app ignores it, so a 204 or an empty 200 is the portal saying yes. Reading
+      // it as JSON would throw and turn a won claim into `unknown`. Reads are untouched — an
+      // empty read is still not JSON and still fails loud (FR-023).
+      if (init.method === 'POST') {
+        const text = await response.text();
+        return { ok: true, value: (text.trim() === '' ? undefined : JSON.parse(text)) as T };
+      }
       return { ok: true, value: (await response.json()) as T };
     } catch (error) {
       // Two failures land here looking identical and must be judged oppositely. A body cut
