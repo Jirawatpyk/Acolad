@@ -156,6 +156,10 @@ export function decideWindowCapacity(i: WindowCapacityInput): WindowVerdict {
   const fromDay = addedDays[0] as string;
   const capacity = (day: string): number =>
     capacityThrough(i.nowMs, day, i.dayCapacity, i.calendar);
+  // Reasons carry no figure that moves with the clock. XTM re-announces a still-rejected job
+  // whenever its reason text changes (#15), so the working-time capacity — which shrinks every
+  // working minute — would repost the same refusal to Chat on every poll. It is on the verdict
+  // as `capacity` for logs instead.
   const perDay = Math.floor(i.dayCapacity);
 
   for (const day of addedDays) {
@@ -166,8 +170,8 @@ export function decideWindowCapacity(i: WindowCapacityInput): WindowVerdict {
         accept: false,
         kind: 'over_cap_permanent',
         reason:
-          `${demand} ${unit.noun} due by ${day} exceed the ${Math.floor(cap)} the working ` +
-          `time left through it can hold (${perDay} ${unit.noun} a working day) — accept manually`,
+          `${demand} ${unit.noun} due by ${day} exceed what the working time left through it ` +
+          `can hold (${perDay} ${unit.noun} a working day) — accept manually`,
         day,
         demand,
         capacity: Math.floor(cap),
@@ -186,9 +190,8 @@ export function decideWindowCapacity(i: WindowCapacityInput): WindowVerdict {
         accept: false,
         kind: 'budget_reached',
         reason:
-          `${unit.adj} cap reached for ${day}: ${demand} ${unit.noun} would be due by then, and ` +
-          `the working time left through it holds ${Math.floor(cap)} ` +
-          `(${perDay} ${unit.noun} a working day)`,
+          `${unit.adj} cap reached for ${day}: ${demand} ${unit.noun} would be due by then, more ` +
+          `than the working time left through it can hold (${perDay} ${unit.noun} a working day)`,
         capExhaustedDay: day,
         demand,
         capacity: Math.floor(cap),

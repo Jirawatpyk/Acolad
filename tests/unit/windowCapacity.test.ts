@@ -196,6 +196,25 @@ describe('decideWindowCapacity', () => {
     ).toMatchObject({ accept: false, kind: 'budget_reached' });
   });
 
+  it('gives the same reason a minute later, so a standing refusal is not re-announced', () => {
+    // The working time left shrinks every working minute; a reason that quoted it would read as
+    // a new refusal on every poll, and XTM reposts a rejection whose reason text changes.
+    const later = MON_0900 + 60_000;
+    const budget = (now: number) =>
+      decide(now, { '2026-09-16': 8_000 }, [{ effort: 3_000, deadlineDay: '2026-09-16' }]);
+    const permanent = (now: number) =>
+      decide(now, {}, [{ effort: 12_000, deadlineDay: '2026-09-16' }]);
+
+    for (const verdictAt of [budget, permanent]) {
+      const [a, b] = [verdictAt(MON_0900), verdictAt(later)];
+      expect(a.accept || b.accept).toBe(false);
+      if (!a.accept && !b.accept) {
+        expect(b.capacity).toBeLessThan(a.capacity); // the window did shrink…
+        expect(b.reason).toBe(a.reason); // …and the reason did not move with it
+      }
+    }
+  });
+
   it('names the unit it was given, so WWC reads as WWC', () => {
     const v = decideWindowCapacity({
       nowMs: MON_0900,

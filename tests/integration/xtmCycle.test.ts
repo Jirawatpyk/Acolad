@@ -1458,6 +1458,12 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     await cycle.run(snapAt([xraw(job)], MON_10, 'cN'));
     expect(only('a.docx').lifecycleStatus).toBe('rejected');
     expect(aRows().at(-1)?.note).toContain('word cap reached'); // reason A
+    // cN0 (one poll later, 10:00:20): the window has shrunk by a few words, but the refusal is
+    // the same one — NO new row. Kills: a reason that quotes the clock-driven capacity, which
+    // would repost the same rejection to Chat on every poll through the working day.
+    await cycle.run(snapAt([xraw(job)], '2026-06-22T10:00:20+07:00', 'cN0'));
+    await cycle.run(snapAt([xraw(job)], '2026-06-22T10:01:20+07:00', 'cN0b'));
+    expect(aRows().length).toBe(1);
     const afterN = aRows().length;
     // cN1 (Wed 10:00): SAME fields, later now → too little time left → reason B ("cannot finish").
     await cycle.run(snapAt([xraw(job)], '2026-06-24T10:00:00+07:00', 'cN1'));
