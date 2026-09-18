@@ -75,7 +75,7 @@ const SIGN_IN_PATH = '/api/vendor/auth/login';
  * what is *permitted*, so anything unrecognised is denied by default. This constant only
  * exists so the refusal can be demonstrated on a realistic input.
  */
-const A_CLAIM_URL_SHAPE = '/api/vendors/vendor-1/job-offers/offer-1/claim';
+const A_CLAIM_URL_SHAPE = '/api/vendors/vendor-1/job-offers/offer-1/accept';
 
 /** Per-attempt deadline (Constitution VI). Matches the bot's own `REQUEST_TIMEOUT_MS`. */
 const REQUEST_TIMEOUT_MS = 2_000;

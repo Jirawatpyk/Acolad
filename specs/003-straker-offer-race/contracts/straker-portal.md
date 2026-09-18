@@ -59,17 +59,19 @@ whichever layer produces it.
 
 The client reads the remainder after every response and responds in defined steps (FR-019): below 120 remaining it suspends deferrable work, below 60 it pauses reading until the budget resets. **Independently of those headers** it enforces a hard ceiling, so a missing or nonsensical value cannot remove all restraint. Target: never exceed 300/minute, never let the remainder fall below 60 (SC-003).
 
-## 4. Claiming an offer — NOT YET EXERCISED
+## 4. Claiming an offer — confirmed from the portal's web app (2026-09-18)
 
-**Nothing in the capture probe claims anything.** This section is what the implementation will verify first, on a real offer, under supervision.
+**Request:** `POST /api/vendors/{vendorId}/job-offers/{obj_id}/accept`, no body — read from the portal's own front-end code, whose Accept button calls exactly this (`decline` is the sibling). The earlier guess `/claim` was the first real claim sent (offer `4b7be68e`, 18/09 12:22) and got `404 {"detail":"Not Found"}` while the offer stayed open two more minutes.
+
+**Lost race:** HTTP **409**. The web app shows "Offer no longer available — this offer may have been accepted by another vendor" for a 409 and a generic error for anything else. A won claim's reply has still not been observed.
 
 | Expectation | Status |
 |---|---|
 | Claiming addresses one offer at a time; there is no group action | From recon. Means the XTM bot's all-or-nothing group rule does not apply here at all. |
-| A distinct rejection means "another vendor already took it" | From recon — **the single most important thing to confirm on the first real claim**, since the whole outcome model depends on telling a lost race apart from a fault |
+| A distinct rejection means "another vendor already took it" | **Confirmed: 409** (from the web app's handling). Every other rejection stays a fault. |
 | A claim is irreversible | Assumed, and treated as certain. No blind retry, ever (R7). |
 
-**Until the lost-race signal is confirmed on a real offer, an unrecognised rejection is a fault** — it alerts, and reconciliation settles what actually happened. Confirming it under supervision on the first real claim is release precondition **RP-4**.
+**An unrecognised rejection is a fault** — it alerts, and reconciliation settles what actually happened. RP-4 stays open only for observing a won claim end to end.
 
 ## 4a. Account blocked or suspended — NOT OBSERVED
 

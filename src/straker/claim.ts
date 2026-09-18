@@ -28,13 +28,12 @@
  * Per the spec's non-goals and FR-007, there is no code here for refusing an offer on the
  * portal. Unwanted offers are left to expire.
  *
- * ## What is still a guess
+ * ## Where the request comes from
  *
- * Contract §4 is NOT YET EXERCISED: no claim has ever been made against this portal. The
- * request built below — its path and its empty body — is reasoned by analogy with the one
- * confirmed offer-addressing endpoint, not observed. Release precondition RP-4 confirms it
- * on the first real claim under supervision. It is single-sourced here for that reason:
- * correcting it is one edit in one place.
+ * Contract §4, confirmed 2026-09-18 from the portal's own web app: its Accept button POSTs
+ * `/api/vendors/{vendorId}/job-offers/{obj_id}/accept`. The path had been a guess by analogy
+ * (`/claim`), and the first real claim proved the guess wrong with a 404 — single-sourcing
+ * it here is what made correcting it one edit. Still unobserved: a *won* claim's reply.
  */
 
 import type { ClaimResponse } from './claimOutcome.js';
@@ -92,18 +91,20 @@ export interface ClaimAttempt {
 /**
  * The body of a claim request: empty.
  *
- * The identity travels in the path, and no field of an offer payload has been verified yet
- * (SC-000 is closed at 3 of 10; parsing is T042), so naming one here would be inventing a
- * contract rather than following one. Exported so the transport-level tests build the same
+ * The identity travels in the path. The portal's web app sends no body at all; an empty
+ * JSON object is the closest the one POST door can send, and names no field the portal has
+ * not asked for. Exported so the transport-level tests build the same
  * request this module does, instead of keeping a second guess that can drift from it.
  */
 export const CLAIM_REQUEST_BODY: Readonly<Record<string, never>> = Object.freeze({});
 
 /**
- * Where a claim is sent. **Unconfirmed** — contract §4 is NOT YET EXERCISED.
+ * Where a claim is sent: `POST /api/vendors/{vendorId}/job-offers/{obj_id}/accept`.
  *
- * Shaped by analogy with the one offer-addressing endpoint that IS confirmed, the open-offer
- * read at `/api/vendors/{vendorId}/job-offers`. Both segments are percent-encoded: the ids
+ * Confirmed 2026-09-18 from the portal's own web app, whose Accept button calls exactly this.
+ * An earlier guess, `/claim`, was the first real claim ever sent and got `404 Not Found` — the
+ * route does not exist — while the offer stayed open for two more minutes. Both segments are
+ * percent-encoded: the ids
  * are opaque portal strings, and a `/` arriving inside one would otherwise address a
  * different resource entirely — on an endpoint whose action cannot be undone. Encoding turns
  * that into a loud 404 instead of a quiet claim on the wrong thing.
@@ -111,7 +112,7 @@ export const CLAIM_REQUEST_BODY: Readonly<Record<string, never>> = Object.freeze
 export function claimRequestPath(target: ClaimTarget): string {
   const vendor = encodeURIComponent(target.vendorId);
   const offer = encodeURIComponent(target.offerId);
-  return `/api/vendors/${vendor}/job-offers/${offer}/claim`;
+  return `/api/vendors/${vendor}/job-offers/${offer}/accept`;
 }
 
 /**

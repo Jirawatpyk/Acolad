@@ -392,7 +392,7 @@ describe('SC-008 — a running Straker bot leaves the XTM record byte for byte a
     const portal: StrakerPortal = {
       client: {
         postJson: async (path: string) => {
-          claims.push(/job-offers\/([^/]+)\/claim/.exec(path)?.[1] ?? '?');
+          claims.push(/job-offers\/([^/]+)\/accept/.exec(path)?.[1] ?? '?');
           return {};
         },
       } as never,

@@ -57,15 +57,20 @@ describe('classifyClaim — an unrecognised rejection is a fault, not a loss (FR
 });
 
 describe('the confirmed lost-race signal list (RP-4)', () => {
-  it('is still empty, because no real claim has confirmed one yet', () => {
-    // FR-005a: the signal must be identified positively, against a real offer, under
-    // supervision. Until then nothing may classify as a lost race — so this list being
-    // empty is the requirement holding, not an oversight. When RP-4 is satisfied, adding
-    // the confirmed value here is the whole change.
-    expect(CONFIRMED_LOST_RACE_SIGNALS).toEqual([]);
+  // Confirmed 2026-09-18 from the portal's own web app: its Accept button POSTs
+  // /job-offers/{id}/accept and treats HTTP 409 — and only 409 — as "Offer no longer
+  // available … may have been accepted by another vendor". Anything else stays a fault.
+  it('holds exactly the 409 the portal itself reads as "taken by another vendor"', () => {
+    expect(CONFIRMED_LOST_RACE_SIGNALS).toEqual(['http_409']);
   });
 
-  it('means every rejection today classifies as a fault', () => {
+  it('classifies a 409 as a lost race — the one outcome that does not alert', () => {
+    expect(classifyClaim(rejected('http_409'))).toBe('lost');
+  });
+
+  it('still classifies every other rejection as a fault', () => {
+    expect(classifyClaim(rejected('http_404'))).toBe('failed');
+    expect(classifyClaim(rejected('http_400'))).toBe('failed');
     expect(classifyClaim(rejected('already_assigned'))).toBe('failed');
   });
 });

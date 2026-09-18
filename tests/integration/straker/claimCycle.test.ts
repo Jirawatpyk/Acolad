@@ -52,11 +52,8 @@ const TARGET: ClaimTarget = { vendorId: 'vendor-1', offerId: 'off-1' };
 const SECOND_TARGET: ClaimTarget = { vendorId: 'vendor-1', offerId: 'off-2' };
 
 /**
- * Stands in for the lost-race signal RP-4 will confirm against a real offer.
- *
- * `CONFIRMED_LOST_RACE_SIGNALS` is empty on purpose and must stay empty until that
- * confirmation, so the recognised path is exercised by passing a list in — never by
- * hard-coding a guess into the module and calling it confirmed.
+ * A lost-race signal passed in, so the recognised path is exercised independently of the
+ * confirmed list in `claimOutcome.ts` (`http_409`, from the portal's web app, 2026-09-18).
  */
 const SIGNALS_AS_IF_CONFIRMED = ['http_409'];
 
@@ -484,8 +481,8 @@ describe('claim.ts — the portal is translated at the edge (FR-027, DC-1, T036)
   });
 
   it('treats an UNRECOGNISED refusal as a fault, never as a lost race (FR-005a)', async () => {
-    // The most important asymmetry in the feature. With no signal confirmed — which is where
-    // the system stands until RP-4 — every refusal is a fault that alerts. Kills the
+    // The most important asymmetry in the feature. Only the confirmed 409 is a lost race;
+    // every other refusal is a fault that alerts. Kills the
     // mutation that makes an unrecognised refusal `lost`: that outcome never alerts, so a
     // broken claim path would look exactly like a bot that keeps arriving second.
     const fetchImpl = alwaysFailing(422);
