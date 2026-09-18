@@ -89,7 +89,7 @@ function portalListing(offers: readonly RawOffer[] = []): FakePortal {
     },
     client: {
       postJson: async (path: string) => {
-        claims.push(/job-offers\/([^/]+)\/claim/.exec(path)?.[1] ?? '?');
+        claims.push(/job-offers\/([^/]+)\/accept/.exec(path)?.[1] ?? '?');
         return {};
       },
     } as never,

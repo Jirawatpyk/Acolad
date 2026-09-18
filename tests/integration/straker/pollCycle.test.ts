@@ -175,8 +175,23 @@ describe('what each claim outcome then causes', () => {
   });
 
   it('records a rejected claim as failed, holds nothing, and alerts (FR-005a)', async () => {
-    // Until RP-4 confirms the lost-race signal, every rejection is a fault. A rejection
-    // quietly classified as a normal loss is the one outcome that would never page anyone.
+    // Every rejection but the confirmed lost-race 409 is a fault. A rejection quietly
+    // classified as a normal loss is the one outcome that would never page anyone.
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      claim: () => ({ status: 400 }),
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.trace).toContain('persist:event:claim:failed');
+    expect(h.trace).not.toContain('persist:hold');
+    expect(h.trace.some((t) => t.startsWith('notify:alerts:'))).toBe(true);
+  });
+
+  it('records a 409 as a lost race: holds nothing and pages no one (RP-4, 2026-09-18)', async () => {
+    // The portal's own web app reads 409 on accept as "taken by another vendor".
     const h = harness({
       offers: [raw('a')],
       extract: () => [eligible('a')],
@@ -185,9 +200,9 @@ describe('what each claim outcome then causes', () => {
 
     await h.cycle.runOnce();
 
-    expect(h.trace).toContain('persist:event:claim:failed');
+    expect(h.trace).toContain('persist:event:claim:lost');
     expect(h.trace).not.toContain('persist:hold');
-    expect(h.trace.some((t) => t.startsWith('notify:alerts:'))).toBe(true);
+    expect(h.trace.some((t) => t.startsWith('notify:alerts:'))).toBe(false);
   });
 
   it('records an unanswered claim as unknown and never dispatches a second one (R7)', async () => {

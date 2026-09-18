@@ -1033,7 +1033,7 @@ const NOW_MS = (RESET_AT_SEC - 60) * 1_000 + 10_000;
 
 const ME_PATH = '/api/vendor/auth/me';
 const ASSIGNED_PATH = '/api/vendors/v1/assigned-jobs?limit=100&offset=0';
-const CLAIM_PATH = '/api/vendors/v1/job-offers/off-1/claim';
+const CLAIM_PATH = '/api/vendors/v1/job-offers/off-1/accept';
 
 /**
  * A clock the test drives, whose `sleep` advances it by exactly what it was asked to wait.

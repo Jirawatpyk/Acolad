@@ -355,7 +355,7 @@ describe('the composition root paces its requests (FR-019, SC-003, T065)', () =>
 
     await portal.listAssignedWork('vendor-1').catch(() => undefined);
 
-    await expect(portal.client.postJson('/api/vendors/v/job-offers/o/claim', {})).resolves.toEqual(
+    await expect(portal.client.postJson('/api/vendors/v/job-offers/o/accept', {})).resolves.toEqual(
       {},
     );
   });

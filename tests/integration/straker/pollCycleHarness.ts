@@ -73,7 +73,7 @@ export function harness(opts: HarnessOptions): Harness {
       getJsonWithBackoff: vi.fn(),
       lastRateLimit: () => null,
       postJson: async (path: string) => {
-        const id = /job-offers\/([^/]+)\/claim/.exec(path)?.[1] ?? '?';
+        const id = /job-offers\/([^/]+)\/accept/.exec(path)?.[1] ?? '?';
         trace.push(`claim:${id}`);
         claimed.push(id);
         const outcome = opts.claim?.(id) ?? 'accepted';

@@ -79,8 +79,8 @@ never been able to verify, because no claim has ever been made against this port
 
 | Guess | Where | What RP-4 settles |
 |---|---|---|
-| The claim endpoint's **path and body** | `claim.ts` — `claimRequestPath`, `CLAIM_REQUEST_BODY` | Reasoned by analogy with the one confirmed offer-addressing endpoint. Contract §4 is marked NOT YET EXERCISED. |
-| The **lost-race signal** | `claimOutcome.ts` — `CONFIRMED_LOST_RACE_SIGNALS` is **deliberately empty** | Until it is filled, *every* rejection classifies as `failed` and alerts. That is the safe direction (FR-005a) and it is also noisy. |
+| ~~The claim endpoint's **path and body**~~ — **CLOSED 2026-09-18** | `claim.ts` — `claimRequestPath` | `POST …/job-offers/{obj_id}/accept`, read from the portal's web app. The guess `/claim` got a 404 on the first real claim. |
+| ~~The **lost-race signal**~~ — **CLOSED 2026-09-18: HTTP 409** | `claimOutcome.ts` — `CONFIRMED_LOST_RACE_SIGNALS = ['http_409']` | The web app shows "Offer no longer available" for a 409 only. Still to observe: one **won** claim end to end. |
 | ~~Whether `due_at` is **Bangkok or New Zealand**~~ — **CLOSED 2026-09-17: it is UTC** | `offerParse.ts` — `STRAKER_DEADLINE_ZONE` | Settled exactly as this row said it would be, by an assigned job's deadline in the portal UI. It was neither option offered here. See below. |
 | Whether `words` is really the **effort** field | `offerParse.ts` assumption 2 | Confirmed on one independent offer and contradicted by a cent on the other. Effort is what the whole ceiling rests on. |
 

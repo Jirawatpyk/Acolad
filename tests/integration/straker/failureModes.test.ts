@@ -145,7 +145,7 @@ function fakeStraker(): FakeStraker {
 
     if (exchange.path === '/api/vendor/auth/login') return handlers.login(exchange);
     if (exchange.path === '/api/vendor/auth/me') return handlers.me(exchange);
-    const claiming = /^\/api\/vendors\/[^/]+\/job-offers\/([^/]+)\/claim$/.exec(exchange.path);
+    const claiming = /^\/api\/vendors\/[^/]+\/job-offers\/([^/]+)\/accept$/.exec(exchange.path);
     if (claiming !== null) {
       return handlers.claim(exchange, decodeURIComponent(claiming[1] ?? ''));
     }
@@ -167,7 +167,7 @@ type Endpoint = 'login' | 'me' | 'offers' | 'claim';
 function isEndpoint(path: string, kind: Endpoint): boolean {
   if (kind === 'login') return path === '/api/vendor/auth/login';
   if (kind === 'me') return path === '/api/vendor/auth/me';
-  if (kind === 'claim') return path.endsWith('/claim');
+  if (kind === 'claim') return path.endsWith('/accept');
   return /job-offers$/.test(path);
 }
 
@@ -866,7 +866,7 @@ describe('failure mode: the account itself is barred (T063, contract §4a)', () 
     expect(callsTo(portal, 'login')).toHaveLength(callsTo(control.portal, 'login').length);
   });
 
-  it('never reads a 403 as a lost race, because no rejection is a lost race until RP-4 confirms one', async () => {
+  it('never reads a 403 as a lost race — only the confirmed 409 is one', async () => {
     const offer = offerFixture('aj-265:ms-my');
     const portal = fakeStraker();
     portal.offers = async () => json([offer]);

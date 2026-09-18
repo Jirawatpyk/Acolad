@@ -610,7 +610,7 @@ describe('the tracking record carries what the gate decided on (A1, C1)', () => 
     expect(h.queued.find((q) => q.channel === 'tracking')?.payload).toMatchObject({
       objId: 'a',
       eventType: 'claim',
-      outcome: 'failed',
+      outcome: 'lost',
     });
   });
 });

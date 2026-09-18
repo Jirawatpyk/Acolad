@@ -21,17 +21,17 @@ export type ClaimResponse =
 /**
  * Rejection signals confirmed to mean "another vendor took it first".
  *
- * **Empty on purpose.** FR-005a requires the lost-race signal to be identified positively
- * and explicitly, against a real offer, under supervision — that is release precondition
- * RP-4, and nothing has claimed a real offer yet. Until one does, no rejection may be read
- * as a normal loss.
+ * **HTTP 409, and only 409** (confirmed 2026-09-18, FR-005a / RP-4). The portal's own web
+ * app handles the accept call's failures in exactly two ways: a 409 shows "Offer no longer
+ * available — this offer may have been accepted by another vendor"; anything else shows
+ * "Something went wrong". This list follows that line and nothing wider.
  *
- * The emptiness is load-bearing rather than a placeholder: `lost` is the only outcome that
- * never alerts, so a rejection guessed into it would hide a broken claim path behind
- * silence, looking exactly like a bot that keeps arriving second. Adding the confirmed
- * value to this array is the entire change once RP-4 is satisfied.
+ * Keep it narrow: `lost` is the only outcome that never alerts, so a rejection guessed into
+ * it would hide a broken claim path behind silence, looking exactly like a bot that keeps
+ * arriving second. The first real claim proved the point — it went to a route that did not
+ * exist and got a 404, which (rightly) alerted.
  */
-export const CONFIRMED_LOST_RACE_SIGNALS: readonly string[] = [];
+export const CONFIRMED_LOST_RACE_SIGNALS: readonly string[] = ['http_409'];
 
 /**
  * Classify a claim attempt's answer.
