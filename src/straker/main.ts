@@ -467,6 +467,13 @@ export function assembleStrakerBot(
    * third kind is added to one of them.
    */
   const ceilings = { translation: cfg.maxWordsPerDay, monolingual: cfg.dtpMaxWordsPerDay };
+  // The throughputs the gate measures each offer at. Handed to the ledger too, so a day's
+  // capacity is measured at the same rate — see `StrakerLedger.dayCapacity`. `undefined`
+  // before it keeps the default holiday calendar.
+  const rates = {
+    translation: cfg.throughputWordsPerHour,
+    monolingual: cfg.dtpThroughputWordsPerHour,
+  };
   // Same reason as `ceilings`: two ledgers, one calendar, declared once.
   const ledgerCalendar = {
     hoursStartMin: cfg.hoursStartMin,
@@ -476,7 +483,7 @@ export function assembleStrakerBot(
   const reconciler = createStrakerReconciler({
     portal,
     store,
-    ledger: new StrakerLedger(store, ceilings, ledgerCalendar),
+    ledger: new StrakerLedger(store, ceilings, ledgerCalendar, undefined, rates),
     outbox,
     logger,
     now,
@@ -489,7 +496,7 @@ export function assembleStrakerBot(
     // appearances a previous run already closed — see `StrakerStore.trackerState`.
     tracker: createSightingTracker(store.trackerState()),
     store,
-    ledger: new StrakerLedger(store, ceilings, ledgerCalendar),
+    ledger: new StrakerLedger(store, ceilings, ledgerCalendar, undefined, rates),
     outbox,
     logger,
     settings: {

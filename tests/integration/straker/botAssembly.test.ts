@@ -140,7 +140,7 @@ describe('assembleStrakerBot — the offer parser main() wires in is the real on
   it('claims a captured offer and records the effort and deadline the payload carried', async () => {
     // Kills `extractOffers: () => []` (nothing is claimed) and equally kills a placeholder
     // that returns fabricated values: the recorded effort is compared against the number in
-    // the file, and the deadline against the file's own `due_at` read as Bangkok.
+    // the file, and the deadline against the file's own `due_at` read as UTC.
     const offer = captured()['aj-265:ms-my'];
     expect(offer).toBeDefined();
     const cfg = loadStrakerBotConfig(env());
@@ -254,6 +254,38 @@ describe('assembleStrakerBot — the ledger ceiling is the configured one', () =
     expect(bot.store.listEvents()[0]).toMatchObject({
       eventType: 'skip',
       skipReason: 'deadline_unreachable',
+    });
+  });
+
+  it('hands the ledger the same throughput the gate uses, so a pinned rate caps the window', async () => {
+    // The composition root is where this can silently fail: the ledger learning the rate is
+    // useless unless main() passes it. Pinned at 200 an hour, the working time from Tuesday
+    // 10:00 to Wednesday 18:00 (17 h) holds 3,400 words. Each 1,500-word offer passes the gate
+    // on its own (7.5 h), so only the window can stop the third — and it can only do that if
+    // it measures the day at 200 an hour rather than at 3,500 / 9.
+    // Kills: dropping `rates` from either `new StrakerLedger(...)` in main.ts.
+    const cfg = loadStrakerBotConfig(
+      env({ STRAKER_MAX_WORDS_PER_DAY: '3500', STRAKER_THROUGHPUT_WORDS_PER_HOUR: '200' }),
+    );
+    const base = captured()['aj-265:th'];
+    const offers = ['r-1', 'r-2', 'r-3'].map(
+      (objId) =>
+        ({
+          ...base,
+          obj_id: objId,
+          words: 1_500,
+          due_at: '2026-09-16T11:00:00', // UTC — Wednesday 18:00 in Bangkok
+        }) as unknown as RawOffer,
+    );
+    const portal = portalListing(offers);
+    const bot = assemble(cfg, portal);
+
+    await bot.cycle.runOnce();
+
+    expect(portal.claims).toEqual(['r-1', 'r-2']);
+    expect(bot.store.listEvents().find((e) => e.objId === 'r-3')).toMatchObject({
+      eventType: 'skip',
+      skipReason: 'ceiling_reached',
     });
   });
 

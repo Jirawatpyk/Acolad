@@ -163,6 +163,11 @@ export class StrakerLedger {
     private readonly holidaysAt: (
       nowMs: number,
     ) => ReadonlyMap<string, string> = holidaysForEffectiveDay,
+    /** The throughput the scheduling gate measures each offer at, per kind of work, in
+     *  words an hour. Given so the ledger and the gate share ONE rate: a working day holds
+     *  no more than this gets through in it (see {@link dayCapacity}). Omit a kind and its
+     *  ceiling alone governs it. */
+    private readonly ratesPerHour: Readonly<Partial<Record<WorkKind, number>>> = {},
   ) {
     // A zero ceiling is a misconfiguration, not "unlimited". The XTM bot carries a
     // neighbouring knob where 0 does mean unlimited, and reading this one the same way
@@ -172,6 +177,14 @@ export class StrakerLedger {
       if (!Number.isFinite(ceiling) || ceiling <= 0) {
         throw new Error(
           `Straker daily ceiling for ${kind} must be a positive word count, got ${String(ceiling)}`,
+        );
+      }
+      // Same reasoning for the rate: 0 would read as "nothing fits" at best and, through a
+      // division somewhere later, as infinity at worst.
+      const rate = ratesPerHour[kind];
+      if (rate !== undefined && (!Number.isFinite(rate) || rate <= 0)) {
+        throw new Error(
+          `Straker throughput rate for ${kind} must be a positive words-per-hour figure, got ${String(rate)}`,
         );
       }
     }
@@ -264,7 +277,7 @@ export class StrakerLedger {
       );
     }
 
-    const ceiling = this.ceilings[candidate.kind];
+    const ceiling = this.dayCapacity(candidate.kind);
     const byDay = this.committedByDay(nowMs, candidate.kind, held);
     const today = bangkokDateString(nowMs);
     const capacity = this.capacityThrough(nowMs, deadlineDay, ceiling, holidays);
@@ -278,7 +291,7 @@ export class StrakerLedger {
         detail:
           `${candidate.effortWords} words due ${deadlineDay} exceed the ${Math.floor(capacity)} ` +
           `words the working time left through ${deadlineDay} can hold ` +
-          `(${ceiling} words a working day) — accept manually`,
+          `(${Math.floor(ceiling)} words a working day) — accept manually`,
         deadlineDay,
       };
     }
@@ -306,7 +319,7 @@ export class StrakerLedger {
       reason: 'ceiling_reached',
       detail:
         `${breach.demand} words would be due by ${breach.day}, and the working time left ` +
-        `through it holds ${breach.capacity} (${ceiling} words a working day)`,
+        `through it holds ${breach.capacity} (${Math.floor(ceiling)} words a working day)`,
       deadlineDay,
     };
   }
@@ -337,14 +350,14 @@ export class StrakerLedger {
         // No day means no day total and no day to have breached. The row is surfaced by
         // heldWorkMissingDeadline instead, which is the honest signal here.
         committedEffort: null,
-        ceiling: this.ceilings[work.kind],
+        ceiling: this.dayCapacity(work.kind),
         ceilingExceeded: false,
       };
     }
 
     // The warning follows the same rule the claim path does. Judged per deadline day it
     // would page on every legitimately multi-day job reconciliation finds.
-    const ceiling = this.ceilings[work.kind];
+    const ceiling = this.dayCapacity(work.kind);
     const byDay = this.committedByDay(nowMs, work.kind);
     const today = bangkokDateString(nowMs);
     const breach = this.firstBreach(nowMs, today, holidays, byDay, ceiling, day);
@@ -410,6 +423,32 @@ export class StrakerLedger {
       if (due <= day) sum += words;
     }
     return sum;
+  }
+
+  /**
+   * What one working day holds for this kind of work: the owner's ceiling, or what the
+   * throughput gets through in a working day if that is less.
+   *
+   * The scheduling gate measures each offer at the throughput; this is how the window
+   * measures a day at the SAME rate, so the two cannot disagree. Before it, the window used
+   * ceiling ÷ working hours unconditionally, which equals the throughput only while the
+   * throughput is left blank and derived from the ceiling (`config.ts`). Pin it lower and
+   * each offer passed the gate at the real rate while the window still believed in the
+   * full ceiling — three 1,700-word jobs into 3,600 words of real time.
+   *
+   * Only a LOWER rate changes anything, and only by more than rounding: the derived
+   * rate multiplies back to the ceiling within a few ulps, and treating that as "less"
+   * would move every figure by a hair for no reason. A higher rate leaves the ceiling in
+   * charge — the ceiling is how much the owner is willing to take on, not how fast the
+   * team is.
+   */
+  private dayCapacity(kind: WorkKind): number {
+    const ceiling = this.ceilings[kind];
+    const rate = this.ratesPerHour[kind];
+    if (rate === undefined) return ceiling;
+    const hoursPerDay = (this.calendar.hoursEndMin - this.calendar.hoursStartMin) / 60;
+    const throughDay = rate * hoursPerDay;
+    return throughDay < ceiling * (1 - 1e-9) ? throughDay : ceiling;
   }
 
   /**
