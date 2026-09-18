@@ -164,6 +164,9 @@ export function decideWindowCapacity(i: WindowCapacityInput): WindowVerdict {
   // whenever its reason text changes (#15), so the working-time capacity — which shrinks every
   // working minute — would repost the same refusal to Chat on every poll. The figures are on
   // the verdict (`demand`, `capacity`) for the caller to log instead; XTM does.
+  // A reason can still change now and then — the breach moves to an earlier day as the window
+  // shrinks, turns permanent, or overdue work rolls into a new today at midnight. Each is a
+  // real change in why, so one re-announcement per change is intended, not a leak.
   const perDay = Math.floor(i.dayCapacity);
 
   for (const day of addedDays) {
