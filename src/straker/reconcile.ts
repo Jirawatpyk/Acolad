@@ -234,6 +234,19 @@ export async function readAssignedWork(
     // the portal's own end-of-list signal; an empty one stops a loop that would otherwise
     // never advance; and `total` is what the envelope exists to tell us.
     if (items.length === 0 || items.length < pageLimit || collected.length >= total) {
+      // …but the first two of those are the portal's *behaviour*, and `total` is its own
+      // *claim*. When they disagree, the list is short and nothing here can say why. That
+      // used to be returned as though it were the whole list, which was survivable only
+      // while absence meant nothing. It now releases capacity (FR-016d), so a silently
+      // short list would hand back a ceiling for work the team still owes — the exact
+      // failure the positive-evidence rule was written to avoid, arriving through the
+      // read instead of through the rule.
+      if (collected.length < total) {
+        throw new Error(
+          `Straker assigned-jobs stopped at ${collected.length} of ${total} it says exist — ` +
+            `refusing to treat a short list as the whole of it`,
+        );
+      }
       return collected;
     }
     offset += items.length;
@@ -540,7 +553,9 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
     }
 
     const outstanding = work.filter((w) => !isFinished(w.status));
-    const held = new Set(deps.store.heldWork().map((w) => w.objId));
+    // objId → when it was first held. A map rather than a set because release-on-absence
+    // needs the age: see `releaseFinished`, and the race it closes.
+    const held = new Map(deps.store.heldWork().map((w) => [w.objId, w.heldSinceMs] as const));
     const missing = outstanding.filter((w) => !held.has(w.objId));
 
     const recovered: string[] = [];
@@ -601,19 +616,43 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
   }
 
   /**
-   * Give back the budget for work the portal says is done (T056b, FR-016d).
+   * Give back the budget for work the portal no longer holds against us (T056b, FR-016d).
    *
-   * **Positive evidence only, and that is the whole safety argument.** T053 left this
-   * direction unbuilt because "a partial read would free capacity for work the team
-   * genuinely holds" — true of a rule phrased as "release what the read does not mention",
-   * and not true of this one. Only an item **present in the read** and **recognised as
-   * finished** releases anything, so a truncated page, a paginated response or a portal
-   * that answered with half its list can only ever release *less*. Absence is not evidence.
+   * Two ways that is true, and the second one was added on 2026-09-17:
    *
-   * `isFinished` supplies the second half of that guard: it is "recognised AND not
-   * outstanding", so a status this bot has never seen keeps the work held rather than
-   * handing back a ceiling on a word it cannot read. That is the same asymmetry recovery
-   * already uses, pointed the other way.
+   * 1. **Present and finished** — the read names the item and gives it a status this bot
+   *    recognises as done. `isFinished` is "recognised AND not outstanding", so a status
+   *    never seen before keeps the work held rather than handing back a ceiling on a word
+   *    it cannot read.
+   * 2. **Absent from a complete read** — the portal does not list the item at all.
+   *
+   * ## Why absence counts now, when it deliberately did not before
+   *
+   * This function used to be positive-evidence only, and the argument was that "a partial
+   * read would free capacity for work the team genuinely holds". That argument was right
+   * about the danger and wrong about the remedy: refusing to read absence did not make
+   * partial reads safe, it just moved the cost somewhere quieter.
+   *
+   * **What it cost.** A job the client cancels vanishes from the assigned list — no status,
+   * no final page, simply gone. Under rule 1 alone nothing could ever release it, so its
+   * words stayed charged against its deadline day **forever**. That happened on 2026-09-17
+   * (`b7000ad1`, 956 words, cancelled), and the wider evidence is that `released` was `0`
+   * on every one of the 132 reconciliation passes the bot had ever run: rule 1 had never
+   * fired once. A release path that cannot fire is not a conservative safeguard, it is an
+   * absent feature whose absence nothing reports.
+   *
+   * **What makes absence safe to read — two guards, for two different ways it can lie.**
+   *
+   * - *The list is short.* {@link readAssignedWork} now throws rather than returning a list
+   *   shorter than the `total` the portal itself claims, so a list that reaches this
+   *   function is one the portal vouched for as whole. A failed or short read fails the pass
+   *   and releases nothing. The old rule guarded the right thing in the wrong place — the
+   *   guard belongs at the read, where completeness is knowable.
+   * - *The list is whole but not yet current.* A job the bot has just won is held at once,
+   *   and reaches the portal's assigned list some moments later. Absence in that gap means
+   *   "not listed yet", not "gone", so work held for less than one reconcile interval is
+   *   never released on absence. See the loop below for why the cost of the other answer is
+   *   an irreversible over-claim rather than a delay.
    *
    * Failures are per item and never fail the pass. The cost of a missed release is an
    * offer the bot passes over; the cost of failing the pass would be the recoveries that
@@ -621,23 +660,48 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    */
   function releaseFinished(
     work: readonly AssignedWork[],
-    held: ReadonlySet<string>,
+    held: ReadonlyMap<string, number>,
     atMs: number,
   ): string[] {
     const released: string[] = [];
-    for (const item of work) {
-      if (!isFinished(item.status) || !held.has(item.objId)) continue;
+    const listed = new Set(work.map((item) => item.objId));
+
+    const give = (objId: string, why: string): void => {
       try {
         // `release` answers false when the row is already released, which is the normal
         // steady state: the portal keeps reporting a delivered job every fifteen minutes.
         // Only a state CHANGE is reported, so a repeat pass is silent rather than noisy.
-        if (deps.ledger.release(item.objId, atMs)) released.push(item.objId);
+        if (!deps.ledger.release(objId, atMs)) return;
+        released.push(objId);
+        deps.logger.info(
+          { module: 'reconcile', action: 'release', outcome: 'ok', objId, why },
+          'gave the ceiling back for work the portal no longer holds against us',
+        );
       } catch (err) {
         deps.logger.error(
-          { module: 'reconcile', action: 'release', outcome: 'failed', objId: item.objId },
+          { module: 'reconcile', action: 'release', outcome: 'failed', objId },
           message(err),
         );
       }
+    };
+
+    for (const item of work) {
+      if (isFinished(item.status) && held.has(item.objId)) give(item.objId, 'reported finished');
+    }
+    for (const [objId, heldSinceMs] of held) {
+      if (listed.has(objId)) continue;
+      // The grace, and the race it closes. A claim writes `held_work` the moment the portal
+      // answers, but the portal can take a while to move the job onto its assigned list. A
+      // pass landing in that gap sees work held and not listed, and without this line it
+      // would hand back the ceiling for a job the bot has JUST WON — and the next offer
+      // claimed against that freed ceiling is an over-commitment nothing can undo. The next
+      // pass would find the job listed and recover it, so the damage heals; the claims made
+      // in between do not.
+      //
+      // One full interval is generous against a propagation delay of seconds, and costs
+      // nothing: a cancelled job's budget comes back one pass later than it could have.
+      if (atMs - heldSinceMs < intervalMs) continue;
+      give(objId, 'absent from a complete assigned list');
     }
     return released;
   }
