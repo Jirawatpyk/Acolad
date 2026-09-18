@@ -47,9 +47,15 @@
  * for like with the XTM bot.
  */
 
-import { bangkokDateString, bangkokEpochMs } from '../schedule/bangkokCalendar.js';
+import { bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { effectiveDeadlineDay } from '../schedule/deadlineDay.js';
-import { workingMinutesBetween, type WorkCalendar } from '../schedule/workingHours.js';
+import {
+  capacityThrough,
+  dayCapacityFor,
+  decideWindowCapacity,
+  dueThrough,
+} from '../schedule/windowCapacity.js';
+import type { WorkCalendar } from '../schedule/workingHours.js';
 import { holidaysForEffectiveDay } from '../schedule/thaiHolidays.js';
 import type { SkipReason } from './types.js';
 import { WORK_KINDS, type HeldWork, type StrakerStore, type WorkKind } from './strakerStore.js';
@@ -253,14 +259,10 @@ export class StrakerLedger {
   }
 
   /**
-   * Would claiming this offer keep every deadline from its own onward within the working
-   * days before it? See {@link firstBreach} for the rule and the module docstring for why.
-   *
-   * Called **before** the irreversible claim. This used to delegate to
-   * `schedule/acceptCapacity.decideGroupCapacity`, which judges one deadline day in
-   * isolation; that is the XTM bot's rule and stays the XTM bot's rule. Straker stopped
-   * using it on 2026-09-18, when a job due in three days' time was refused for being larger
-   * than one.
+   * Would claiming this offer keep every deadline from its own onward within the working time
+   * before it? The rule is the shared scheduling standard, `schedule/windowCapacity` — the
+   * same one the XTM bot uses since 2026-09-18 — measured at this ledger's day capacity
+   * ({@link dayCapacity}). Called **before** the irreversible claim.
    */
   checkCapacity(
     candidate: LedgerCandidate,
@@ -277,36 +279,20 @@ export class StrakerLedger {
       );
     }
 
-    const ceiling = this.dayCapacity(candidate.kind);
+    const dayCapacity = this.dayCapacity(candidate.kind);
+    const calendar = { ...this.calendar, holidays };
     const byDay = this.committedByDay(nowMs, candidate.kind, held);
-    const today = bangkokDateString(nowMs);
-    const capacity = this.capacityThrough(nowMs, deadlineDay, ceiling, holidays);
-
-    // Bigger than all the working time left before its deadline: waiting only shrinks that,
-    // so it needs a human and must not be re-offered to the ceiling every pass.
-    if (candidate.effortWords > capacity) {
-      return {
-        fits: false,
-        reason: 'exceeds_daily_ceiling_entirely',
-        detail:
-          `${candidate.effortWords} words due ${deadlineDay} exceed the ${Math.floor(capacity)} ` +
-          `words the working time left through ${deadlineDay} can hold ` +
-          `(${Math.floor(ceiling)} words a working day) — accept manually`,
-        deadlineDay,
-      };
-    }
-
-    const breach = this.firstBreach(
+    const verdict = decideWindowCapacity({
       nowMs,
-      today,
-      holidays,
-      byDay,
-      ceiling,
-      deadlineDay,
-      candidate.effortWords,
-    );
-    if (breach === null) {
-      const before = this.demandThrough(deadlineDay, byDay, today);
+      dueByDay: byDay,
+      additions: [{ effort: candidate.effortWords, deadlineDay }],
+      dayCapacity,
+      calendar,
+    });
+
+    if (verdict.accept) {
+      const before = dueThrough(byDay, deadlineDay, bangkokDateString(nowMs));
+      const capacity = capacityThrough(nowMs, deadlineDay, dayCapacity, calendar);
       return {
         fits: true,
         deadlineDay,
@@ -316,10 +302,13 @@ export class StrakerLedger {
     }
     return {
       fits: false,
-      reason: 'ceiling_reached',
-      detail:
-        `${breach.demand} words would be due by ${breach.day}, and the working time left ` +
-        `through it holds ${breach.capacity} (${Math.floor(ceiling)} words a working day)`,
+      // Waiting only shrinks the window, so a job bigger than all of it needs a human and
+      // must not be re-offered to the ceiling every pass.
+      reason:
+        verdict.kind === 'over_cap_permanent'
+          ? 'exceeds_daily_ceiling_entirely'
+          : 'ceiling_reached',
+      detail: verdict.reason,
       deadlineDay,
     };
   }
@@ -344,35 +333,43 @@ export class StrakerLedger {
 
     const holidays = this.holidaysAt(nowMs);
     const day = this.dayOf(work.deadlineMs, holidays);
+    const dayCapacity = this.dayCapacity(work.kind);
     if (day === null) {
       return {
         deadlineDay: null,
         // No day means no day total and no day to have breached. The row is surfaced by
         // heldWorkMissingDeadline instead, which is the honest signal here.
         committedEffort: null,
-        ceiling: this.dayCapacity(work.kind),
+        ceiling: dayCapacity,
         ceilingExceeded: false,
       };
     }
 
-    // The warning follows the same rule the claim path does. Judged per deadline day it
-    // would page on every legitimately multi-day job reconciliation finds.
-    const ceiling = this.dayCapacity(work.kind);
+    // The warning follows the same rule the claim path does — judged per deadline day it
+    // would page on every legitimately multi-day job reconciliation finds. The work is already
+    // in `byDay`, so it is weighed with nothing added: any breach from its day onward is one
+    // this hold is part of.
+    const calendar = { ...this.calendar, holidays };
     const byDay = this.committedByDay(nowMs, work.kind);
-    const today = bangkokDateString(nowMs);
-    const breach = this.firstBreach(nowMs, today, holidays, byDay, ceiling, day);
-    if (breach !== null) {
+    const verdict = decideWindowCapacity({
+      nowMs,
+      dueByDay: byDay,
+      additions: [{ effort: 0, deadlineDay: day }],
+      dayCapacity,
+      calendar,
+    });
+    if (!verdict.accept) {
       return {
-        deadlineDay: breach.day,
-        committedEffort: breach.demand,
-        ceiling: breach.capacity,
+        deadlineDay: verdict.kind === 'budget_reached' ? verdict.capExhaustedDay : verdict.day,
+        committedEffort: verdict.demand,
+        ceiling: verdict.capacity,
         ceilingExceeded: true,
       };
     }
     return {
       deadlineDay: day,
-      committedEffort: this.demandThrough(day, byDay, today),
-      ceiling: Math.floor(this.capacityThrough(nowMs, day, ceiling, holidays)),
+      committedEffort: dueThrough(byDay, day, bangkokDateString(nowMs)),
+      ceiling: Math.floor(capacityThrough(nowMs, day, dayCapacity, calendar)),
       ceilingExceeded: false,
     };
   }
@@ -386,99 +383,12 @@ export class StrakerLedger {
   }
 
   /**
-   * The earliest deadline day, on or after `fromDay`, by which more work is due than the
-   * working time left through it can hold (`capacityThrough`) — or null when none is.
-   *
-   * Earliest-deadline-first: for every deadline day d, the work due on or before d must fit
-   * in the working time left through d. Adding work due on `fromDay` changes the sum for that
-   * day and every later one, which is why a job due early can be refused on account of a
-   * commitment due later — it would be worked first and eat that time. Days before
-   * `fromDay` are not re-checked: they are unchanged by this work, and a day already over
-   * (recovered work can put it there) does not make a later day any fuller.
-   */
-  private firstBreach(
-    nowMs: number,
-    today: string,
-    holidays: ReadonlyMap<string, string>,
-    byDay: ReadonlyMap<string, number>,
-    ceiling: number,
-    fromDay: string,
-    addedEffort = 0,
-  ): { day: string; demand: number; capacity: number } | null {
-    const days = [...new Set([...byDay.keys(), fromDay])].filter((d) => d >= fromDay).sort();
-    for (const day of days) {
-      const demand = this.demandThrough(day, byDay, today) + addedEffort;
-      const capacity = this.capacityThrough(nowMs, day, ceiling, holidays);
-      if (demand > capacity) return { day, demand, capacity: Math.floor(capacity) };
-    }
-    return null;
-  }
-
-  /** Work due on or before `day`. Held work already past its deadline day counts as due
-   *  today: it is still owed, and it is what the team does first. */
-  private demandThrough(day: string, byDay: ReadonlyMap<string, number>, today: string): number {
-    let sum = 0;
-    for (const [d, words] of byDay) {
-      const due = d < today ? today : d;
-      if (due <= day) sum += words;
-    }
-    return sum;
-  }
-
-  /**
-   * What one working day holds for this kind of work: the owner's ceiling, or what the
-   * throughput gets through in a working day if that is less.
-   *
-   * The scheduling gate measures each offer at the throughput; this is how the window
-   * measures a day at the SAME rate, so the two cannot disagree. Before it, the window used
-   * ceiling ÷ working hours unconditionally, which equals the throughput only while the
-   * throughput is left blank and derived from the ceiling (`config.ts`). Pin it lower and
-   * each offer passed the gate at the real rate while the window still believed in the
-   * full ceiling — three 1,700-word jobs into 3,600 words of real time.
-   *
-   * Only a LOWER rate changes anything, and only by more than rounding: the derived
-   * rate multiplies back to the ceiling within a few ulps, and treating that as "less"
-   * would move every figure by a hair for no reason. A higher rate leaves the ceiling in
-   * charge — the ceiling is how much the owner is willing to take on, not how fast the
-   * team is.
+   * What one working day holds for this kind of work: the ceiling, or what the throughput
+   * gets through in a working day if that is less — `windowCapacity.dayCapacityFor`, so the
+   * window is measured at the same rate the gate measures each offer at.
    */
   private dayCapacity(kind: WorkKind): number {
-    const ceiling = this.ceilings[kind];
-    const rate = this.ratesPerHour[kind];
-    if (rate === undefined) return ceiling;
-    const hoursPerDay = (this.calendar.hoursEndMin - this.calendar.hoursStartMin) / 60;
-    const throughDay = rate * hoursPerDay;
-    return throughDay < ceiling * (1 - 1e-9) ? throughDay : ceiling;
-  }
-
-  /**
-   * The words that can still be done from now until `day`'s working hours end.
-   *
-   * The ceiling pro-rated over the working minutes actually left — so a day already over,
-   * or an evening with nothing left of it, contributes nothing. That is the review C-1 fix:
-   * counting today as a full day at any hour let two 3,400-word jobs due tomorrow both be
-   * claimed at 17:45 against "Monday + Tuesday", with ~3,600 words of time really left.
-   *
-   * **Floored at one day's ceiling.** Held work may be partly done and the ledger cannot know
-   * how far, so pro-rating a short window on top of counting that work in full would refuse
-   * work that fits — the direction this bot has lost jobs in, twice. With the floor, the
-   * CAPACITY for any deadline is never less than the per-deadline-day rule gave it; the
-   * pro-rating only ever trims the extra days a longer window adds. Decisions can still be
-   * stricter than before on the DEMAND side — overdue work, work due earlier, or a later
-   * commitment the new job would crowd out — and that is the rule doing its job.
-   */
-  private capacityThrough(
-    nowMs: number,
-    day: string,
-    ceiling: number,
-    holidays: ReadonlyMap<string, string>,
-  ): number {
-    const perDay = this.calendar.hoursEndMin - this.calendar.hoursStartMin;
-    const left = workingMinutesBetween(nowMs, bangkokEpochMs(day, this.calendar.hoursEndMin), {
-      ...this.calendar,
-      holidays,
-    });
-    return Math.max(ceiling, (ceiling * left) / perDay);
+    return dayCapacityFor(this.ceilings[kind], this.ratesPerHour[kind], this.calendar);
   }
 
   /** The working day a deadline's work lands on, or null when there is no readable

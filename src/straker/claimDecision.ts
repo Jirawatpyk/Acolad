@@ -277,12 +277,6 @@ function decideOne(
     throughputPerHour: throughputFor(offer.monolingual, settings),
     calendar,
     holidaysCuratedForSpan: curated,
-    // A weekend or holiday deadline is not a refusal by itself (owner decision,
-    // 2026-09-18). Two 43-word offers at 02:42 on a Friday were turned away for being due
-    // Saturday 12:59 with nine working hours left that day. The feasibility check already
-    // counts only working minutes before the deadline, so a day off still limits the work
-    // — by time, which is the reason that is true. The XTM bot does not pass this.
-    allowNonWorkingDeadline: true,
   });
   if (!verdict.allow) {
     return skip(offer, classifyRefusal(offer, curated), verdict.reason);
@@ -354,8 +348,8 @@ function classifyRefusal(offer: OfferForDecision, curated: boolean): SkipReason 
   if (offer.effortWords === null) return 'effort_unknown';
   if (!curated) return 'holiday_calendar_uncurated';
 
-  // No weekday check here any more. The gate is called with `allowNonWorkingDeadline`, so a
-  // deadline on a day off never refuses on that ground — and reading the weekday first would
+  // No weekday check here any more. The gate never refuses a deadline for falling on a day
+  // off (the shared scheduling standard, 2026-09-18) — and reading the weekday first would
   // mislabel the refusal it does make: weekend work that does not fit in Friday's hours
   // would be recorded as "due on a weekend" rather than "cannot be done in time".
   // `deadline_on_non_working_day` stays in `SKIP_REASONS` for the rows written before.

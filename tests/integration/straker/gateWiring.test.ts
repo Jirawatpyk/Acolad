@@ -193,9 +193,6 @@ function gateOracle(
       holidays,
     },
     holidaysCuratedForSpan: curated,
-    // As the production call passes it (owner decision, 2026-09-18) — an oracle that
-    // disagreed with the caller on this would be testing a different gate.
-    allowNonWorkingDeadline: true,
   });
 }
 
@@ -245,7 +242,7 @@ describe('T026 the gate refuses and the decision honours it', () => {
     // Owner decision, 2026-09-18, after two 43-word offers seen at 02:42 on a Friday were
     // refused for being due Saturday 12:59 — with nine working hours still left that day.
     // A day off is where the working time runs out, not a reason to refuse.
-    // Kills: dropping `allowNonWorkingDeadline` from the production call.
+    // Kills: a gate that refuses a deadline for falling on a day off.
     const { ledger } = freshLedger(ROOMY);
     const o = offer('a', { deadlineMs: SAT_DEADLINE });
 

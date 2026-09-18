@@ -693,6 +693,13 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
   const dueTue18 = '2026-06-23T18:00:00+07:00'; // Tue 18:00 — far, finishable for small jobs
   const dueMon12 = '2026-06-22T12:00:00+07:00'; // same Monday noon — tight (120 working min)
   const MON_10b = '2026-06-22T11:00:00+07:00'; // later same Monday — re-attempt via robustness pass
+  // Since 2026-09-18 a deadline has the working time before it (schedule/windowCapacity), so
+  // judged from Monday a Wednesday deadline has ~2.9 days of room and no one-day ceiling to
+  // test. Tests about ONE day's budget are judged from that day's first working minute.
+  const MON_9 = '2026-06-22T09:00:00+07:00';
+  const TUE_9 = '2026-06-23T09:00:00+07:00';
+  const TUE_10 = '2026-06-23T10:00:00+07:00';
+  const WED_9 = '2026-06-24T09:00:00+07:00';
 
   const sheetRows = (): Array<{ status: string; note: string | null; file: string }> =>
     (
@@ -723,6 +730,41 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(
       new XtmJobStore(db).effortDueByDeadline().get(bangkokDateString(Date.parse(dueWed18))),
     ).toBe(100);
+  });
+
+  it('shared standard: accepts 2,500 words due Wednesday on the Monday before (a deadline has the days before it)', async () => {
+    // Refused permanently under the old per-day rule (2,500 > the 1,000 cap on Wednesday).
+    // Since 2026-09-18 both bots share schedule/windowCapacity: Mon 09:00 → Wed 18:00 is 27
+    // working hours, 3,000 words at 1,000 a day — and feasibility agrees (22.5 h needed).
+    // Kills: XTM still judging a deadline day alone.
+    fresh();
+    const acc = new StubAcceptor();
+    await new XtmPollCycle(db, schedCfg(), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 2500 })], MON_9),
+    );
+    expect(acc.calls.flat()).toHaveLength(1);
+    expect(only().lifecycleStatus).toBe('accepted');
+  });
+
+  it('shared standard: measures the day at the configured throughput when it is below the cap', async () => {
+    // Throughput pinned at 50/h: a working day holds 450, not the 1,000 cap. 200 held + 300
+    // new due Wednesday = 500 > 450 → refused, though 300 passes feasibility (6 h of 9) and
+    // 500 is well under the cap. Kills: the cycle handing the window the cap alone.
+    fresh();
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 200 })]);
+    const acc = new StubAcceptor();
+    const summary = await new XtmPollCycle(db, schedCfg({ throughputPerHour: 50 }), acc).run(
+      snapAt([xraw({ dueDate: dueWed18, words: 300 })], WED_9),
+    );
+    expect(acc.calls.flat()).toHaveLength(0);
+    // The figures the reason leaves out reach the log: 500 due by Wednesday, 450 of room.
+    expect(summary.scheduleRejects[0]?.window).toEqual({
+      day: '2026-06-24',
+      demand: 500,
+      capacity: 450,
+    });
+    expect(only('a.docx').lifecycleStatus).toBe('rejected');
+    expect(sheetRows().find((r) => r.file === 'a.docx')?.note ?? '').toContain('word cap reached');
   });
 
   it('rejects a too-tight job — Sheet Rejected + reason in Note + Chat; accept untouched; counter 0', async () => {
@@ -813,18 +855,20 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     },
   ];
   for (const c of inLieuCases) {
-    it(`I1 (real data): rejects a Malay job whose deadline lands on a real in-lieu holiday — ${c.label}`, async () => {
+    it(`I1 (real data): claims a Malay job due on a real in-lieu holiday when the day before has the time — ${c.label}`, async () => {
+      // This asserted the opposite until 2026-09-18, when the owner made one scheduling
+      // standard for both bots: a deadline on a day off is not, by itself, a refusal. The
+      // curated in-lieu day still matters — it adds no working time, so the job must fit in
+      // Friday's eight hours (888 words at 111/h), which 100 words does.
       fresh();
       const acc = new StubAcceptor();
       const summary = await new XtmPollCycle(db, schedCfg(), acc).run(
         snapAt([xraw({ dueDate: c.due, words: 100 })], c.now),
       );
-      expect(acc.calls.flat()).toHaveLength(0); // never clicked — blocked by the real holiday
-      expect(only().lifecycleStatus).toBe('rejected');
-      expect(summary.scheduleBlocked).toBe(1);
-      const note = sheetRows().at(-1)?.note ?? '';
-      expect(note).toContain('non-working day'); // the binding reason is a holiday block
-      expect(note).toContain(c.holiday); // the exact curated in-lieu name flowed through
+      expect(acc.calls.flat()).toHaveLength(1);
+      expect(only().lifecycleStatus).toBe('accepted');
+      expect(summary.scheduleBlocked).toBe(0);
+      expect(c.holiday.length).toBeGreaterThan(0); // the case still names a real curated day
     });
   }
 
@@ -866,18 +910,37 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(new XtmJobStore(db).effortDueByDeadline().size).toBe(0);
   });
 
-  it('I3a: a single group whose OWN words exceed the daily cap → "exceed" message (accept manually)', async () => {
+  it('I3a: a group whose words together exceed the whole window → "exceed" message (accept manually)', async () => {
     fresh();
     const acc = new StubAcceptor();
-    // 1500 words is feasible by Wed but its own size (1500) > the 1000-word daily cap → can
-    // never auto-accept on any day. The message must not read like a budget already spent.
+    // Two 1,000-word Malay jobs due Monday 18:00, seen Monday 09:00. Each alone passes
+    // feasibility (exactly nine hours at 111/h); one bulk click claims both, and 2,000 is
+    // more than the whole window (one day, 1,000) could ever hold — nothing held, no amount
+    // of waiting helps. (A single job cannot show this any more: with the throughput derived
+    // from the cap, one job too big for the window already fails feasibility.)
     await new XtmPollCycle(db, schedCfg(), acc).run(
-      snapAt([xraw({ dueDate: dueWed18, words: 1500 })], MON_10), // counter 0
+      snapAt(
+        [
+          xraw({
+            fileName: 'a.docx',
+            projectName: 'P1',
+            dueDate: '2026-06-22T18:00:00+07:00',
+            words: 1000,
+          }),
+          xraw({
+            fileName: 'b.docx',
+            projectName: 'P2',
+            dueDate: '2026-06-22T18:00:00+07:00',
+            words: 1000,
+          }),
+        ],
+        MON_9,
+      ),
     );
     expect(acc.calls.flat()).toHaveLength(0);
-    expect(only().lifecycleStatus).toBe('rejected');
-    const note = sheetRows().at(-1)?.note ?? '';
-    expect(note).toContain('exceed the daily cap');
+    expect(only('a.docx').lifecycleStatus).toBe('rejected');
+    const note = sheetRows().find((r) => r.file === 'a.docx')?.note ?? '';
+    expect(note).toContain('the working time left through it can hold');
     expect(note).toContain('accept manually');
   });
 
@@ -887,14 +950,14 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 900 })]);
     const acc = new StubAcceptor();
     await new XtmPollCycle(db, schedCfg(), acc).run(
-      snapAt([xraw({ dueDate: dueWed18, words: 300 })], MON_10), // 300 ≤ cap, but 900+300 > 1000 on Wed
+      snapAt([xraw({ dueDate: dueWed18, words: 300 })], WED_9), // 300 ≤ cap, but 900+300 > 1000 on Wed
     );
     expect(acc.calls.flat()).toHaveLength(0);
     expect(only('a.docx').lifecycleStatus).toBe('rejected');
     const note = sheetRows().find((r) => r.file === 'a.docx')?.note ?? '';
-    expect(note).toContain('daily word cap reached');
+    expect(note).toContain('word cap reached');
     expect(note).toContain(bangkokDateString(Date.parse(dueWed18))); // names the deadline day
-    expect(note).not.toContain('exceed the daily cap'); // distinct from the over-cap case
+    expect(note).not.toContain('accept manually'); // distinct from the over-cap case
   });
 
   it('I5: feasibility binds BEFORE capacity — an infeasible job on a near-cap day reads "cannot finish", not "cap reached"', async () => {
@@ -939,11 +1002,11 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
           .get(`daily_cap_reached:${wedDay}`) as { n: number }
       ).n;
     await cycle.run(
-      snapAt([xraw({ fileName: 'a.docx', dueDate: dueWed18, words: 300 })], MON_10, 'c1'),
+      snapAt([xraw({ fileName: 'a.docx', dueDate: dueWed18, words: 300 })], WED_9, 'c1'),
     );
     expect(activeCapAlert()).toBe(1); // raised once when that deadline day's budget is exhausted
     await cycle.run(
-      snapAt([xraw({ fileName: 'b.docx', dueDate: dueWed18, words: 300 })], MON_10, 'c2'),
+      snapAt([xraw({ fileName: 'b.docx', dueDate: dueWed18, words: 300 })], WED_9, 'c2'),
     );
     expect(activeCapAlert()).toBe(1); // deduped — at most one cap alert per deadline day
   });
@@ -959,10 +1022,12 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     const cycle = new XtmPollCycle(db, schedCfg(), acc);
     // c1 overflows Tue (900 + 300 > 1000); c2 overflows Wed (900 + 300 > 1000).
     await cycle.run(
-      snapAt([xraw({ fileName: 'tue.docx', dueDate: dueTue18, words: 300 })], MON_10, 'c1'),
+      snapAt([xraw({ fileName: 'tue.docx', dueDate: dueTue18, words: 300 })], TUE_9, 'c1'),
     );
     await cycle.run(
-      snapAt([xraw({ fileName: 'wed.docx', dueDate: dueWed18, words: 300 })], MON_10, 'c2'),
+      // Wednesday morning: Tuesday's 900 is now overdue and still held, so it counts as due
+      // today — and Wednesday overflows on its own account.
+      snapAt([xraw({ fileName: 'wed.docx', dueDate: dueWed18, words: 300 })], WED_9, 'c2'),
     );
     const keys = (
       db
@@ -1071,7 +1136,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
           xraw({ fileName: 'p1.docx', projectName: 'ProjOne', dueDate: dueWed18, words: 600 }),
           xraw({ fileName: 'p2.docx', projectName: 'ProjTwo', dueDate: dueWed18, words: 600 }),
         ],
-        MON_10,
+        WED_9,
       ),
     );
     expect(acc.calls.flat()).toHaveLength(0); // group rejected as a unit (combined > cap)
@@ -1086,7 +1151,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 950 })]);
     const acc = new StubAcceptor();
     await new XtmPollCycle(db, schedCfg(), acc).run(
-      snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10), // 950 + 100 = 1050 > 1000 on Wed
+      snapAt([xraw({ dueDate: dueWed18, words: 100 })], WED_9), // 950 + 100 = 1050 > 1000 on Wed
     );
     expect(acc.calls.flat()).toHaveLength(0);
     expect(only('a.docx').lifecycleStatus).toBe('rejected');
@@ -1386,17 +1451,25 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
   it('#15: a still-rejected job whose reject REASON changes (no field change) re-enqueues the Sheet row; an unchanged reason does not', async () => {
     fresh();
     new MetaStore(db).markBaselineDone();
-    // 1500w (> the 1000 cap) but FEASIBLE by Wed from Monday (multi-day) → capacity reason A.
+    // 1500w, FEASIBLE by Wed from Monday (13.5 h of 26), but 2,500 already held for Wed leaves
+    // the window (~2,889) no room → capacity reason A.
     // Fields are FIXED across all cycles (dueWed18, 1500) so there is NO detailsChange/field-sync —
     // the ONLY path that can refresh the Sheet is the blockNotes re-announce.
     const job = { dueDate: dueWed18, words: 1500 };
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 2500 })]);
     const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
     const aRows = (): Array<{ status: string; note: string | null }> =>
       sheetRows().filter((r) => r.file === 'a.docx');
-    // cN (Mon 10:00): feasible but its own size > cap → reason A ("exceed the daily cap").
+    // cN (Mon 10:00): feasible, but the Wednesday window is full → reason A ("cap reached").
     await cycle.run(snapAt([xraw(job)], MON_10, 'cN'));
     expect(only('a.docx').lifecycleStatus).toBe('rejected');
-    expect(aRows().at(-1)?.note).toContain('exceed the daily cap'); // reason A
+    expect(aRows().at(-1)?.note).toContain('word cap reached'); // reason A
+    // cN0 (one poll later, 10:00:20): the window has shrunk by a few words, but the refusal is
+    // the same one — NO new row. Kills: a reason that quotes the clock-driven capacity, which
+    // would repost the same rejection to Chat on every poll through the working day.
+    await cycle.run(snapAt([xraw(job)], '2026-06-22T10:00:20+07:00', 'cN0'));
+    await cycle.run(snapAt([xraw(job)], '2026-06-22T10:01:20+07:00', 'cN0b'));
+    expect(aRows().length).toBe(1);
     const afterN = aRows().length;
     // cN1 (Wed 10:00): SAME fields, later now → too little time left → reason B ("cannot finish").
     await cycle.run(snapAt([xraw(job)], '2026-06-24T10:00:00+07:00', 'cN1'));
@@ -1545,27 +1618,29 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     // negative control: Tue bucket already 800 (a held accepted job) → a new 800w-due-Tue is rejected
     new XtmJobStore(db).upsertMany([accepted({ jobKey: 'old', dueDate: dueTue18, words: 800 })]);
     await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
-      snapAt([xraw({ fileName: 'new.docx', dueDate: dueTue18, words: 800 })], MON_10),
+      snapAt([xraw({ fileName: 'new.docx', dueDate: dueTue18, words: 800 })], TUE_9),
     );
     expect(only('new.docx').lifecycleStatus).toBe('rejected'); // 800+800 > 1000
     // free the quota: the old job finishes (leaves 'accepted')
     finishJob(db, 'old'); // set lifecycle_status='closed'
     await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
-      snapAt([xraw({ fileName: 'new.docx', dueDate: dueTue18, words: 800 })], MON_10b),
+      snapAt([xraw({ fileName: 'new.docx', dueDate: dueTue18, words: 800 })], TUE_10),
     );
     expect(acceptedKeys(db)).toContain(jobKeyFor('new.docx')); // now accepted
   });
 
   it('cross-deadline all-or-nothing: a Wed-overflow blocks the whole Malay group incl the fitting Tue job', async () => {
     fresh();
-    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'w', dueDate: dueWed18, words: 900 })]); // Wed near full
+    // Judged Tuesday 09:00: Tue+Wed hold 2,000. 1,850 already due Wed leaves 150 — the Tue
+    // member (100) fits by Tuesday, but by Wednesday 1,850 + 100 + 200 = 2,150 does not.
+    new XtmJobStore(db).upsertMany([accepted({ jobKey: 'w', dueDate: dueWed18, words: 1850 })]);
     await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
       snapAt(
         [
           xraw({ fileName: 'tue.docx', dueDate: dueTue18, words: 100 }),
-          xraw({ fileName: 'wed.docx', dueDate: dueWed18, words: 200 }), // 900+200 > 1000
+          xraw({ fileName: 'wed.docx', dueDate: dueWed18, words: 200 }),
         ],
-        MON_10,
+        TUE_9,
       ),
     );
     expect(only('tue.docx').lifecycleStatus).toBe('rejected');
@@ -1582,13 +1657,13 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
     // c1: accept a 600w Malay job due Wed → held (Wed bucket = 600).
     await cycle.run(
-      snapAt([xraw({ fileName: 'held.docx', dueDate: dueWed18, words: 600 })], MON_10, 'c1'),
+      snapAt([xraw({ fileName: 'held.docx', dueDate: dueWed18, words: 600 })], WED_9, 'c1'),
     );
     expect(only('held.docx').lifecycleStatus).toBe('accepted');
     // c2: the held job is STILL in Active but its Due/Words cells read blank (grid race). Without
     // the F1 lock this would persist dueDate=null/words=null, dropping it from the Wed bucket.
     await cycle.run(
-      snapAt([xraw({ fileName: 'held.docx', dueDate: null, words: null })], MON_10, 'c2'),
+      snapAt([xraw({ fileName: 'held.docx', dueDate: null, words: null })], WED_9, 'c2'),
     );
     const held = only('held.docx');
     expect(held.dueDate).toBe(dueWed18); // committed deadline survived the blank re-read
@@ -1601,7 +1676,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
           xraw({ fileName: 'held.docx', dueDate: null, words: null }),
           xraw({ fileName: 'new.docx', dueDate: dueWed18, words: 600 }),
         ],
-        MON_10,
+        WED_9,
         'c3',
       ),
     );
@@ -1722,7 +1797,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     fresh();
     new XtmJobStore(db).upsertMany([accepted({ jobKey: 'seed', dueDate: dueWed18, words: 950 })]);
     const summary = await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
-      snapAt([xraw({ dueDate: dueWed18, words: 100 })], MON_10), // 950 + 100 > 1000 → blocked
+      snapAt([xraw({ dueDate: dueWed18, words: 100 })], WED_9), // 950 + 100 > 1000 → blocked
     );
     expect(summary.acceptedDueDays).toEqual([]); // nothing advanced → no audit entries
   });
@@ -1752,7 +1827,7 @@ describe('XtmPollCycle accept-schedule gate (Task 12 — C1/C4/I1/I3)', () => {
     expect(acc.calls.flat()).toHaveLength(0); // never clicked — correctly blocked
     expect(only('B.docx').lifecycleStatus).toBe('rejected');
     const note = sheetRows().find((r) => r.file === 'B.docx')?.note ?? '';
-    expect(note).toContain('daily word cap reached');
+    expect(note).toContain('word cap reached');
     expect(note).toContain(TUE_DAY); // names the WORKING day the work lands on, not 01/07
   });
 
