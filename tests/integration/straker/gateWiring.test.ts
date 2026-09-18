@@ -95,7 +95,11 @@ const SETTINGS: ClaimDecisionSettings = {
   workdays: WORKDAYS,
 };
 
-const LEDGER_CALENDAR: LedgerWorkCalendar = { hoursStartMin: 9 * 60, workdays: WORKDAYS };
+const LEDGER_CALENDAR: LedgerWorkCalendar = {
+  hoursStartMin: 9 * 60,
+  hoursEndMin: 18 * 60,
+  workdays: WORKDAYS,
+};
 
 /** Big enough that capacity never binds — used wherever the gate is the thing under test. */
 const ROOMY = 100_000;
@@ -616,6 +620,27 @@ describe('T028 several offers in one read are weighed in the order the portal re
     const decisions = decideClaims(offers, ctx(THU_9AM, ledger));
 
     expect(decisions.map((d) => d.action)).toEqual(['claim', 'skip']);
+  });
+
+  it('claims only one of two 3,400-word jobs due tomorrow when seen at 17:45 (review C-1)', () => {
+    // The reviewer's reproduction, against the real decision at the live figures. Each job
+    // passes the time gate alone (8.7 h needed, 9.25 h left). Counted as "Monday + Tuesday",
+    // both were claimed: 6,800 words into ~3,600 words of working time, irreversibly.
+    const { ledger } = freshLedger(3_500);
+    const settings: ClaimDecisionSettings = { ...SETTINGS, throughputWordsPerHour: 389 };
+    const tue1800 = at('2026-09-15T18:00:00+07:00');
+    const offers = [
+      offer('a', { effortWords: 3_400, deadlineMs: tue1800 }),
+      offer('b', { effortWords: 3_400, deadlineMs: tue1800 }),
+    ];
+
+    const decisions = decideClaims(
+      offers,
+      ctx(at('2026-09-14T17:45:00+07:00'), ledger, [], settings),
+    );
+
+    expect(decisions.map((d) => d.action)).toEqual(['claim', 'skip']);
+    expect(decisions[1]).toMatchObject({ action: 'skip', reason: 'ceiling_reached' });
   });
 
   it('lets a full Thursday leave Friday its own day, and carries Thursday’s spare room forward', () => {

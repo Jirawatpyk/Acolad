@@ -21,8 +21,11 @@
  *    raw words (`STRAKER_EFFORT_UNIT`). Adding unlike quantities produces a confident
  *    wrong number, which is the failure mode this whole view exists to prevent.
  * 3. Otherwise the total is shown — per deadline day as well as in the headline, because
- *    both ceilings are keyed to the **effective deadline day** and a lifetime total cannot
- *    answer "is the crew over-committed on Thursday?".
+ *    work is keyed to its **effective deadline day** and a lifetime total cannot answer
+ *    "is the crew over-committed on Thursday?". Note the two ceilings are no longer spent
+ *    the same way: XTM judges each deadline day alone, while Straker (since 2026-09-18)
+ *    lets a deadline use the working time before it — so a single Straker day here can
+ *    read over its per-day ceiling without anything being wrong.
  *
  * ## Structure: a pure combiner over two already-read portal readings
  *
@@ -1068,7 +1071,10 @@ export function formatCombinedDailyView(view: CombinedDailyView): string {
   );
 
   if (view.byDeadlineDay.length > 0) {
-    lines.push('', 'By effective deadline day — the day each ceiling is keyed to');
+    lines.push(
+      '',
+      'By effective deadline day (Straker may exceed a day: its deadlines use the days before)',
+    );
     for (const day of view.byDeadlineDay) {
       const parts = [...day.perPortal.entries()].map(([p, v]) => `${p} ${count(v)}`).join(' + ');
       lines.push(row(`${day.day}:`, `${parts} → ${figure(day.combined)}`));

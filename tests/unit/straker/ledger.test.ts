@@ -13,7 +13,7 @@
  *     nothing at all. The XTM bot shipped a counter first and had to replace it.
  *  3. Work found by **reconciliation counts even past the ceiling** (FR-016d, V25). It is
  *     already committed on the portal, so the ledger records reality rather than making a
- *     decision — it reports the breach and then blocks further claims for that day.
+ *     decision — it reports the breach and then blocks further claims due on or before that day.
  *
  * September 2026 is used throughout: it carries no Thai public holiday, so a weekday in it
  * is unambiguously a working day and the dates below say what they mean.
@@ -85,6 +85,7 @@ const THU_MORNING = at('2026-09-17T09:00:00+07:00');
 
 const CALENDAR: LedgerWorkCalendar = {
   hoursStartMin: 9 * 60,
+  hoursEndMin: 18 * 60,
   workdays: new Set([1, 2, 3, 4, 5]),
 };
 
@@ -773,7 +774,7 @@ describe('the ceiling is per working day, and a deadline has every working day b
     expect(verdict).toMatchObject({ fits: true, deadlineDay: '2026-09-16' });
   });
 
-  it('is exactly as strict as before for work due today', () => {
+  it('holds work due today to one day’s ceiling', () => {
     // One working day in the window: the ceiling is the ceiling.
     const { ledger } = freshLedger(DAY);
     ledger.hold(
@@ -917,5 +918,100 @@ describe('the ceiling is per working day, and a deadline has every working day b
     );
 
     expect(result.ceilingExceeded).toBe(false);
+  });
+});
+
+describe('a window counts the working time that is left, not the days it touches (review C-1)', () => {
+  /**
+   * The first cut counted today as a full working day at any hour. Seen Monday 17:45, two
+   * 3,400-word jobs due Tuesday 18:00 were BOTH claimed against "Monday + Tuesday = 7,000",
+   * though what is really left is 15 minutes of Monday and Tuesday: ~3,600 words. The rule
+   * before the window never had this hole — it judged Tuesday's bucket alone — so this was
+   * a regression, and on an irreversible claim. Found in review, reproduced against the
+   * real decision.
+   *
+   * Capacity through a day is now the larger of one day's ceiling and the ceiling pro-rated
+   * over the working minutes actually left before that day ends. The floor keeps the rule
+   * never stricter than the old per-day one: held work may be partly done and the ledger
+   * cannot know how far, so pro-rating a same-day afternoon on top of counting that work
+   * in full would refuse work that fits.
+   */
+  const DAY = 3_500;
+  const MON_1745 = at('2026-09-14T17:45:00+07:00');
+  const MON_2200 = at('2026-09-14T22:00:00+07:00');
+  const TUE_1800 = at('2026-09-15T18:00:00+07:00');
+
+  for (const [label, nowMs] of [
+    ['17:45', MON_1745],
+    ['22:00', MON_2200],
+  ] as const) {
+    it(`claims only one of two 3,400-word jobs due tomorrow when seen at ${label}`, () => {
+      const { ledger } = freshLedger(DAY);
+      ledger.hold(
+        { objId: 'a', effortWords: 3_400, deadlineMs: TUE_1800, kind: 'translation' },
+        nowMs,
+      );
+
+      expect(
+        ledger.checkCapacity(
+          { objId: 'b', effortWords: 3_400, deadlineMs: TUE_1800, kind: 'translation' },
+          nowMs,
+        ),
+      ).toMatchObject({ fits: false, reason: 'ceiling_reached' });
+    });
+  }
+
+  it('does not pro-rate same-day work below one day’s ceiling', () => {
+    // 14:00, 3,000 held and due today, 400 more due today: the old rule claimed it (3,400
+    // of 3,500) and so does this one. Pro-rating alone would say four hours hold 1,555
+    // and refuse — while the 3,000 may well be half done.
+    const { ledger } = freshLedger(DAY);
+    const mon1400 = at('2026-09-14T14:00:00+07:00');
+    const mon1700 = at('2026-09-14T17:00:00+07:00');
+    ledger.hold(
+      { objId: 'held', effortWords: 3_000, deadlineMs: mon1700, kind: 'translation' },
+      at('2026-09-14T09:00:00+07:00'),
+    );
+
+    expect(
+      ledger.checkCapacity(
+        { objId: 'new', effortWords: 400, deadlineMs: mon1700, kind: 'translation' },
+        mon1400,
+      ).fits,
+    ).toBe(true);
+  });
+
+  it('still gives a multi-day window its full days when judged at the start of one', () => {
+    // Case E at Monday 09:00 is unchanged: three whole days are left.
+    const { ledger } = freshLedger(DAY);
+
+    expect(
+      ledger.checkCapacity(
+        {
+          objId: 'e',
+          effortWords: 10_500,
+          deadlineMs: at('2026-09-16T18:00:00+07:00'),
+          kind: 'translation',
+        },
+        at('2026-09-14T09:00:00+07:00'),
+      ).fits,
+    ).toBe(true);
+  });
+
+  it('shrinks the same window as the day runs out', () => {
+    // The same 10,500 at Monday 13:30 has 4.5 + 9 + 9 = 22.5 working hours left: 8,750.
+    const { ledger } = freshLedger(DAY);
+
+    expect(
+      ledger.checkCapacity(
+        {
+          objId: 'e',
+          effortWords: 10_500,
+          deadlineMs: at('2026-09-16T18:00:00+07:00'),
+          kind: 'translation',
+        },
+        at('2026-09-14T13:30:00+07:00'),
+      ),
+    ).toMatchObject({ fits: false, reason: 'exceeds_daily_ceiling_entirely' });
   });
 });

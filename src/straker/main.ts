@@ -472,6 +472,7 @@ export function assembleStrakerBot(
     store,
     ledger: new StrakerLedger(store, ceilings, {
       hoursStartMin: cfg.hoursStartMin,
+      hoursEndMin: cfg.hoursEndMin,
       workdays: cfg.workdays,
     }),
     outbox,
@@ -488,6 +489,7 @@ export function assembleStrakerBot(
     store,
     ledger: new StrakerLedger(store, ceilings, {
       hoursStartMin: cfg.hoursStartMin,
+      hoursEndMin: cfg.hoursEndMin,
       workdays: cfg.workdays,
     }),
     outbox,

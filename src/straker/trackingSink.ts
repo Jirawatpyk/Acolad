@@ -181,8 +181,9 @@ const SKIP_REASON_TEXT = {
   outside_schedule: 'outside working hours',
   deadline_on_non_working_day: 'the deadline falls on a weekend or a holiday',
   deadline_unreachable: 'not enough working time before the deadline',
-  ceiling_reached: 'the day’s word ceiling is already committed',
-  exceeds_daily_ceiling_entirely: 'larger on its own than a whole day’s ceiling — needs a human',
+  ceiling_reached: 'the work already due by then fills the working time before it',
+  exceeds_daily_ceiling_entirely:
+    'larger than all the working time before its deadline can hold — needs a human',
   holiday_calendar_uncurated: 'the deadline’s year has no curated holiday calendar',
   effort_unknown: 'the offer arrived without a word count',
   deadline_unknown: 'the offer arrived without a deadline',
