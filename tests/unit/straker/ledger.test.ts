@@ -1011,3 +1011,89 @@ describe('a window counts the working time that is left, not the days it touches
     ).toMatchObject({ fits: false, reason: 'exceeds_daily_ceiling_entirely' });
   });
 });
+
+describe('one rate: a working day holds no more than the throughput gets through in it', () => {
+  /**
+   * The gate measures each offer at the configured throughput; the window measured the day at
+   * ceiling ÷ working hours. Those agree only while the throughput is left blank and derived
+   * from the ceiling. Pin it lower — say 200 words an hour, because that is what the team
+   * really does — and three 1,700-word jobs due tomorrow each pass the gate (8.5 h of 18) while
+   * the window, still believing in 3,500 a day, admits all 5,100 words into 3,600 words of
+   * real time. So a working day now holds the smaller of the ceiling and the throughput over a
+   * working day, and the two checks share one rate. With the throughput derived, as it is
+   * live, that smaller figure IS the ceiling and nothing changes.
+   */
+  const MON_0900 = at('2026-09-14T09:00:00+07:00');
+  const TUE_1800 = at('2026-09-15T18:00:00+07:00');
+
+  function ledgerWith(
+    ceiling: number,
+    ratesPerHour: Partial<Record<'translation' | 'monolingual', number>>,
+  ): StrakerLedger {
+    const dir = mkdtempSync(join(tmpdir(), 'straker-ledger-'));
+    dirs.push(dir);
+    const opened = openStrakerDatabase(dir, NOW_MS);
+    openDbs.push(opened.db);
+    return new StrakerLedger(
+      new StrakerStore(opened.db),
+      { translation: ceiling, monolingual: ceiling },
+      CALENDAR,
+      undefined,
+      ratesPerHour,
+    );
+  }
+
+  const job = (objId: string, kind: 'translation' | 'monolingual' = 'translation') => ({
+    objId,
+    effortWords: 1_700,
+    deadlineMs: TUE_1800,
+    kind,
+  });
+
+  it('refuses the third 1,700-word job when the throughput is pinned at 200 an hour', () => {
+    const ledger = ledgerWith(3_500, { translation: 200 });
+    ledger.hold(job('a'), MON_0900);
+    ledger.hold(job('b'), MON_0900);
+
+    // Two working days at 200 an hour hold 3,600: 3,400 is in, 5,100 is not.
+    expect(ledger.checkCapacity(job('c'), MON_0900)).toMatchObject({
+      fits: false,
+      reason: 'ceiling_reached',
+    });
+  });
+
+  it('changes nothing when the throughput is the one derived from the ceiling', () => {
+    // 3,500 ÷ 9 — what config.ts derives when the throughput is left blank, which is live.
+    const pinned = ledgerWith(3_500, { translation: 3_500 / 9 });
+    const unpinned = ledgerWith(3_500, {});
+    for (const ledger of [pinned, unpinned]) {
+      ledger.hold(job('a'), MON_0900);
+      ledger.hold(job('b'), MON_0900);
+    }
+
+    expect(pinned.checkCapacity(job('c'), MON_0900)).toEqual(
+      unpinned.checkCapacity(job('c'), MON_0900),
+    );
+    expect(pinned.checkCapacity(job('c'), MON_0900).fits).toBe(true);
+  });
+
+  it('keeps the ceiling in charge when the throughput is pinned higher than it', () => {
+    // 1,000 an hour gets through 9,000 a day; the owner's 3,500 still binds.
+    const ledger = ledgerWith(3_500, { translation: 1_000 });
+    for (const id of ['a', 'b', 'c', 'd']) ledger.hold(job(id), MON_0900); // 6,800 of 7,000
+
+    expect(ledger.checkCapacity(job('e'), MON_0900)).toMatchObject({ fits: false });
+  });
+
+  it('applies a pinned rate to its own kind of work only', () => {
+    const ledger = ledgerWith(3_500, { translation: 200 });
+    for (const id of ['a', 'b']) ledger.hold(job(id, 'monolingual'), MON_0900);
+
+    expect(ledger.checkCapacity(job('c', 'monolingual'), MON_0900).fits).toBe(true);
+  });
+
+  it('refuses a rate that is not a positive number rather than reading it as unlimited', () => {
+    expect(() => ledgerWith(3_500, { translation: 0 })).toThrow(/rate|throughput/i);
+    expect(() => ledgerWith(3_500, { monolingual: -5 })).toThrow(/rate|throughput/i);
+  });
+});
