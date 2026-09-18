@@ -764,11 +764,16 @@ export function createHttpClient(options: HttpClientOptions): StrakerPacedHttpCl
   }
 
   const getInit: RequestInit = { method: 'GET' };
-  const postInit = (body: unknown): RequestInit => ({
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  // `undefined` means "no body": the claim is sent exactly as the portal's web app sends it —
+  // no payload and no JSON content type (2026-09-18). Every other POST carries its JSON.
+  const postInit = (body: unknown): RequestInit =>
+    body === undefined
+      ? { method: 'POST' }
+      : {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        };
 
   return {
     // The class each door carries — see the table in the module docstring. `getJson` is the
