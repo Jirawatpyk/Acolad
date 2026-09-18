@@ -4,6 +4,22 @@
 **Feature area:** auto-accept gating (`src/detection/`, `src/state/`, new `src/schedule/`, `src/runtime/xtmPollCycle.ts`, `src/config/`, `src/reporting/`)
 **Builds on:** the live 002 auto-accept pipeline (detect → decide → accept → record) and the auto-yield precedent (config flag + injected clock + meta accessors).
 
+> **Amended 2026-09-18 — the shared scheduling standard (both bots, and any bot after them).**
+> Two rules below no longer hold; the rest of this document does.
+>
+> - **§1 item 2 / §2.1 step 5 are retired.** A deadline on a weekend or Thai holiday is *not*
+>   a refusal by itself. It is judged like any other deadline: the work must fit in the working
+>   time before it, to which a day off adds nothing (item 1 still holds). Two 43-word Straker
+>   offers due Saturday 12:59 were refused at 02:42 on a Friday with nine working hours left.
+> - **Capacity is no longer judged per deadline day alone.** Work is still keyed to its effective
+>   deadline day, but for every deadline day *d* from the group's earliest onward, everything due
+>   on or before *d* must fit what the working time left through *d* can hold — the day capacity
+>   pro-rated over those working minutes, never less than one day (earliest-deadline-first). The
+>   day capacity is the cap, or `throughput × working hours` if that is less. Implemented once in
+>   `src/schedule/windowCapacity.ts`; `acceptCapacity.ts` (`decideGroupCapacity`) was deleted.
+>   The bulk-group all-or-nothing rule (§ below) is unchanged — the group's members are weighed
+>   together.
+
 ---
 
 ## 1. Problem & Goal

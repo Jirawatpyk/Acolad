@@ -22,10 +22,10 @@
  *    wrong number, which is the failure mode this whole view exists to prevent.
  * 3. Otherwise the total is shown — per deadline day as well as in the headline, because
  *    work is keyed to its **effective deadline day** and a lifetime total cannot answer
- *    "is the crew over-committed on Thursday?". Note the two ceilings are no longer spent
- *    the same way: XTM judges each deadline day alone, while Straker (since 2026-09-18)
- *    lets a deadline use the working time before it — so a single Straker day here can
- *    read over its per-day ceiling without anything being wrong.
+ *    "is the crew over-committed on Thursday?". Both bots spend their ceilings by the
+ *    shared scheduling standard (`schedule/windowCapacity`, 2026-09-18): a deadline has
+ *    the working time before it, so a single day here can read over its per-day ceiling
+ *    without anything being wrong — the work due that day was spread over the days before.
  *
  * ## Structure: a pure combiner over two already-read portal readings
  *

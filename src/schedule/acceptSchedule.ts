@@ -1,6 +1,6 @@
-import { bangkokCalendar, bangkokYear } from './bangkokCalendar.js';
+import { bangkokYear } from './bangkokCalendar.js';
 import { WORDS_UNIT, type EffortUnit } from './effort.js';
-import { isNonWorkingDay, workingMinutesBetween, type WorkCalendar } from './workingHours.js';
+import { workingMinutesBetween, type WorkCalendar } from './workingHours.js';
 
 export interface AcceptScheduleInput {
   enabled: boolean;
@@ -15,14 +15,6 @@ export interface AcceptScheduleInput {
    *  Defaults to WORDS_UNIT (words mode) when omitted so all existing callers
    *  continue to emit the same byte-for-byte strings they do today. */
   unit?: Pick<EffortUnit, 'adj'>;
-  /**
-   * Let a deadline that falls on a weekend or holiday through to the feasibility check
-   * instead of refusing it outright; the feasibility check still counts only working
-   * minutes before it. Off by default, so every caller that does not pass it — the XTM
-   * bot — behaves byte-for-byte as before. Why the one caller that sets it does so is
-   * recorded at that call site, `straker/claimDecision.ts`.
-   */
-  allowNonWorkingDeadline?: boolean;
 }
 
 export type AcceptScheduleVerdict = { allow: true } | { allow: false; reason: string };
@@ -53,16 +45,13 @@ export function evaluateAcceptSchedule(i: AcceptScheduleInput): AcceptScheduleVe
     };
   }
 
-  const dl = bangkokCalendar(i.dueAtMs);
-  if (
-    i.allowNonWorkingDeadline !== true &&
-    isNonWorkingDay(dl.date, dl.weekday, i.calendar.workdays, i.calendar.holidays)
-  ) {
-    const why = i.calendar.holidays.has(dl.date)
-      ? `holiday: ${i.calendar.holidays.get(dl.date)}`
-      : 'weekend';
-    return { allow: false, reason: `deadline on a non-working day (${why})` };
-  }
+  // A deadline on a weekend or holiday is NOT a refusal by itself — the shared scheduling
+  // standard for every bot since 2026-09-18. A day off is where the working time runs out,
+  // and `workingMinutesBetween` below already counts only working minutes before the
+  // deadline, so a Saturday deadline gets exactly Friday's remaining hours and no more.
+  // Work that fits them is allowed; work that does not is refused for the real reason, time.
+  // (Two 43-word offers seen at 02:42 on a Friday, due Saturday 12:59, were once refused
+  // outright with nine working hours still left that day.)
 
   if (i.dueAtMs <= i.nowMs) return { allow: false, reason: 'deadline already passed' };
 

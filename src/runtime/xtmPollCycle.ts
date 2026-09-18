@@ -9,7 +9,11 @@ import { Outbox, createOutbox } from '../state/outbox.js';
 import { raiseAlert, resolveAlert } from '../reporting/systemAlerts.js';
 import { hasMaterialSheetChange } from '../reporting/sheetSync.js';
 import { evaluateAcceptSchedule, type AcceptScheduleVerdict } from '../schedule/acceptSchedule.js';
-import { decideGroupCapacity, type CapacityMember } from '../schedule/acceptCapacity.js';
+import {
+  dayCapacityFor,
+  decideWindowCapacity,
+  type WindowAddition,
+} from '../schedule/windowCapacity.js';
 import {
   resolveHolidaysForSpan,
   getThaiHolidays,
@@ -224,11 +228,10 @@ export class XtmPollCycle {
     // already counts it that way). Built once from cfg + the curated holidays spanning the
     // current + next Bangkok year (the reach of any near-future deadline + its walk-back). Used
     // for BOTH the held seed and the per-member bucket key so they bucket identically.
-    const effDayOf = makeEffectiveDayOf(
-      this.cfg.hoursStartMin,
-      this.cfg.workdays,
-      holidaysForEffectiveDay(detectedMs),
-    );
+    // The same holidays key the effective days AND bound the capacity window below, so the
+    // two cannot disagree about which days are working days.
+    const holidaysNow = holidaysForEffectiveDay(detectedMs);
+    const effDayOf = makeEffectiveDayOf(this.cfg.hoursStartMin, this.cfg.workdays, holidaysNow);
     // Schedule-gate state. Capacity is bucketed by EFFECTIVE deadline day (held-derived), not
     // accept day: seed the per-day buckets ONCE from the held snapshot (lifecycle 'accepted')
     // BEFORE this cycle records any new 'accepted' row — otherwise a job accepted this cycle
@@ -417,9 +420,12 @@ export class XtmPollCycle {
           if (blockReason === null && !verdict.allow)
             blockReason = `'${s.fileName}': ${verdict.reason}`;
         }
-        // Capacity decision (group-level, per DEADLINE day) — gated behind feasibility so an
-        // infeasible job reads "can't finish", never "cap reached" (§3). Buckets are the held
-        // words due on each member's deadline day (held-derived), advanced optimistically per day.
+        // Capacity decision (group-level) — gated behind feasibility so an infeasible job reads
+        // "can't finish", never "cap reached" (§3). The shared scheduling standard since
+        // 2026-09-18 (`schedule/windowCapacity`, the same rule the Straker bot uses): work is
+        // still keyed to its effective deadline day, but a deadline has the working time before
+        // it — everything due by each day must fit the working time left through that day.
+        // Buckets are the held effort per deadline day, advanced optimistically per day.
         let capExhaustedDay: string | undefined;
         if (blockReason === null && cap > 0) {
           // I2 (fail loud, never guess): feasibility ran first and rejects a null deadline, so
@@ -427,7 +433,7 @@ export class XtmPollCycle {
           // not the type — so if a deadline IS null at this point, do NOT `!`-assert it (a null
           // would become a 'null' bucket key, silently corrupting the per-day cap → over-accept on
           // the irreversible bulk path). Instead block the WHOLE group with a loud internal reason.
-          const capMembers: CapacityMember[] = [];
+          const capMembers: WindowAddition[] = [];
           let nullDeadlineMember: XtmJobState | undefined;
           for (const s of members) {
             const day = effDayOf(s.dueDate); // EFFECTIVE day = the working day the work lands on
@@ -435,12 +441,27 @@ export class XtmPollCycle {
               nullDeadlineMember = s;
               break;
             }
-            capMembers.push({ effort: eff(s) ?? 0, deadlineDate: day });
+            capMembers.push({ effort: eff(s) ?? 0, deadlineDay: day });
           }
           if (nullDeadlineMember) {
             blockReason = `'${nullDeadlineMember.fileName}': internal: held member has no deadline at capacity stage`;
           } else {
-            const v = decideGroupCapacity(capMembers, bucketFor, cap, this.cfg.unit);
+            const v = decideWindowCapacity({
+              nowMs: detectedMs,
+              dueByDay: dueBuckets,
+              additions: capMembers,
+              // The cap, or what the throughput gets through in a working day if that is less
+              // — one rate for feasibility and capacity alike. Equal to the cap when the
+              // throughput is derived from it, as it is live.
+              dayCapacity: dayCapacityFor(cap, this.cfg.throughputPerHour, this.cfg),
+              calendar: {
+                workdays: this.cfg.workdays,
+                hoursStartMin: this.cfg.hoursStartMin,
+                hoursEndMin: this.cfg.hoursEndMin,
+                holidays: holidaysNow,
+              },
+              unit: this.cfg.unit,
+            });
             if (!v.accept) {
               // F6: a capacity block is DAY-level, not file-level — `v.reason` already names the
               // overflowing day + numbers. Do NOT prefix an arbitrary `members[0]` file (it is not
@@ -900,7 +921,7 @@ export class XtmPollCycle {
   /** Compose the schedule (feasibility-only) verdict for one would-accept job (C4 — the
    *  single gate used by both passes). Resolves the curated Thai-holiday map for every
    *  Bangkok year the now→deadline span touches and feeds the pure `evaluateAcceptSchedule`.
-   *  Capacity is decided separately by `decideGroupCapacity` (per deadline day) in the cycle. */
+   *  Capacity is decided separately by `decideWindowCapacity` in the cycle. */
   private scheduleVerdict(s: XtmJobState, nowMs: number): AcceptScheduleVerdict {
     const dueAtMs = deadlineMsOf(s.dueDate); // canonical parse (F8) — same one the bucket/report use
     // The per-job fail-closed still uses the SPAN's curation (a far deadline into an

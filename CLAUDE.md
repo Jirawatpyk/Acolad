@@ -143,7 +143,7 @@ main/once → bootstrap.createXtmBot() ประกอบทุกชิ้น (
 | โฟลเดอร์ | หน้าที่ | ไฟล์สำคัญ |
 |---|---|---|
 | `detection/` | logic บริสุทธิ์ (TDD + coverage gate) | `diff.ts` (engine `diffGeneric`), `xtmDiff.ts`, `eligibility.ts`, `acceptDecision.ts`, `jobKey.ts`, `types.ts` |
-| `schedule/` | accept-scheduling gate (pure, TDD + coverage gate) | `acceptSchedule.ts` (`evaluateAcceptSchedule` — the gate), `workingHours.ts` (`workingMinutesBetween`), `bangkokCalendar.ts` (canonical Bangkok time — อย่า duplicate +7h logic), `parseSchedule.ts` (`resolveThroughput`), `thaiHolidays.ts` + `thaiHolidaysData.ts` (team-curated holidays) |
+| `schedule/` | **มาตรฐานวันเวลารับงานกลาง — ใช้ร่วมทุกบอท** (pure, TDD + coverage gate) | `acceptSchedule.ts` (`evaluateAcceptSchedule` — ทำทันไหม), `windowCapacity.ts` (`decideWindowCapacity` — เพดานแบบ window; Straker `ledger.ts` + XTM cycle เรียกตัวนี้), `workingHours.ts` (`workingMinutesBetween`), `bangkokCalendar.ts` (canonical Bangkok time — อย่า duplicate +7h logic), `parseSchedule.ts` (`resolveThroughput`), `thaiHolidays.ts` + `thaiHolidaysData.ts` (team-curated holidays) |
 | `state/` | SQLite (TDD + coverage gate) | `db.ts`, `xtmJobStore.ts` (job state), `jobStore.ts` (accept state machine), `outbox.ts`, `meta.ts` (baseline/cursor) |
 | `portal/` | Playwright I/O เฉพาะ XTM | `xtmClient.ts` (impl ของ interface), `xtmInbox.ts` (อ่าน grid ใน iframe), `xtmLogin.ts`, `xtmAccept.ts`, `xtmAcceptRecon.ts`, `selectors.ts` (รวมศูนย์), `evidence.ts`, `htmlSanitize.ts`, `errors.ts` |
 | `reporting/` | ส่งออก (TDD + coverage gate) | `dispatcher.ts` (channel→sender + payload-shape routing), `googleChat.ts` (`ChatPayload` union), `chatCard.ts`/`cardText.ts`/`dateFormat.ts` (cardsV2 builder + helpers), `sheets.ts` (Sink + Sender — scrape **File WWC** [Weighted Word Count] จาก Active grid ลง PM_Tracking Sheet; Sheet **v3**: 14 คอลัมน์, File WWC ที่คอลัมน์ **I**, `_job_key` ที่ **N** — ย้ายจาก v2 13 คอลัมน์/`_job_key` ที่ M), `xtmNotifier.ts` (EN card builders), `dailyReport.ts` (รายงาน 09:00), `systemAlerts.ts` (EN alert cards) |
@@ -239,9 +239,9 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
 ## accept-scheduling gate (live — PR #7/#8; capacity re-keyed to deadline-day + held-derived workload report — PR #14)
 
 `src/schedule/` กรองการ **"กดรับ"** เพิ่มอีกชั้นหลัง `decideAccept()` (detect+notify ยัง
-24/7 ไม่แตะ). กดรับงานมาเลย์ก็ต่อเมื่อครบทุกข้อ: ไม่เกิน **capacity** (≤`ACCEPT_MAX_WORDS_PER_DAY` คำ **due/วันครบกำหนด** — PR #14, ดูด้านล่าง) · รู้ DL ·
-รู้คำ · **DL ไม่ตรงวันหยุด/เสาร์-อาทิตย์** · **ทำทันในเวลางาน** (`ชม.ทำงานถึง DL ×
-throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejected'` → Sheet status **`Rejected`** +
+24/7 ไม่แตะ). กดรับงานมาเลย์ก็ต่อเมื่อครบทุกข้อ: ไม่เกิน **capacity** (window — ดูด้านล่าง) · รู้ DL ·
+รู้คำ · **ทำทันในเวลางาน** (`ชม.ทำงานถึง DL × throughput ≥ คำ`). **DL ตรงเสาร์-อาทิตย์/วันหยุด
+ไม่ใช่เหตุผลปฏิเสธแล้ว** (มาตรฐานกลาง 2026-09-18) — วันหยุดแค่ไม่มีชั่วโมงทำงาน. งานที่บล็อก → lifecycle `'rejected'` → Sheet status **`Rejected`** +
 เหตุผลใน Note + Chat; `accept_status` คง `'none'` (robustness pass ลองใหม่ได้).
 
 - **gate ตัดสินระดับ bulk-group all-or-nothing** — `bulkGroupKey` = **language-only**
@@ -259,13 +259,15 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
   (ไม่อยู่ใน `CURATED_YEARS`) → accept **fail-closed** (Reject + `holiday_calendar_stale`),
   report **fail-open** (ส่งปกติ). **2026 แก้ in-lieu + 2027 เพิ่ม+curated แล้ว (PR #11)** — เหลือ
   reconfirm วันจันทรคติ 2027 (มาฆ/วิสาข/อาสาฬห/เข้าพรรษา) กับประกาศราชกิจจาฯ ทางการเมื่อออก
-- **capacity = held-derived per deadline day (PR #14; bucket by effective day PR #19):** cap =
-  ≤`ACCEPT_MAX_WORDS_PER_DAY` คำที่ **effective deadline day ตรงวันเดียวกัน** (วันทำงานที่งานไปตกจริง —
+- **capacity = held-derived, keyed to effective deadline day (PR #14/#19), ตัดสินแบบ window
+  (มาตรฐานกลาง 2026-09-18):** งานถูกผูกกับ **effective deadline day** (วันทำงานที่งานไปตกจริง —
   DL เวลาก่อน 09:00 ถูกชาร์จเข้า cap ของ**วันทำงานก่อนหน้า** ไม่ใช่วันที่ DL ดิบ; ดู `schedule/deadlineDay.ts`)
   อ่านจาก held list (`XtmJobStore.effortDueByDeadline()`) **ไม่ใช่วันกดรับ**
-  → **งาน finish คืนโควต้า** (source เดียว = held; ไม่มี meta word-counter แล้ว). ตัดสินด้วย pure
-  helper `schedule/acceptCapacity.ts` (`decideGroupCapacity`, all-or-nothing per bulk-group **ครอบทั้ง
-  feasibility + capacity** กัน owned-but-Rejected); seed จาก held ครั้งเดียว/รอบ **ก่อน** record
+  → **งาน finish คืนโควต้า** (source เดียว = held; ไม่มี meta word-counter แล้ว). ทุกวัน DL *d* ตั้งแต่วัน
+  แรกของกลุ่ม: งานที่ due ≤ *d* ต้อง ≤ `วันละ × นาทีทำงานที่เหลือถึงสิ้น d ÷ 540` (ขั้นต่ำ 1 วัน);
+  `วันละ` = cap หรือ `throughput × ชม.ทำงาน` ถ้าน้อยกว่า. งาน overdue นับเป็นวันนี้. ตัดสินด้วย pure
+  helper `schedule/windowCapacity.ts` (`decideWindowCapacity` — **ตัวเดียวกับ Straker**, all-or-nothing
+  per bulk-group **ครอบทั้ง feasibility + capacity** กัน owned-but-Rejected); seed จาก held ครั้งเดียว/รอบ **ก่อน** record
   (memoize, advance per-DL-day). audit: `XtmCycleSummary.acceptedDueDays` log `resultingBucketEffort` ตอน accept
 - daily report 09:00 (`dailyReport.ts`) ส่ง **เฉพาะวันทำการ** (PR #8) **และเฉพาะเมื่อมี
   อะไรจะรายงาน** (PR #32) — ไม่มีงานถือ + อีกพอร์ทัลก็ว่าง = **ไม่ส่ง** แล้ว log
@@ -354,8 +356,8 @@ throughput ≥ คำ`). งานที่บล็อก → lifecycle `'rejec
    ทำไม่ทันในเวลาทำงานก่อน DL · อ่าน effort/deadline ไม่ได้ (อันนี้ alert ด้วย — FR-023a).
    **"DL ตรงวันหยุด" ไม่ใช่เหตุผลปฏิเสธของ Straker แล้ว** (2026-09-18) — งานที่ DL ตก
    เสาร์-อาทิตย์/วันหยุดจะถูกวัดว่าทำทันในชั่วโมงทำงานก่อน DL ไหม (วันหยุดไม่มีชั่วโมง
-   ทำงาน = ต้องเสร็จภายในวันทำงานก่อนหน้า). แถวเก่าก่อนวันนั้นยังมีเหตุผลนี้อยู่. **XTM
-   ยังใช้กฎเดิม** — gate ที่ใช้ร่วมกันมี flag `allowNonWorkingDeadline` ที่ Straker เท่านั้นเปิด
+   ทำงาน = ต้องเสร็จภายในวันทำงานก่อนหน้า). แถวเก่าก่อนวันนั้นยังมีเหตุผลนี้อยู่. **XTM ใช้
+   มาตรฐานเดียวกัน** (`schedule/` — ไม่มี flag; บอทใหม่ได้กฎนี้เป็นค่าปกติ)
 2. **มีแถว sighting แต่ไม่มีแถว skip** → บอท*เห็น*งาน แต่ **parse ไม่ผ่าน** จึงไม่เคย
    ตัดสินใจเรื่องมันเลย (เคสนี้เกิดครั้งแรก 2026-09-17). จะมี alert
    `offer_unreadable` หนึ่งใบต่อหนึ่ง offer id และ log `module:offerParse
