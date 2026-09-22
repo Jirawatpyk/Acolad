@@ -1669,3 +1669,59 @@ describe('createHttpClient — SC-003 over a sustained run (V15)', () => {
     expect(Math.min(...remainders)).toBeLessThan(60);
   });
 });
+
+describe('createHttpClient — a POST is never followed through a redirect (2026-09-22)', () => {
+  // Followed, fetch turns a 301/302/303 on a POST into a GET of the new location — for the
+  // claim and the sign-in alike, that means an HTML login page read back as the answer to an
+  // irreversible action. With `redirect: 'manual'` the 3xx itself comes back and is thrown.
+
+  it('asks fetch not to follow redirects on a POST, and leaves GETs alone', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(() => Promise.resolve(jsonResponse({})));
+    const client = createHttpClient({ baseUrl: 'https://portal.test', fetchImpl });
+
+    await client.postJson('/api/vendor/auth/login', { login_id: 'x' });
+    await client.essential.postJson('/api/vendors/v/job-offers/o/accept', undefined);
+    await client.getJson('/api/vendor/auth/me');
+
+    expect(fetchImpl.mock.calls[0]?.[1]?.redirect).toBe('manual');
+    expect(fetchImpl.mock.calls[1]?.[1]?.redirect).toBe('manual');
+    expect(fetchImpl.mock.calls[2]?.[1]?.redirect).toBeUndefined();
+  });
+
+  it('throws a determinate StrakerHttpError for a real 302, and the portal sees one request', async () => {
+    const { createServer } = await import('node:http');
+    const seen: string[] = [];
+    const server = createServer((req, res) => {
+      seen.push(`${req.method} ${req.url}`);
+      if (req.method === 'POST') {
+        res.writeHead(302, { location: '/login' });
+        res.end();
+      } else {
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.end('<html>login</html>');
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      const port = typeof address === 'object' && address !== null ? address.port : 0;
+      const client = createHttpClient({ baseUrl: `http://127.0.0.1:${port}` });
+
+      const failure = await client.postJson('/api/vendors/v/job-offers/o/accept', undefined).then(
+        () => null,
+        (err: unknown) => err,
+      );
+
+      expect(failure).toBeInstanceOf(StrakerHttpError);
+      expect((failure as StrakerHttpError).status).toBe(302);
+      expect(isIndeterminateStatus(302)).toBe(false); // an answer, not a failure to answer
+      expect(isCredentialRefusal(failure)).toBe(false); // says nothing about the password
+      expect(isSessionExpired(failure)).toBe(false);
+      expect(seen).toEqual(['POST /api/vendors/v/job-offers/o/accept']);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});

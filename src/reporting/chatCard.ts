@@ -12,6 +12,8 @@
  *   or by the size guard. The marker is omitted when no rows are hidden.
  */
 
+import { escapeCardText } from './cardText.js';
+
 const MAX_ROWS = 20;
 const MAX_BYTES = 30_000; // safety margin under Google Chat's 32 KB hard cap
 
@@ -22,6 +24,19 @@ const MAX_BYTES = 30_000; // safety margin under Google Chat's 32 KB hard cap
 /** Truncate a string to `max` characters, appending `…` if cut. */
 export function truncate(s: string, max = 120): string {
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+/**
+ * {@link truncate} for text already passed through `escapeCardText`: a cut that lands inside
+ * an entity (`&am|p;`) backs off to before its `&`, so Chat never shows a half entity. Every
+ * `&` in escaped text starts an entity, which is what makes the backing off exact.
+ */
+function truncateEscaped(s: string, max = 120): string {
+  if (s.length <= max) return s;
+  let cut = s.slice(0, max - 1);
+  const amp = cut.lastIndexOf('&');
+  if (amp !== -1 && !cut.includes(';', amp)) cut = cut.slice(0, amp);
+  return cut + '…';
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +127,8 @@ export function buildCard(o: BuildCardOptions): { cardsV2: unknown[] } {
   const makeRowWidget = (row: CardRow): DecoratedTextWidget => ({
     decoratedText: {
       topLabel: truncate(row.emoji ? `${row.emoji} ${row.label}` : row.label, 100),
-      text: truncate((row.value ?? '—') || '—'),
+      // Escaped, then truncated: the 120-character budget is what Chat receives.
+      text: truncateEscaped(escapeCardText((row.value ?? '—') || '—')),
     },
   });
 

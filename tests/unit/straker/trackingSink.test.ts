@@ -88,10 +88,21 @@ interface FakeSheet {
   reshapeTo(header: readonly string[]): void;
 }
 
-function fakeSheet(options: { header?: readonly string[]; failWrites?: string } = {}): FakeSheet {
+function fakeSheet(
+  options: {
+    header?: readonly string[];
+    failWrites?: string;
+    /**
+     * Runs after each key-column scan, with the live rows — a human (or the other bot's
+     * writer) editing the sheet between our scan and our write.
+     */
+    afterKeyScan?: (rows: string[][], scan: number) => void;
+  } = {},
+): FakeSheet {
   let header: string[] = [...(options.header ?? [])];
   const rows: string[][] = [];
   const writes: { op: 'header' | 'append' | 'write'; rowNum: number | null }[] = [];
+  let scans = 0;
   const refuse = (): never => {
     throw new Error(options.failWrites ?? 'unreachable');
   };
@@ -104,10 +115,17 @@ function fakeSheet(options: { header?: readonly string[]; failWrites?: string } 
         writes.push({ op: 'header', rowNum: null });
       },
       // Index 0 is the header cell, as the live Sheets range returns it.
-      getKeyColumn: async () => [
-        header[ROW_KEY_COLUMN] ?? '',
-        ...rows.map((row) => row[ROW_KEY_COLUMN] ?? ''),
-      ],
+      getKeyColumn: async () => {
+        const column = [
+          header[ROW_KEY_COLUMN] ?? '',
+          ...rows.map((row) => row[ROW_KEY_COLUMN] ?? ''),
+        ];
+        options.afterKeyScan?.(rows, scans++);
+        return column;
+      },
+      // Sheet row 1 is the header; data row n lives at rows[n - 2].
+      getKeyAt: async (rowNum) =>
+        rowNum === 1 ? (header[ROW_KEY_COLUMN] ?? '') : (rows[rowNum - 2]?.[ROW_KEY_COLUMN] ?? ''),
       appendRow: async (values) => {
         if (options.failWrites !== undefined) refuse();
         rows.push([...values]);
@@ -351,6 +369,77 @@ describe('rows are keyed on identity together with event type (FR-014, constitut
     await sink(viaQueue({ ...WON, objId: '2a956065-dffa-420a-8893-6cd54bcce3d6' }));
 
     expect(sheet.rows).toHaveLength(2);
+  });
+});
+
+describe('the upsert re-reads the key before overwriting a row (2026-09-22)', () => {
+  // Sheets has no compare-and-set. Between scanning the key column and writing row n, a
+  // human can insert or sort rows — and the write then lands on SOMEBODY ELSE'S row. The
+  // re-read narrows that window to the gap between two requests; it cannot close it.
+  const OTHER = { ...WON, objId: '2a956065-dffa-420a-8893-6cd54bcce3d6' };
+
+  it('re-scans and writes the row where the key now is when a row moved in between', async () => {
+    let moved = false;
+    const sheet = fakeSheet({
+      header: EXPECTED_HEADER,
+      afterKeyScan: (rows, scan) => {
+        // On the update's first scan only: someone inserts a blank row at the top.
+        if (scan === 2 && !moved) {
+          moved = true;
+          rows.unshift(new Array<string>(EXPECTED_HEADER.length).fill(''));
+        }
+      },
+    });
+    const sink = createTrackingSink(sheet.api);
+    await sink(viaQueue(WON)); // scan 0 → append, row 2
+    await sink(viaQueue(OTHER)); // scan 1 → append, row 3
+
+    const result = await sink(viaQueue({ ...WON, outcome: 'lost' })); // scan 2 moves, scan 3 finds
+
+    expect(result).toEqual({ ok: true });
+    // WON's row is now sheet row 3; the blank row and OTHER's row are untouched.
+    expect(sheet.writes.at(-1)).toEqual({ op: 'write', rowNum: 3 });
+    expect(sheet.rows[0]?.every((cell) => cell === '')).toBe(true);
+    expect(sheet.rows[1]?.[2]).toBe('Lost');
+    expect(sheet.rows[2]?.[ROW_KEY_COLUMN]).toBe(`${OTHER.objId}|claim`);
+    expect(sheet.rows[2]?.[2]).toBe('Won');
+  });
+
+  it('refuses to write — and lets the outbox retry — when the key keeps moving', async () => {
+    const sheet = fakeSheet({
+      header: EXPECTED_HEADER,
+      afterKeyScan: (rows, scan) => {
+        if (scan >= 1) rows.unshift(new Array<string>(EXPECTED_HEADER.length).fill(''));
+      },
+    });
+    const sink = createTrackingSink(sheet.api);
+    await sink(viaQueue(WON));
+    const writesBefore = sheet.writes.length;
+
+    const result = await sink(viaQueue({ ...WON, outcome: 'lost' }));
+
+    expect(result.ok).toBe(false);
+    expect(result.ok ? '' : result.reason).toMatch(/moved/);
+    expect(sheet.writes.length).toBe(writesBefore); // nothing overwritten
+    expect(sheet.rows.some((row) => row[2] === 'Lost')).toBe(false);
+  });
+
+  it('appends when the re-scan finds the row gone', async () => {
+    const sheet = fakeSheet({
+      header: EXPECTED_HEADER,
+      afterKeyScan: (rows, scan) => {
+        if (scan === 1) rows.splice(0, 1); // someone deleted it after our scan
+      },
+    });
+    const sink = createTrackingSink(sheet.api);
+    await sink(viaQueue(WON));
+
+    const result = await sink(viaQueue({ ...WON, outcome: 'lost' }));
+
+    expect(result).toEqual({ ok: true });
+    expect(sheet.writes.at(-1)).toEqual({ op: 'append', rowNum: null });
+    expect(sheet.rows).toHaveLength(1);
+    expect(sheet.rows[0]?.[2]).toBe('Lost');
   });
 });
 

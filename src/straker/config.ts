@@ -30,7 +30,11 @@ const portalShape = {
   // it with ~194 seconds to spare. A one-second rhythm would buy nine of those seconds and
   // cost ten times the request budget against an allowance the bot must never crowd
   // (SC-003). Revisit if a materially shorter lifetime is ever measured.
-  STRAKER_POLL_INTERVAL_MS: z.coerce.number().int().min(1_000).default(10_000),
+  //
+  // The floor IS the decided rhythm (2026-09-22). It used to be 1s, which let a typo'd
+  // `1000` run the bot at ten times the request rate the decision above priced in. Slower is
+  // allowed; faster needs the spec changed first, not an .env edit.
+  STRAKER_POLL_INTERVAL_MS: z.coerce.number().int().min(10_000).default(10_000),
 };
 
 const reconSchema = z.object({

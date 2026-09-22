@@ -606,8 +606,13 @@ describe('T047 the recovery reaches the tracking record (FR-014, FR-011a)', () =
       getHeader: async () => header,
       setHeader: async (values) => void (header = [...values]),
       getKeyColumn: async () => ['_row_key', ...rows.map((r) => r[r.length - 1] ?? '')],
+      // Sheet row 1 is the header, so data row n is rows[n - 2].
+      getKeyAt: async (rowNum) => {
+        const r = rows[rowNum - 2];
+        return r === undefined ? '' : (r[r.length - 1] ?? '');
+      },
       appendRow: async (values) => void rows.push([...values]),
-      writeRow: async (rowNum, values) => void (rows[rowNum - 1] = [...values]),
+      writeRow: async (rowNum, values) => void (rows[rowNum - 2] = [...values]),
     };
   }
 
@@ -2331,5 +2336,228 @@ describe('until a first pass succeeds, reconciliation retries every minute (2026
     shed = false;
     f.setNow(NOW_MS + 60_000);
     expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Log-only signals reach Chat, once per offer (follow-ups, 2026-09-22)
+// ---------------------------------------------------------------------------
+
+describe('held work kept on absence alerts once per offer, not only in the log', () => {
+  const alertsFor = (f: Fixture, condition: string): QueuedRow[] =>
+    delivered(f).filter((q) => q.channel === 'alerts' && q.payload['condition'] === condition);
+
+  it('raises held_work_unmatched once for keyed work that matches nothing, and keeps the per-pass warn', async () => {
+    const f = fixture();
+    adopted(f);
+    holdWonClaim(f, { heldSinceMs: NOW_MS - 2 * RECONCILE_INTERVAL_MS });
+
+    await f.reconciler.runIfDue();
+    f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    await f.reconciler.runIfDue();
+
+    const alerts = alertsFor(f, 'held_work_unmatched');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      eventId: 'held_work_unmatched:offer-1',
+      payload: {
+        kind: 'offer',
+        objId: 'offer-1',
+        effortWords: 100,
+        deadlineMs: DEADLINE_MS,
+        jobRef: 'aj-1',
+        service: 'translation',
+        title: IDENTITY.title,
+        occurredAtMs: NOW_MS,
+      },
+    });
+    expect(String(alerts[0]?.payload['detail'])).toContain(KEY);
+    expect(
+      f.logs.filter((l) => l.level === 'warn' && l.fields['outcome'] === 'held_work_unmatched'),
+    ).toHaveLength(2);
+    // And the alerts sender accepts what was queued: a condition it does not know would
+    // retry into `dead` instead of reaching anyone.
+    const posted: unknown[] = [];
+    const send = createStrakerAlertsSender({
+      send: async (card: unknown) => {
+        posted.push(card);
+        return 'ok';
+      },
+    } as never);
+    expect(await send(alerts[0]?.payload)).toEqual({ ok: true });
+    expect(JSON.stringify(posted[0])).toContain('⚠️');
+  });
+
+  it('raises held_work_absent_keyless once for keyless work absent from both lists', async () => {
+    const f = fixture();
+    adopted(f);
+    f.store.hold({
+      objId: 'job-2',
+      effortWords: 70,
+      kind: 'translation',
+      deadlineMs: DEADLINE_MS,
+      heldSinceMs: NOW_MS - 2 * RECONCILE_INTERVAL_MS,
+    });
+
+    await f.reconciler.runIfDue();
+    f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    await f.reconciler.runIfDue();
+
+    const alerts = alertsFor(f, 'held_work_absent_keyless');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      eventId: 'held_work_absent_keyless:job-2',
+      payload: { kind: 'offer', objId: 'job-2', effortWords: 70, deadlineMs: DEADLINE_MS },
+    });
+    expect(
+      f.logs.filter(
+        (l) => l.level === 'warn' && l.fields['outcome'] === 'held_work_absent_keyless',
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('a refused alert neither fails the pass nor skips the other held rows', async () => {
+    // releaseFinished runs outside any transaction, so a throw here would escape into the
+    // pass — and skip every held row after it.
+    const f = fixture({ enqueueThrowsFor: (id) => id === 'held_work_absent_keyless:job-a' });
+    adopted(f);
+    for (const objId of ['job-a', 'job-b']) {
+      f.store.hold({
+        objId,
+        effortWords: 70,
+        kind: 'translation',
+        deadlineMs: DEADLINE_MS,
+        heldSinceMs: NOW_MS - 2 * RECONCILE_INTERVAL_MS,
+      });
+    }
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true });
+    expect(alertsFor(f, 'held_work_absent_keyless').map((q) => q.eventId)).toEqual([
+      'held_work_absent_keyless:job-b',
+    ]);
+    expect(
+      f.logs.some(
+        (l) =>
+          l.level === 'error' && l.fields['action'] === 'alert' && l.fields['objId'] === 'job-a',
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('a purchase order adopted without a word count alerts once', () => {
+  const adoptAlerts = (f: Fixture): QueuedRow[] =>
+    delivered(f).filter((q) => q.payload['condition'] === 'adopted_without_effort');
+
+  it('alerts when no earlier claim gave the order a word count', async () => {
+    const f = fixture();
+    f.setPurchaseOrders([purchaseOrder('po-1')]);
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true, adopted: 1 });
+
+    const alerts = adoptAlerts(f);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      eventId: 'adopted_without_effort:po-1',
+      channel: 'alerts',
+      payload: { kind: 'offer', objId: 'po-1', deadlineMs: DEADLINE_MS, jobRef: 'aj-1' },
+    });
+    // The held row is still there: the alert rides beside the adoption, it does not replace it.
+    expect(f.store.heldWork().map((w) => [w.objId, w.effortWords])).toEqual([['po-1', 0]]);
+  });
+
+  it('alerts when the earlier claim recorded zero words', async () => {
+    const f = fixture();
+    f.store.recordEvent({
+      objId: 'old-0',
+      eventType: 'claim',
+      outcome: 'won',
+      effortWords: 0,
+      deadlineMs: DEADLINE_MS,
+      occurredAtMs: NOW_MS - 3_600_000,
+    });
+    f.setPurchaseOrders([purchaseOrder('po-1')]);
+
+    await f.reconciler.runIfDue();
+
+    expect(adoptAlerts(f).map((q) => q.eventId)).toEqual(['adopted_without_effort:po-1']);
+  });
+
+  it('stays silent when the adoption found a real word count', async () => {
+    const f = fixture();
+    f.store.recordEvent({
+      objId: 'old-1',
+      eventType: 'claim',
+      outcome: 'won',
+      effortWords: 20,
+      deadlineMs: DEADLINE_MS,
+      occurredAtMs: NOW_MS - 3_600_000,
+    });
+    f.setPurchaseOrders([purchaseOrder('po-1')]);
+
+    await f.reconciler.runIfDue();
+
+    expect(adoptAlerts(f)).toEqual([]);
+  });
+});
+
+describe('a transferred keyless win is not announced a second time as recovered', () => {
+  function holdKeylessWin(f: Fixture): void {
+    f.store.recordEvent({
+      objId: 'offer-k',
+      eventType: 'claim',
+      outcome: 'won',
+      effortWords: 100,
+      deadlineMs: DEADLINE_MS,
+      occurredAtMs: NOW_MS - 60_000,
+    });
+    f.store.hold({
+      objId: 'offer-k',
+      effortWords: 100,
+      kind: 'translation',
+      deadlineMs: DEADLINE_MS,
+      heldSinceMs: NOW_MS - 60_000,
+    });
+  }
+
+  it('records the recovery and moves the hold, but queues no card, alert or row for it', async () => {
+    const f = fixture();
+    adopted(f);
+    holdKeylessWin(f);
+    f.setAssigned([assignedWork('job-1', { identity: IDENTITY })]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, recovered: ['job-1'] });
+    expect(f.trace).toContain('recordEvent:job-1:recovery');
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['job-1']);
+    expect(f.queued.filter((q) => q.eventId.includes('job-1'))).toEqual([]);
+    expect(
+      f.logs.some(
+        (l) =>
+          l.level === 'info' &&
+          l.fields['module'] === 'reconcile' &&
+          l.fields['action'] === 'transfer' &&
+          l.fields['announced'] === false &&
+          l.fields['from'] === 'offer-k' &&
+          l.fields['to'] === 'job-1',
+      ),
+    ).toBe(true);
+  });
+
+  it('still announces a recovery that took nothing over', async () => {
+    const f = fixture();
+    adopted(f);
+    f.setAssigned([assignedWork('job-1', { identity: IDENTITY })]);
+
+    await f.reconciler.runIfDue();
+
+    const ids = f.queued
+      .filter((q) => q.eventId.includes('job-1'))
+      .map((q) => `${q.channel}:${q.eventId}`);
+    expect(ids).toContain('offers:recovery:job-1');
+    expect(ids).toContain('alerts:recovery:job-1');
+    expect(ids.some((id) => id.startsWith('tracking:'))).toBe(true);
   });
 });

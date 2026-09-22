@@ -609,13 +609,19 @@ export function assembleStrakerBot(
       reconciledOk: () => reconciledOk,
       dailyReport,
       outbox,
+      // Late-bound, so the method in force at call time is the one used.
+      checkpoint: () => store.checkpoint(),
       logger,
       now,
     }),
     store,
     outbox,
     quarantinedCopyPath: opened.recoveredFromCorruption ? opened.corruptCopyPath : null,
-    close: () => opened.db.close(),
+    close: () => {
+      // Best effort: a checkpoint that fails must not keep the handle open.
+      if (opened.db.open) runCheckpoint(() => store.checkpoint(), logger, 'close');
+      opened.db.close();
+    },
   };
 }
 
@@ -731,11 +737,15 @@ function withDelivery(deps: {
   readonly dailyReport: { runIfDue(nowMs: number): void };
   /** Read only, and only for the dead backlog — the dispatcher owns every write. */
   readonly outbox: Pick<StrakerOutbox, 'countByStatus'>;
+  /** `StrakerStore.checkpoint` — run at most once per {@link WAL_CHECKPOINT_INTERVAL_MS}. */
+  readonly checkpoint: () => unknown;
   readonly logger: Logger;
   readonly now: () => number;
 }): StrakerCycle {
   /** When this process first turned the loop — the start of the claim pause, if any. */
   let pausedSinceMs: number | null = null;
+  /** When the WAL was last checkpointed by this loop; null before the first turn. */
+  let checkpointedAtMs: number | null = null;
   return {
     async runOnce(): Promise<boolean> {
       // Until a pass has succeeded, reconciliation runs BEFORE the poll cycle (2026-09-22). A
@@ -783,6 +793,14 @@ function withDelivery(deps: {
         deadBacklog = deps.outbox.countByStatus('dead');
       });
 
+      // After the turn's writes, at most hourly. The attempt advances the clock even when it
+      // fails, so a locked database is retried in an hour rather than every ten seconds.
+      const nowMs = deps.now();
+      if (checkpointedAtMs === null || nowMs - checkpointedAtMs >= WAL_CHECKPOINT_INTERVAL_MS) {
+        checkpointedAtMs = nowMs;
+        runCheckpoint(deps.checkpoint, deps.logger, 'hourly');
+      }
+
       // A dead row is an outcome that will never be delivered until an operator requeues
       // it, and nothing else surfaces one: the dispatcher logs it, and a log line is not a
       // channel anybody watches. Gating the liveness signal on the **backlog** rather than
@@ -827,6 +845,39 @@ function withDelivery(deps: {
  * liveness signal fails (2026-09-22). Ten minutes: ten one-minute retries of the pass.
  */
 const CLAIM_PAUSE_PAGE_AFTER_MS = 10 * 60_000;
+
+/** How often the loop truncates the SQLite write-ahead log (2026-09-22). */
+const WAL_CHECKPOINT_INTERVAL_MS = 60 * 60_000;
+
+/**
+ * One WAL checkpoint, logged and never thrown. A checkpoint is housekeeping: a failure (a
+ * locked database, a reader holding a snapshot) costs a larger `-wal` file until the next
+ * one, never a cycle or the heartbeat.
+ */
+function runCheckpoint(
+  checkpoint: () => unknown,
+  logger: Logger,
+  reason: 'hourly' | 'close',
+): void {
+  try {
+    const result = checkpoint();
+    logger.info(
+      {
+        module: 'main',
+        action: 'wal_checkpoint',
+        outcome: 'ok',
+        reason,
+        ...(typeof result === 'object' && result !== null ? result : {}),
+      },
+      'truncated the SQLite write-ahead log',
+    );
+  } catch (err) {
+    logger.error(
+      { module: 'main', action: 'wal_checkpoint', outcome: 'failed', reason },
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
 
 /** Long-running 24/7 entry point under PM2 (`straker.config.cjs`). */
 async function main(): Promise<void> {

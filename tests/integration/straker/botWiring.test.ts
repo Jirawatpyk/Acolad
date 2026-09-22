@@ -31,7 +31,8 @@ const ENV = {
   GOOGLE_CHAT_WEBHOOK_SYSTEM: 'https://chat.example.test/ops',
   STRAKER_HEALTHCHECKS_PING_URL: 'https://hc.example.test/straker',
   STRAKER_SINGLE_INSTANCE_PORT: String(TEST_PORT),
-  STRAKER_POLL_INTERVAL_MS: '1000',
+  // Not the default, so the loop is seen to use the configured value rather than 10s.
+  STRAKER_POLL_INTERVAL_MS: '12000',
 };
 
 /** A transport whose two read doors are distinguishable, so a test can assert which one ran. */
@@ -107,7 +108,7 @@ describe('run() — the loop that actually keeps the bot polling', () => {
 
     // A loop that forgets to wait polls a rate-limited portal flat out, which is how an
     // account earns a block — the one failure this project's notes call out by name.
-    expect(slept).toEqual([1_000, 1_000, 1_000]);
+    expect(slept).toEqual([12_000, 12_000, 12_000]);
     expect(cycles).toBe(3);
   });
 

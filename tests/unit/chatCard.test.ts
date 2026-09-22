@@ -346,3 +346,55 @@ describe('buildCard — size guard', () => {
     expect(degraded).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// buildCard — portal text is shown, never interpreted as markup
+// ---------------------------------------------------------------------------
+describe('buildCard — row text is escaped', () => {
+  const rowText = (value: string): string => {
+    const entry = firstEntry(
+      buildCard({ cardId: 'c', headerTitle: 'H', rows: [{ label: 'L', value }] }),
+    );
+    return entry.card.sections[0]?.widgets[0]?.decoratedText?.text ?? '';
+  };
+
+  it('renders a portal title carrying a link tag as entities, not a link', () => {
+    expect(rowText('<a href=x>click</a>')).toBe('&lt;a href=x&gt;click&lt;/a&gt;');
+  });
+
+  it('escapes an ampersand', () => {
+    expect(rowText('R&D')).toBe('R&amp;D');
+  });
+
+  it('leaves the header and the card id alone — Chat does not read markup there', () => {
+    const entry = firstEntry(
+      buildCard({
+        cardId: 'id&1',
+        headerTitle: 'A & B',
+        headerSubtitle: '<sub>',
+        rows: [{ label: 'L', value: 'v' }],
+      }),
+    );
+    expect(entry.cardId).toBe('id&1');
+    expect(entry.card.header).toEqual({ title: 'A & B', subtitle: '<sub>' });
+  });
+
+  it('truncates after escaping without cutting an entity in half', () => {
+    // 118 plain characters then an ampersand: escaped, the entity straddles the cut.
+    const text = rowText('x'.repeat(118) + '&tail');
+    expect(text.length).toBeLessThanOrEqual(120);
+    expect(text.endsWith('…')).toBe(true);
+    expect(text).toBe('x'.repeat(118) + '…');
+    expect(/&[a-z]*…$/.test(text)).toBe(false);
+  });
+
+  it('keeps a whole entity that fits before the cut', () => {
+    const text = rowText('x'.repeat(110) + '&' + 'y'.repeat(20));
+    expect(text.startsWith('x'.repeat(110) + '&amp;')).toBe(true);
+    expect(text.length).toBeLessThanOrEqual(120);
+  });
+
+  it('does not truncate an escaped value that still fits', () => {
+    expect(rowText('a<b')).toBe('a&lt;b');
+  });
+});

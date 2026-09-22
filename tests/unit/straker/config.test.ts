@@ -35,6 +35,19 @@ describe('loadStrakerReconConfig', () => {
     );
   });
 
+  it('refuses anything faster than the decided 10s rhythm (spec §Clarifications, 2026-09-15)', () => {
+    // The floor was 1s, which let a typo'd `1000` run the bot at ten times the decided
+    // request rate against an allowance it must never crowd (SC-003).
+    for (const load of [loadStrakerReconConfig, loadStrakerBotConfig]) {
+      expect(() => load({ ...VALID, ...VALID_BOT, STRAKER_POLL_INTERVAL_MS: '9999' })).toThrow(
+        /STRAKER_POLL_INTERVAL_MS/,
+      );
+      expect(
+        load({ ...VALID, ...VALID_BOT, STRAKER_POLL_INTERVAL_MS: '10000' }).pollIntervalMs,
+      ).toBe(10_000);
+    }
+  });
+
   it('still loads without any of the bot-only variables, so shipping the bot config cannot stop the live probe', () => {
     expect(() => loadStrakerReconConfig(VALID)).not.toThrow();
   });
@@ -180,9 +193,9 @@ describe('loadStrakerBotConfig — the scheduling rules are the team own, reused
   });
 
   it('keeps the poll rhythm independent of the XTM bot (FR-001)', () => {
-    const cfg = loadStrakerBotConfig({ ...VALID_BOT, STRAKER_POLL_INTERVAL_MS: '1000' });
+    const cfg = loadStrakerBotConfig({ ...VALID_BOT, STRAKER_POLL_INTERVAL_MS: '15000' });
 
-    expect(cfg.pollIntervalMs).toBe(1_000);
+    expect(cfg.pollIntervalMs).toBe(15_000);
   });
 });
 

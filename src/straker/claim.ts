@@ -218,6 +218,11 @@ function rejectionSignal(status: number): string {
  */
 function followUpFor(status: number): ClaimFollowUp {
   if (status === 401) return 're_authenticate';
+  // A redirect on the accept POST (never followed — see the transport's `postInit`) is most
+  // likely a bounce to a login page: the session is gone. The claim itself stays `failed`
+  // and alerts — a redirect is not the portal saying "taken" — and is never retried; only
+  // the NEXT cycle signs in again.
+  if (status >= 300 && status < 400) return 're_authenticate';
   if (status === 403) return 'stop_claiming';
   return 'none';
 }

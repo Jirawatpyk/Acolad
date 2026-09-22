@@ -352,6 +352,11 @@ export interface TrackingSheetApi {
   setHeader(values: readonly string[]): Promise<void>;
   /** The `_row_key` column including its header cell at index 0, for the upsert lookup. */
   getKeyColumn(): Promise<string[]>;
+  /**
+   * The `_row_key` cell of one row, 1-based as the sheet numbers them — read immediately
+   * before overwriting that row, to confirm it is still the row the scan found.
+   */
+  getKeyAt(rowNum: number): Promise<string>;
   /** Overwrite one data row, 1-based as the sheet numbers them (row 1 is the header). */
   writeRow(rowNum: number, values: readonly string[]): Promise<void>;
   appendRow(values: readonly string[]): Promise<void>;
@@ -390,15 +395,50 @@ export function createTrackingSink(sheet: TrackingSheetApi): StrakerSender {
 
       const values = toRowValues(parsed.data);
       const rowKey = trackingRowKey(parsed.data.objId, parsed.data.eventType);
-      const keys = await sheet.getKeyColumn(); // index 0 is the header cell
-      const existing = keys.indexOf(rowKey);
-      if (existing === -1) await sheet.appendRow(values);
-      else await sheet.writeRow(existing + 1, values);
+      const target = await locateRow(sheet, rowKey);
+      if (target === 'unstable') {
+        return {
+          ok: false,
+          reason:
+            `row ${rowKey} moved while it was being located (rows inserted or sorted by hand?) — ` +
+            'nothing overwritten; the outbox retries',
+        };
+      }
+      if (target === null) await sheet.appendRow(values);
+      else await sheet.writeRow(target, values);
       return { ok: true };
     } catch (err) {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
   };
+}
+
+/**
+ * Where `rowKey` lives: its 1-based sheet row, `null` when it is not in the sheet (append),
+ * or `'unstable'` when it would not hold still.
+ *
+ * Scanning the key column and then writing row n is a check-then-act on a document people
+ * edit by hand: a row inserted or a sort between the two puts the write on somebody else's
+ * row, silently. So the key at row n is read back before the write; on a mismatch the column
+ * is scanned once more and re-checked, and a second mismatch is refused rather than guessed.
+ *
+ * **This narrows the race; it does not close it.** Sheets has no compare-and-set, so the gap
+ * between the read-back and the write is still open — two requests wide rather than a whole
+ * scan wide. A key the re-scan no longer finds is appended: the row was deleted, and the
+ * upsert's answer to an absent key has always been to add it.
+ */
+async function locateRow(
+  sheet: TrackingSheetApi,
+  rowKey: string,
+): Promise<number | null | 'unstable'> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const keys = await sheet.getKeyColumn(); // index 0 is the header cell, i.e. sheet row 1
+    const index = keys.indexOf(rowKey);
+    if (index === -1) return null;
+    const rowNum = index + 1;
+    if ((await sheet.getKeyAt(rowNum)) === rowKey) return rowNum;
+  }
+  return 'unstable';
 }
 
 // --- the real spreadsheet -------------------------------------------------------------
@@ -457,6 +497,14 @@ export class GoogleTrackingSheet implements TrackingSheetApi {
       range: `${this.tab}!${KEY_COLUMN_LETTER}:${KEY_COLUMN_LETTER}`,
     });
     return ((res.data.values ?? []) as string[][]).map((row) => row[0] ?? '');
+  }
+
+  async getKeyAt(rowNum: number): Promise<string> {
+    const res = await this.sheets.spreadsheets.values.get({
+      spreadsheetId: this.spreadsheetId,
+      range: `${this.tab}!${KEY_COLUMN_LETTER}${rowNum}`,
+    });
+    return (res.data.values?.[0]?.[0] as string | undefined) ?? '';
   }
 
   async writeRow(rowNum: number, values: readonly string[]): Promise<void> {

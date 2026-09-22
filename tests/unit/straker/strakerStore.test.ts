@@ -18,6 +18,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1383,5 +1384,157 @@ describe('work identity on held work and claim events', () => {
         }
       }
     }
+  });
+});
+
+describe('checkpoint — the write-ahead log is folded back and truncated (2026-09-22)', () => {
+  // SQLite's automatic checkpoint folds pages back into the database but never shrinks the
+  // -wal file, and a reader holding a snapshot can stop it altogether: a bot that writes a
+  // sighting every ten seconds for weeks grows the file without bound. TRUNCATE resets it.
+  it('leaves a non-empty -wal after writes, and a zero-byte one after the checkpoint', () => {
+    const { store, db, path } = freshStore();
+    for (let i = 0; i < 20; i += 1) {
+      store.recordEvent({
+        objId: `offer-${i}`,
+        eventType: 'claim',
+        outcome: 'lost',
+        effortWords: 4,
+        deadlineMs: NOW_MS,
+        occurredAtMs: NOW_MS + i,
+      });
+    }
+    const wal = `${path}-wal`;
+    expect(existsSync(wal)).toBe(true);
+    expect(statSync(wal).size).toBeGreaterThan(0);
+
+    const result = store.checkpoint();
+
+    expect(result.busy).toBe(0);
+    expect(statSync(wal).size).toBe(0);
+    // Nothing lost: the rows are in the database file now.
+    expect(store.claimedObjIds().size).toBe(20);
+    db.close();
+  });
+});
+
+describe('skip history — every CHANGE of skip reason is kept (2026-09-22)', () => {
+  // `offer_events` keeps one skip row per offer and overwrites its reason, so "ceiling
+  // reached at 10:00, deadline unreachable by 17:00" left only the last word. The history is
+  // append-only and records a reason only when it differs from that offer's latest — the
+  // same reason every ten seconds is one row, not 8,640 a day.
+  it('turns reasons A, A, B, A into three rows: A, B, A', () => {
+    const { store, db } = freshStore();
+    const reasons = [
+      'ceiling_reached',
+      'ceiling_reached',
+      'deadline_unreachable',
+      'ceiling_reached',
+    ] as const;
+    reasons.forEach((skipReason, i) =>
+      store.recordEvent(skipEvent({ skipReason, occurredAtMs: NOW_MS + i * 10_000 })),
+    );
+
+    expect(store.skipHistoryOf(OFFER_ID)).toEqual([
+      { skipReason: 'ceiling_reached', occurredAtMs: NOW_MS },
+      { skipReason: 'deadline_unreachable', occurredAtMs: NOW_MS + 20_000 },
+      { skipReason: 'ceiling_reached', occurredAtMs: NOW_MS + 30_000 },
+    ]);
+    // offer_events itself is unchanged: one skip row, the latest reason.
+    expect(store.eventsOf(OFFER_ID)).toEqual([
+      expect.objectContaining({ eventType: 'skip', skipReason: 'ceiling_reached' }),
+    ]);
+    db.close();
+  });
+
+  it('keeps each offer its own history, and records nothing for other event types', () => {
+    const { store, db } = freshStore();
+    store.recordEvent(skipEvent({ objId: 'a', skipReason: 'ceiling_reached' }));
+    store.recordEvent(skipEvent({ objId: 'b', skipReason: 'ceiling_reached' }));
+    store.recordEvent({
+      objId: 'a',
+      eventType: 'claim',
+      outcome: 'lost',
+      effortWords: 4,
+      deadlineMs: NOW_MS,
+      occurredAtMs: NOW_MS,
+    });
+
+    expect(store.skipHistoryOf('a')).toHaveLength(1);
+    expect(store.skipHistoryOf('b')).toHaveLength(1);
+    expect(store.skipHistoryOf('never-seen')).toEqual([]);
+    db.close();
+  });
+
+  it('is idempotent across a reopen: the same reason after a restart adds nothing', () => {
+    const { strakerDir } = tempRoot();
+    const first = openStrakerDatabase(strakerDir, NOW_MS);
+    new StrakerStore(first.db).recordEvent(skipEvent({ skipReason: 'outside_schedule' }));
+    first.db.close();
+
+    const second = openStrakerDatabase(strakerDir, NOW_MS);
+    openDbs.push(second.db);
+    const store = new StrakerStore(second.db);
+    store.recordEvent(skipEvent({ skipReason: 'outside_schedule', occurredAtMs: NOW_MS + 1 }));
+
+    expect(store.skipHistoryOf(OFFER_ID)).toEqual([
+      { skipReason: 'outside_schedule', occurredAtMs: NOW_MS },
+    ]);
+  });
+
+  it('adds the table to a database created before it existed, leaving the rows it had', () => {
+    const { strakerDir } = tempRoot();
+    const first = openStrakerDatabase(strakerDir, NOW_MS);
+    new StrakerStore(first.db).recordEvent(skipEvent({ skipReason: 'ceiling_reached' }));
+    // As the live database was before this change.
+    first.db.exec('DROP TABLE offer_skip_history');
+    first.db.close();
+
+    const second = openStrakerDatabase(strakerDir, NOW_MS);
+    openDbs.push(second.db);
+    const store = new StrakerStore(second.db);
+
+    expect(store.eventsOf(OFFER_ID)).toHaveLength(1);
+    expect(store.skipHistoryOf(OFFER_ID)).toEqual([]);
+    store.recordEvent(skipEvent({ skipReason: 'deadline_unreachable', occurredAtMs: NOW_MS + 1 }));
+    expect(store.skipHistoryOf(OFFER_ID)).toEqual([
+      { skipReason: 'deadline_unreachable', occurredAtMs: NOW_MS + 1 },
+    ]);
+  });
+
+  it('refuses to open over a history table whose CHECK misses a skip reason', () => {
+    // Registered with the vocabulary coverage check: a reason added later must not be
+    // rejected by the one table created before it — inside the transaction the skip shares.
+    const { strakerDir } = tempRoot();
+    const stale = new Database(join(strakerDir, STRAKER_DB_FILENAME));
+    stale.exec(`CREATE TABLE offer_skip_history (
+      obj_id TEXT NOT NULL,
+      skip_reason TEXT NOT NULL CHECK (skip_reason IN ('ceiling_reached')),
+      occurred_at_ms INTEGER NOT NULL
+    )`);
+    stale.close();
+
+    let error: unknown;
+    try {
+      const opened = openStrakerDatabase(strakerDir, NOW_MS);
+      openDbs.push(opened.db);
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(StrakerSchemaError);
+    expect(error instanceof Error ? error.message : '').toMatch(/offer_skip_history/);
+  });
+
+  it('rolls the history back with a caller transaction that fails', () => {
+    const { store, db } = freshStore();
+    expect(() =>
+      store.transaction(() => {
+        store.recordEvent(skipEvent({ skipReason: 'ceiling_reached' }));
+        throw new Error('the cycle failed after recording');
+      }),
+    ).toThrow();
+
+    expect(store.skipHistoryOf(OFFER_ID)).toEqual([]);
+    db.close();
   });
 });

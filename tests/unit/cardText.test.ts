@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { dash, wordsValue, sanitizeCardId } from '../../src/reporting/cardText.js';
+import { dash, escapeCardText, wordsValue, sanitizeCardId } from '../../src/reporting/cardText.js';
 
 describe('dash', () => {
   it('returns the string value for a non-empty string', () => {
@@ -69,5 +69,21 @@ describe('sanitizeCardId', () => {
 
   it('handles already-clean ids without change', () => {
     expect(sanitizeCardId('newjob123')).toBe('newjob123');
+  });
+});
+
+describe('escapeCardText', () => {
+  it('escapes the three characters Google Chat reads as markup', () => {
+    expect(escapeCardText('<a href=x>R&D</a>')).toBe('&lt;a href=x&gt;R&amp;D&lt;/a&gt;');
+  });
+
+  it('escapes & first, so an entity already in portal text is shown literally', () => {
+    expect(escapeCardText('&lt;')).toBe('&amp;lt;');
+  });
+
+  it('leaves ordinary text alone', () => {
+    expect(escapeCardText('NBA - NTRY Hangtag.xlsx · ms-MY')).toBe(
+      'NBA - NTRY Hangtag.xlsx · ms-MY',
+    );
   });
 });

@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadStrakerBotConfig, type StrakerBotConfig } from '../../../src/straker/config.js';
 import { assembleStrakerBot, type StrakerPortal } from '../../../src/straker/main.js';
 import type { StrakerSenders } from '../../../src/straker/dispatcher.js';
@@ -715,5 +715,54 @@ describe('an outcome that died undelivered reaches a human (S2, I-1)', () => {
 
     await expect(bot.cycle.runOnce()).resolves.toBe(true);
     expect(bot.outbox.countByStatus('dead')).toBe(0);
+  });
+});
+
+describe('the loop checkpoints the write-ahead log at most hourly, and on close (2026-09-22)', () => {
+  function clocked(): { bot: ReturnType<typeof assembleStrakerBot>; at: { ms: number } } {
+    const at = { ms: NOW };
+    const bot = assembleStrakerBot(loadStrakerBotConfig(env()), silentLogger(), {
+      portal: portalListing([]),
+      senders: inertSenders(),
+      now: () => at.ms,
+    });
+    open.push(bot);
+    return { bot, at };
+  }
+
+  it('checkpoints on the first turn, then not again until an hour has passed', async () => {
+    const { bot, at } = clocked();
+    const checkpoint = vi.spyOn(bot.store, 'checkpoint');
+
+    await bot.cycle.runOnce();
+    expect(checkpoint).toHaveBeenCalledTimes(1);
+
+    for (const minutes of [1, 30, 59]) {
+      at.ms = NOW + minutes * 60_000;
+      await bot.cycle.runOnce();
+    }
+    expect(checkpoint).toHaveBeenCalledTimes(1);
+
+    at.ms = NOW + 60 * 60_000;
+    await bot.cycle.runOnce();
+    expect(checkpoint).toHaveBeenCalledTimes(2);
+  });
+
+  it('a checkpoint that fails is logged and never fails the cycle', async () => {
+    const { bot } = clocked();
+    vi.spyOn(bot.store, 'checkpoint').mockImplementation(() => {
+      throw new Error('database is locked');
+    });
+
+    await expect(bot.cycle.runOnce()).resolves.toBe(true);
+  });
+
+  it('checkpoints on close, before the handle goes', () => {
+    const { bot } = clocked();
+    const checkpoint = vi.spyOn(bot.store, 'checkpoint');
+
+    bot.close();
+
+    expect(checkpoint).toHaveBeenCalledTimes(1);
   });
 });
