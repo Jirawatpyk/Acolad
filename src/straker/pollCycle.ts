@@ -332,6 +332,9 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
           halted.push(decision);
           continue;
         }
+        // Defence in depth for one offer decided twice in one read: the filter above ran
+        // before the decisions, so it cannot see a claim made earlier in this same loop.
+        if (attemptedThisProcess.has(decision.objId)) continue;
         // Recorded BEFORE the request, and before anything can fail. The point of this set
         // is the case where the durable record does not happen, so it cannot itself depend
         // on anything that might not happen.

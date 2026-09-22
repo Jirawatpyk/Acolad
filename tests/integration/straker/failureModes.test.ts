@@ -648,6 +648,18 @@ describe('failure mode: the reply is not the shape the contract says', () => {
     expect(bot.assembly.store.sightingsOf(objId)[0]?.notFoundAtMs).toBeNull();
   });
 
+  it('claims an offer listed twice in one reply exactly once', async () => {
+    const portal = fakeStraker();
+    const offer = offerFixture('aj-265:ms-my');
+    portal.offers = async () => json([offer, { ...offer }]);
+    const bot = assemble(portal);
+
+    await bot.assembly.cycle.runOnce();
+
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
+    expect(bot.assembly.store.heldWork()).toHaveLength(1);
+  });
+
   it('refuses an entry with no identity, because an offer we cannot name we cannot track', async () => {
     const portal = fakeStraker();
     const { bot, objId } = await botThatHasSeenAnOffer(portal);

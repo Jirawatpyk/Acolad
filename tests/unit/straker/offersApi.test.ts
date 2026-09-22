@@ -33,4 +33,36 @@ describe('listOpenOffers', () => {
 
     await expect(listOpenOffers(c, 'vendor-9')).rejects.toThrow(/obj_id/);
   });
+
+  it('keeps the first of a repeated obj_id and names the repeats, when asked to', async () => {
+    // One offer listed twice would be decided twice and claimed twice in one cycle — the
+    // in-process guard is consulted before the decisions, not between them.
+    const c = client([
+      { obj_id: 'a', words: 1 },
+      { obj_id: 'b' },
+      { obj_id: 'a', words: 999 },
+      { obj_id: 'a', words: 7 },
+    ]);
+    const onDuplicate = vi.fn();
+
+    const offers = await listOpenOffers(c, 'vendor-9', { onDuplicate });
+
+    expect(offers).toEqual([{ obj_id: 'a', words: 1 }, { obj_id: 'b' }]);
+    expect(onDuplicate).toHaveBeenCalledTimes(1);
+    expect(onDuplicate).toHaveBeenCalledWith(['a']);
+  });
+
+  it('says nothing when every obj_id is unique', async () => {
+    const onDuplicate = vi.fn();
+
+    await listOpenOffers(client([{ obj_id: 'a' }, { obj_id: 'b' }]), 'vendor-9', { onDuplicate });
+
+    expect(onDuplicate).not.toHaveBeenCalled();
+  });
+
+  it('leaves the reply untouched without the option, which is how the capture probe reads', async () => {
+    const reply = [{ obj_id: 'a' }, { obj_id: 'a' }];
+
+    expect(await listOpenOffers(client(reply), 'vendor-9')).toEqual(reply);
+  });
 });

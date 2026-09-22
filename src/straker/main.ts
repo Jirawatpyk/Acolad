@@ -291,6 +291,8 @@ export function createStrakerPortal(
   logger: Logger,
   deps: StrakerPortalDeps = {},
 ): StrakerPortal {
+  /** Offer ids already reported as listed twice, so the warning is said once per offer. */
+  const warnedDuplicates = new Set<string>();
   const client = createHttpClient({
     baseUrl: cfg.baseUrl,
     ...(deps.fetchImpl === undefined ? {} : { fetchImpl: deps.fetchImpl }),
@@ -356,7 +358,20 @@ export function createStrakerPortal(
       }),
     // `retry: true` is the join FR-019b depends on — see `offersApi.ts`. The probe leaves
     // it off, which is what keeps its behaviour unchanged while it finishes collecting.
-    listOpenOffers: (vendorId) => listOpenOffers(client, vendorId, { retry: true }),
+    listOpenOffers: (vendorId) =>
+      listOpenOffers(client, vendorId, {
+        retry: true,
+        // Kept first, dropped after — and said once per offer, not every ten seconds.
+        onDuplicate: (objIds) => {
+          const fresh = objIds.filter((id) => !warnedDuplicates.has(id));
+          if (fresh.length === 0) return;
+          for (const id of fresh) warnedDuplicates.add(id);
+          logger.warn(
+            { module: 'offersApi', action: 'read', outcome: 'duplicate_obj_id', objIds: fresh },
+            'the offer list named the same offer more than once — kept the first, claimed at most once',
+          );
+        },
+      }),
     // Through the single-attempt door on purpose: FR-016c gives this read its own
     // fifteen-minute cadence instead of FR-019b's backoff. See `readAssignedWork`.
     listAssignedWork: (vendorId) => readAssignedWork(client, vendorId),
