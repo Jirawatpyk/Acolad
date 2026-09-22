@@ -943,6 +943,23 @@ export class StrakerStore {
     };
   }
 
+  /**
+   * The largest effort any claim without a work key was weighed at for this deadline, or null.
+   * Only for adopting purchase orders once, for claims won before identities were recorded:
+   * a purchase order carries no word count, and the largest is the side that cannot
+   * under-count the day.
+   */
+  legacyClaimEffortByDeadline(deadlineMs: number): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(effort_words) AS effort FROM offer_events
+         WHERE event_type = 'claim' AND outcome IN ('won', 'unknown')
+           AND work_key IS NULL AND deadline_ms = ?`,
+      )
+      .get(deadlineMs) as { effort: number | null } | undefined;
+    return row?.effort ?? null;
+  }
+
   /** When a one-time step was done, or null while it has not been. */
   metaFlagSetAt(key: string): number | null {
     const row = this.db

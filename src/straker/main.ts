@@ -30,7 +30,13 @@ import {
   type TransportAlertHooks,
 } from './notifier.js';
 import { GoogleChatSender } from '../reporting/googleChat.js';
-import { createStrakerReconciler, readAssignedWork, type AssignedWork } from './reconcile.js';
+import {
+  createStrakerReconciler,
+  readAssignedWork,
+  readPurchaseOrders,
+  type AssignedWork,
+  type PurchaseOrder,
+} from './reconcile.js';
 import { createTrackingSink, GoogleTrackingSheet } from './trackingSink.js';
 import { listOpenOffers } from './offersApi.js';
 import {
@@ -239,6 +245,8 @@ export interface StrakerPortal {
    * (FR-002/V32). Two named reads cost one line each and keep it.
    */
   listAssignedWork(vendorId: string): Promise<readonly AssignedWork[]>;
+  /** Where won work waits for a person before it is assigned (2026-09-22). */
+  listPurchaseOrders(vendorId: string): Promise<readonly PurchaseOrder[]>;
 }
 
 /**
@@ -342,6 +350,7 @@ export function createStrakerPortal(
     // Through the single-attempt door on purpose: FR-016c gives this read its own
     // fifteen-minute cadence instead of FR-019b's backoff. See `readAssignedWork`.
     listAssignedWork: (vendorId) => readAssignedWork(client, vendorId),
+    listPurchaseOrders: (vendorId) => readPurchaseOrders(client, vendorId),
   };
 }
 

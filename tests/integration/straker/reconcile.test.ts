@@ -23,9 +23,11 @@ import { StrakerOutbox } from '../../../src/straker/outbox.js';
 import {
   createStrakerReconciler,
   readAssignedWork,
+  readPurchaseOrders,
   RECONCILE_FAILURE_ALERT_THRESHOLD,
   RECONCILE_INTERVAL_MS,
   type AssignedWork,
+  type PurchaseOrder,
   type ReconcileOutcome,
   type StrakerReconciler,
 } from '../../../src/straker/reconcile.js';
@@ -66,6 +68,9 @@ interface QueuedRow {
 
 interface FixtureOptions {
   readonly assigned?: readonly AssignedWork[];
+  readonly purchaseOrders?: readonly PurchaseOrder[];
+  /** Thrown by the purchase-order read. */
+  readonly poReadFails?: () => unknown | null;
   /** Thrown by the assigned-work read. A function so a test can change it per pass. */
   readonly readFails?: () => unknown | null;
   readonly signInFails?: () => unknown | null;
@@ -89,6 +94,7 @@ interface Fixture {
   readonly signIns: () => number;
   setNow(ms: number): void;
   setAssigned(work: readonly AssignedWork[]): void;
+  setPurchaseOrders(orders: readonly PurchaseOrder[]): void;
   /** What the fake portal's assigned list currently reports. */
   assigned(): readonly AssignedWork[];
 }
@@ -123,6 +129,7 @@ function fixture(opts: FixtureOptions = {}): Fixture {
   let signIns = 0;
   let now = NOW_MS;
   let assigned = opts.assigned ?? [];
+  let purchaseOrders = opts.purchaseOrders ?? [];
 
   // Thin tracing wrappers over the REAL store and outbox: they delegate every call, so
   // what is asserted below is the real SQLite behaviour, with the transaction boundary
@@ -152,6 +159,15 @@ function fixture(opts: FixtureOptions = {}): Fixture {
       return store.heldWork();
     },
     sightingsOf: (objId: string) => store.sightingsOf(objId),
+    backfillHeldIdentity: (
+      objId: string,
+      identity: Parameters<StrakerStore['backfillHeldIdentity']>[1],
+    ) => store.backfillHeldIdentity(objId, identity),
+    claimEventByWorkKey: (key: string) => store.claimEventByWorkKey(key),
+    legacyClaimEffortByDeadline: (deadlineMs: number) =>
+      store.legacyClaimEffortByDeadline(deadlineMs),
+    metaFlagSetAt: (key: string) => store.metaFlagSetAt(key),
+    setMetaFlag: (key: string, atMs: number) => store.setMetaFlag(key, atMs),
   };
 
   const tracingOutbox = {
@@ -192,6 +208,11 @@ function fixture(opts: FixtureOptions = {}): Fixture {
         if (failure !== null && failure !== undefined) throw failure;
         return assigned;
       },
+      listPurchaseOrders: async () => {
+        const failure = opts.poReadFails?.();
+        if (failure !== null && failure !== undefined) throw failure;
+        return purchaseOrders;
+      },
     },
     store: tracingStore as never,
     ledger,
@@ -212,6 +233,7 @@ function fixture(opts: FixtureOptions = {}): Fixture {
     signIns: () => signIns,
     setNow: (ms) => void (now = ms),
     setAssigned: (work) => void (assigned = work),
+    setPurchaseOrders: (orders) => void (purchaseOrders = orders),
     assigned: () => assigned,
   };
 }
@@ -1471,5 +1493,377 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
 
     expect(first).toMatchObject({ released: ['job-1'] });
     expect(second).toMatchObject({ ran: true, ok: true, released: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Offer → purchase order → assigned job: one piece of work, three ids (2026-09-22)
+// ---------------------------------------------------------------------------
+
+const KEY = 'aj-1|ms-my|translation';
+const IDENTITY = {
+  jobRef: 'aj-1',
+  title: 'NBA - NTRY Hangtag.xlsx',
+  service: 'translation',
+  workKey: KEY,
+};
+
+function purchaseOrder(poObjId: string, over: Partial<PurchaseOrder> = {}): PurchaseOrder {
+  return {
+    poObjId,
+    status: 'pending',
+    deadlineMs: DEADLINE_MS,
+    languageDirection: 'en-us>ms-my',
+    identity: { jobRef: 'aj-1', title: null, service: 'translation', workKey: KEY },
+    ...over,
+  };
+}
+
+/** A claim the poll cycle won, held under the OFFER's id with its work key. */
+function holdWonClaim(f: Fixture, over: { heldSinceMs?: number; deadlineMs?: number } = {}): void {
+  f.store.recordEvent({
+    objId: 'offer-1',
+    eventType: 'claim',
+    outcome: 'won',
+    effortWords: 100,
+    deadlineMs: over.deadlineMs ?? DEADLINE_MS,
+    occurredAtMs: over.heldSinceMs ?? NOW_MS,
+    identity: IDENTITY,
+  });
+  f.store.hold({
+    objId: 'offer-1',
+    effortWords: 100,
+    kind: 'translation',
+    deadlineMs: over.deadlineMs ?? DEADLINE_MS,
+    heldSinceMs: over.heldSinceMs ?? NOW_MS,
+    identity: IDENTITY,
+  });
+}
+
+/** Past the one-time adoption of pre-existing purchase orders. */
+function adopted(f: Fixture): void {
+  f.store.setMetaFlag('po_adoption_done', NOW_MS - 1);
+}
+
+describe('a won claim waiting at its purchase order stays counted (2026-09-22)', () => {
+  it('keeps holding a claim whose purchase order is still pending, however long it waits', async () => {
+    // THE bug: the job sat at /purchase-orders, absent from /assigned-jobs, and was released
+    // one pass after it was won — freeing the ceiling for work the team still owed.
+    const f = fixture({ ceiling: 150 });
+    adopted(f);
+    holdWonClaim(f);
+    f.setPurchaseOrders([purchaseOrder('po-1')]);
+
+    f.setNow(NOW_MS + 3 * RECONCILE_INTERVAL_MS);
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, released: [], recovered: [] });
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['offer-1']);
+    expect(
+      f.ledger.checkCapacity(
+        { objId: 'next', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
+        NOW_MS + 3 * RECONCILE_INTERVAL_MS,
+      ).fits,
+    ).toBe(false);
+  });
+
+  it('recognises the assigned job by its key, so the same work is not found a second time', async () => {
+    // The second half of the bug: the job reappears under a new id and was recorded again
+    // as "found by reconciliation" — a second row, a second card, a second alert.
+    const f = fixture();
+    adopted(f);
+    holdWonClaim(f);
+    f.setPurchaseOrders([purchaseOrder('po-1', { status: 'accepted' })]);
+    f.setAssigned([assignedWork('job-9', { reference: 'aj-1', identity: IDENTITY })]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, recovered: [], released: [] });
+    expect(f.queued).toEqual([]);
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['offer-1']);
+  });
+
+  it('releases the claim when its assigned job is delivered, matched by key', async () => {
+    const f = fixture();
+    adopted(f);
+    holdWonClaim(f);
+    f.setAssigned([
+      assignedWork('job-9', { status: 'delivered', reference: 'aj-1', identity: IDENTITY }),
+    ]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, released: ['offer-1'] });
+    expect(f.store.heldWork()).toEqual([]);
+  });
+
+  it('releases the claim when its purchase order is revoked', async () => {
+    const f = fixture();
+    adopted(f);
+    holdWonClaim(f);
+    f.setPurchaseOrders([purchaseOrder('po-1', { status: 'revoked' })]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, released: ['offer-1'] });
+  });
+
+  it('lets the assigned job decide over its purchase order', async () => {
+    // A confirmed purchase order with an assigned job still in progress is still owed.
+    const f = fixture();
+    adopted(f);
+    holdWonClaim(f);
+    f.setPurchaseOrders([purchaseOrder('po-1', { status: 'confirmed' })]);
+    f.setAssigned([assignedWork('job-9', { status: 'in_progress', identity: IDENTITY })]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ released: [] });
+  });
+
+  it('keeps a purchase order in a status it has never seen', async () => {
+    const f = fixture();
+    adopted(f);
+    holdWonClaim(f);
+    f.setPurchaseOrders([purchaseOrder('po-1', { status: 'on_hold_v2' })]);
+
+    f.setNow(NOW_MS + 2 * RECONCILE_INTERVAL_MS);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ released: [] });
+  });
+
+  it('does not release keyed work that matches nothing until its deadline is a day gone', async () => {
+    // If the offer's service ever stops matching the purchase order's po_type, the key finds
+    // nothing — and releasing on absence would bring the original bug straight back.
+    const f = fixture();
+    adopted(f);
+    holdWonClaim(f, { heldSinceMs: NOW_MS - 2 * RECONCILE_INTERVAL_MS });
+
+    const early = await f.reconciler.runIfDue();
+    expect(early).toMatchObject({ released: [] });
+    expect(
+      f.logs.some((l) => l.level === 'warn' && l.fields['outcome'] === 'held_work_unmatched'),
+    ).toBe(true);
+
+    f.setNow(DEADLINE_MS + 86_400_000 + 1);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ released: ['offer-1'] });
+  });
+
+  it('fails the pass and releases nothing when the purchase-order read fails', async () => {
+    const f = fixture();
+    adopted(f);
+    holdWonClaim(f, { heldSinceMs: NOW_MS - 2 * RECONCILE_INTERVAL_MS });
+    const failing = fixture({ poReadFails: () => new Error('portal down') });
+    adopted(failing);
+    holdWonClaim(failing, { heldSinceMs: NOW_MS - 2 * RECONCILE_INTERVAL_MS });
+
+    const outcome = await failing.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: false, stage: 'read' });
+    expect(failing.store.heldWork()).toHaveLength(1);
+  });
+});
+
+describe('a claim whose reply never came is settled by its purchase order (2026-09-22)', () => {
+  it('turns an unknown claim into a won one when its purchase order appears', async () => {
+    const f = fixture();
+    adopted(f);
+    f.store.recordEvent({
+      objId: 'offer-1',
+      eventType: 'claim',
+      outcome: 'unknown',
+      effortWords: 20,
+      deadlineMs: DEADLINE_MS,
+      occurredAtMs: NOW_MS - 60_000,
+      identity: IDENTITY,
+    });
+    f.setPurchaseOrders([purchaseOrder('po-1')]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, recovered: [] });
+    expect(f.store.eventsOf('offer-1')).toContainEqual(
+      expect.objectContaining({ eventType: 'claim', outcome: 'won', effortWords: 20 }),
+    );
+    expect(f.store.heldWork()).toEqual([
+      expect.objectContaining({ objId: 'offer-1', effortWords: 20 }),
+    ]);
+    // The claim's own row and card, not a recovery.
+    expect(f.queued.map((q) => q.eventId)).toEqual(
+      expect.arrayContaining(['claim:offer-1:won', 'row:offer-1|claim:settled']),
+    );
+    expect(f.queued.find((q) => q.eventId === 'row:offer-1|claim:settled')?.payload).toMatchObject({
+      outcome: 'won',
+    });
+    expect(f.queued.some((q) => q.eventId.startsWith('recovery:'))).toBe(false);
+  });
+});
+
+describe('purchase orders nobody recorded', () => {
+  it('recovers one found after the first pass, weighing it at zero words and saying so', async () => {
+    const f = fixture();
+    adopted(f);
+    f.setPurchaseOrders([purchaseOrder('po-7')]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, recovered: ['po-7'] });
+    expect(f.store.heldWork()).toEqual([
+      expect.objectContaining({
+        objId: 'po-7',
+        effortWords: 0,
+        identity: expect.objectContaining({ workKey: KEY }),
+      }),
+    ]);
+    expect(f.queued.some((q) => q.eventId === 'recovery:po-7')).toBe(true);
+  });
+
+  it('adopts pending purchase orders silently on the first pass, at the largest effort claimed for that deadline', async () => {
+    // The claims won before identities were recorded carry no key. Their purchase orders are
+    // adopted once, without a card or a row each — they were announced when they were won —
+    // at the largest effort any keyless claim for that deadline had, so the day is not
+    // under-counted.
+    const f = fixture();
+    for (const [objId, words] of [
+      ['old-1', 6],
+      ['old-2', 20],
+    ] as const) {
+      f.store.recordEvent({
+        objId,
+        eventType: 'claim',
+        outcome: 'won',
+        effortWords: words,
+        deadlineMs: DEADLINE_MS,
+        occurredAtMs: NOW_MS - 3_600_000,
+      });
+    }
+    f.setPurchaseOrders([
+      purchaseOrder('po-1'),
+      purchaseOrder('po-2', { identity: { ...IDENTITY, workKey: 'aj-2|ms-my|translation' } }),
+    ]);
+
+    const first = await f.reconciler.runIfDue();
+
+    expect(first).toMatchObject({ ran: true, ok: true, recovered: [] });
+    expect(f.queued).toEqual([]);
+    expect(f.store.heldWork().map((w) => [w.objId, w.effortWords])).toEqual([
+      ['po-1', 20],
+      ['po-2', 20],
+    ]);
+    expect(f.store.metaFlagSetAt('po_adoption_done')).toBe(NOW_MS);
+
+    // Once only: a purchase order that appears later is an ordinary recovery.
+    f.setPurchaseOrders([
+      ...f.store
+        .heldWork()
+        .map((w) => purchaseOrder(w.objId, { identity: w.identity ?? IDENTITY })),
+      purchaseOrder('po-3', { identity: { ...IDENTITY, workKey: 'aj-3|ms-my|translation' } }),
+    ]);
+    f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ recovered: ['po-3'] });
+  });
+
+  it('fills in the identity of held work matched by its own id', async () => {
+    const f = fixture();
+    adopted(f);
+    f.store.hold({
+      objId: 'job-9',
+      effortWords: 52,
+      kind: 'translation',
+      deadlineMs: DEADLINE_MS,
+      heldSinceMs: NOW_MS,
+    });
+    f.setAssigned([assignedWork('job-9', { identity: IDENTITY })]);
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork()[0]?.identity).toEqual(IDENTITY);
+  });
+});
+
+describe('readPurchaseOrders', () => {
+  const PO = {
+    po_obj_id: '58da4c92-b729-4466-9e63-507445b7096f',
+    status: 'pending',
+    job_ref: 'aj-325',
+    source_language_code: 'en-us',
+    target_language_code: 'ko',
+    po_type: 'translation',
+    due_at: '2026-09-23T05:59:00Z',
+  };
+
+  function door(pages: unknown[]): { getJson: <T>(path: string) => Promise<T>; paths: string[] } {
+    const paths: string[] = [];
+    return {
+      paths,
+      getJson: async <T>(path: string): Promise<T> => {
+        paths.push(path);
+        return pages.shift() as T;
+      },
+    };
+  }
+
+  it('reads the page the portal web app reads, and names each order by its key', async () => {
+    const d = door([{ items: [PO], total: 1, page: 1, page_size: 100 }]);
+
+    const orders = await readPurchaseOrders(d, 'vendor-1');
+
+    expect(d.paths[0]).toBe(
+      '/api/hitl/vendor/purchase-orders?vendor_id=vendor-1&sort_by=created_at&sort_order=desc&page=1&page_size=100',
+    );
+    expect(orders).toEqual([
+      {
+        poObjId: PO.po_obj_id,
+        status: 'pending',
+        deadlineMs: Date.parse('2026-09-23T05:59:00Z'),
+        languageDirection: 'en-us>ko',
+        identity: {
+          jobRef: 'aj-325',
+          title: null,
+          service: 'translation',
+          workKey: 'aj-325|ko|translation',
+        },
+      },
+    ]);
+  });
+
+  it('reads a DTP order, whose language codes are empty, under the same key as its job', async () => {
+    const d = door([
+      {
+        items: [
+          {
+            ...PO,
+            job_ref: 'aj-295',
+            source_language_code: '',
+            target_language_code: '',
+            po_type: 'dtp_prep',
+          },
+        ],
+        total: 1,
+      },
+    ]);
+
+    const [order] = await readPurchaseOrders(d, 'vendor-1');
+
+    expect(order?.identity.workKey).toBe('aj-295||dtp_prep');
+    expect(order?.languageDirection).toBeNull();
+  });
+
+  it('follows the pages to the total, and refuses a list shorter than it claims', async () => {
+    const two = door([
+      { items: [PO], total: 2 },
+      { items: [{ ...PO, po_obj_id: 'po-2' }], total: 2 },
+    ]);
+    expect(await readPurchaseOrders(two, 'v', { pageSize: 1 })).toHaveLength(2);
+    expect(two.paths[1]).toContain('page=2');
+
+    const short = door([{ items: [PO], total: 5 }]);
+    await expect(readPurchaseOrders(short, 'v')).rejects.toThrow(/1 of 5/);
+  });
+
+  it('refuses a reply that is not the envelope, rather than reading it as no orders', async () => {
+    await expect(readPurchaseOrders(door([[PO]]), 'v')).rejects.toThrow(/envelope/);
+    await expect(
+      readPurchaseOrders(door([{ items: [{ ...PO, po_obj_id: '' }], total: 1 }]), 'v'),
+    ).rejects.toThrow(/po_obj_id/);
   });
 });
