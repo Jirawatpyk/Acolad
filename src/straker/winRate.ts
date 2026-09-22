@@ -110,7 +110,7 @@
  */
 
 import { SKIP_REASONS, type ClaimOutcome, type SkipReason } from './outcomePolicy.js';
-import type { OfferEvent, SkipEvent } from './strakerStore.js';
+import type { ClaimEvent, OfferEvent, SkipEvent } from './strakerStore.js';
 
 // ---------------------------------------------------------------------------
 // The classification tables
@@ -328,6 +328,137 @@ export function classifyOffer(events: readonly OfferEvent[]): OfferStanding {
 }
 
 // ---------------------------------------------------------------------------
+// One job, several ids: folding a recovery back into the claim it settles
+// ---------------------------------------------------------------------------
+
+/**
+ * How far apart a legacy claim's deadline and a recovery's may be and still be read as the
+ * same work. The two endpoints are not promised to spell a deadline to the millisecond — the
+ * same tolerance reconciliation already uses to learn a purchase order's effort.
+ */
+export const RECOVERY_MATCH_DEADLINE_MS = 60_000;
+
+interface ClaimGroup {
+  readonly objId: string;
+  readonly claim: ClaimEvent;
+  readonly workKey: string | null;
+  absorbed: boolean;
+}
+
+interface RecoveryGroup {
+  readonly objId: string;
+  /** The earliest recovery in the group — what it is matched and ordered by. */
+  readonly first: ClaimEvent;
+  readonly workKey: string | null;
+}
+
+/**
+ * Merge every group made **only** of recovery rows into the one claim it duplicates.
+ *
+ * On this portal one job wears three ids in turn — offer, purchase order, assigned job
+ * (`workKey.ts`) — and reconciliation records a recovery under whichever id it found the work
+ * by, never the offer's. Grouping by `objId` alone therefore counted a won job twice, once for
+ * the claim and once for its recovery: on 2026-09-22 the report read "29 won of 34" while 16
+ * claims had been won.
+ *
+ * The match, in order of trust:
+ *
+ * 1. **The work key**, when both sides carry one — the key is what ties the three ids together.
+ * 2. **Otherwise** (a claim made before identities were recorded, 2026-09-22) the same effort,
+ *    deadlines within {@link RECOVERY_MATCH_DEADLINE_MS}, and the claim made **before** the
+ *    recovery. Two keys that disagree are never matched this way: a key is a fact, a coincidence
+ *    of numbers is not.
+ *
+ * Only a claim whose offer stands at `won` or `unknown` can absorb one. A recovery beside a
+ * settled loss is either different work or a contradiction worth seeing, and folding it in
+ * would quietly turn the loss into a win. One-to-one: a claim absorbs at most one recovery, so
+ * two recoveries of lookalike work are not both hidden behind one claim. Deterministic: the
+ * earliest recovery chooses first, and takes the claim nearest to it in time.
+ *
+ * A recovery that matches nothing is left exactly as it was — work the portal says is ours
+ * and nothing announced is a real win, and the gap FR-016b exists to show.
+ */
+function mergeRecoveriesIntoTheirClaims(byOffer: Map<string, OfferEvent[]>): void {
+  const claims: ClaimGroup[] = [];
+  const recoveries: RecoveryGroup[] = [];
+
+  for (const [objId, events] of byOffer) {
+    const claimRows = events.filter((e): e is ClaimEvent => e.eventType === 'claim');
+    if (claimRows.length > 0) {
+      const standing = classifyOffer(events).kind;
+      const claim = claimRows.find((e) => e.outcome === 'won' || e.outcome === 'unknown');
+      if (claim !== undefined && (standing === 'won' || standing === 'unknown')) {
+        claims.push({ objId, claim, workKey: claim.identity?.workKey ?? null, absorbed: false });
+      }
+      continue;
+    }
+    const recoveryRows = events.filter((e): e is ClaimEvent => e.eventType === 'recovery');
+    if (recoveryRows.length === 0 || recoveryRows.length !== events.length) continue;
+    const first = [...recoveryRows].sort((a, b) => a.occurredAtMs - b.occurredAtMs)[0];
+    if (first === undefined) continue;
+    const workKey = recoveryRows.find((e) => e.identity?.workKey)?.identity?.workKey ?? null;
+    recoveries.push({ objId, first, workKey });
+  }
+  if (claims.length === 0 || recoveries.length === 0) return;
+
+  recoveries.sort(
+    (a, b) => a.first.occurredAtMs - b.first.occurredAtMs || compareIds(a.objId, b.objId),
+  );
+
+  for (const recovery of recoveries) {
+    const free = claims.filter((c) => !c.absorbed);
+    const byKey = free.filter(
+      (c) => c.workKey !== null && recovery.workKey !== null && c.workKey === recovery.workKey,
+    );
+    const candidates =
+      byKey.length > 0
+        ? byKey
+        : free.filter(
+            (c) =>
+              (c.workKey === null || recovery.workKey === null) &&
+              isLegacyMatch(c.claim, recovery.first),
+          );
+    const chosen = nearestInTime(candidates, recovery.first.occurredAtMs);
+    if (chosen === undefined) continue;
+
+    const into = byOffer.get(chosen.objId);
+    const from = byOffer.get(recovery.objId);
+    if (into === undefined || from === undefined) continue;
+    into.push(...from);
+    byOffer.delete(recovery.objId);
+    chosen.absorbed = true;
+  }
+}
+
+function isLegacyMatch(claim: ClaimEvent, recovery: ClaimEvent): boolean {
+  if (claim.effortWords === null || recovery.effortWords === null) return false;
+  if (claim.deadlineMs === null || recovery.deadlineMs === null) return false;
+  return (
+    claim.effortWords === recovery.effortWords &&
+    Math.abs(claim.deadlineMs - recovery.deadlineMs) <= RECOVERY_MATCH_DEADLINE_MS &&
+    claim.occurredAtMs < recovery.occurredAtMs
+  );
+}
+
+function nearestInTime(candidates: readonly ClaimGroup[], atMs: number): ClaimGroup | undefined {
+  let best: ClaimGroup | undefined;
+  for (const c of candidates) {
+    if (best === undefined) {
+      best = c;
+      continue;
+    }
+    const gap = Math.abs(c.claim.occurredAtMs - atMs);
+    const bestGap = Math.abs(best.claim.occurredAtMs - atMs);
+    if (gap < bestGap || (gap === bestGap && compareIds(c.objId, best.objId) < 0)) best = c;
+  }
+  return best;
+}
+
+function compareIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
 // The measure
 // ---------------------------------------------------------------------------
 
@@ -351,6 +482,7 @@ export function computeWinRate(events: readonly OfferEvent[], window?: WinRateWi
     if (bucket === undefined) byOffer.set(event.objId, [event]);
     else bucket.push(event);
   }
+  mergeRecoveriesIntoTheirClaims(byOffer);
 
   let won = 0;
   let recovered = 0;

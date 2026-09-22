@@ -13,7 +13,7 @@
  * **Establishes, by running real code:**
  *
  * 1. *The one seam that actually exists.* `src/runtime/xtmPollLoop.ts` imports
- *    `combinedReportRows` from `src/straker/combinedSummary.ts` — a deliberate, recorded
+ *    `combinedTotalRows` from `src/straker/combinedSummary.ts` — a deliberate, recorded
  *    exception (plan §Scope decision, owner-approved 2026-09-16), and the only path by
  *    which a Straker fault can reach the live XTM bot at all. These tests break the Straker
  *    record in three ways underneath a **real `XtmPollLoop`** and require its cycle result,
@@ -227,7 +227,7 @@ function countByChannel(db: DB): Record<string, number> {
  * caller says, and report everything observable about it.
  *
  * The Straker directory is supplied through the environment because that is how the loop
- * finds it: `xtmPollLoop.ts` calls `combinedReportRows` without a `strakerStateDir`, so it
+ * finds it: `xtmPollLoop.ts` calls `combinedTotalRows` without a `strakerStateDir`, so it
  * falls through to `STRAKER_STATE_DIR` and then to the documented default. Passing it any
  * other way here would be testing a call the bot does not make.
  */
@@ -239,6 +239,17 @@ async function runXtm(strakerStateDir: string, cycles = 2): Promise<XtmObservabl
   const stateDir = tempDir('xtm-isolation-');
   const db = openDatabase(stateDir, NOW_ISO).db;
   openDbs.push(db);
+  // XTM holds work, so its 09:00 card goes out whatever state the Straker record is in.
+  // Since FR-018 was amended (2026-09-22) a card with no XTM work is sent only when the
+  // combined line is a warning — which a broken Straker record rightly produces and a healthy
+  // one does not. Without XTM work the control would send nothing and every broken record
+  // would send a card, so "identical to control" would compare a report against no report.
+  db.prepare(
+    `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash,
+                       project_name, file_name, due_date, words, lifecycle_status)
+     VALUES ('held-xtm', 'held-xtm', 'visible', @at, @at, 'h', 'P', 'held.xlf',
+             '2026-09-16T17:00:00+07:00', 300, 'accepted')`,
+  ).run({ at: NOW_ISO });
 
   const pinger = recordingPinger();
   const sheet = new CapturingSheet();
@@ -293,7 +304,7 @@ describe('SC-008 — a broken Straker record cannot move the live XTM bot', () =
    * two-portal view has to appear in the 09:00 report, because that report is the only
    * daily summary anyone reads.
    *
-   * `combinedReportRows` promises never to throw, and `dailyReport.ts` is throw-safe at its
+   * `combinedTotalRows` promises never to throw, and `dailyReport.ts` is throw-safe at its
    * call site as well — belt and braces, because PR #14 fixed a bug in this very report that
    * took the whole XTM poll loop down. Two guarantees, and until now neither was tested from
    * the loop's side. What follows breaks the Straker record three ways and requires the XTM

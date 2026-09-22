@@ -52,6 +52,11 @@ import type { ChatPayload, ChatSender } from '../reporting/googleChat.js';
 import type { SendOutcome, StrakerSender } from './dispatcher.js';
 import type { StrakerTransportAlert, StrakerTransportWarning } from './httpClient.js';
 import type { ClaimOutcome, SkipReason } from './outcomePolicy.js';
+import {
+  STRAKER_DAILY_REPORT_KIND,
+  parseStrakerDailyReport,
+  renderStrakerDailyReport,
+} from './dailyReport.js';
 
 /** Named once, used in every heading. FR-015 and FR-026b are both "the card says which
  *  portal", and a constant is what lets one test assert it across every card at once. */
@@ -130,6 +135,14 @@ export function renderOfferAnnouncement(announcement: StrakerOfferAnnouncement):
  */
 export function createStrakerOffersSender(chat: ChatPost): StrakerSender {
   return async (payload: unknown): Promise<SendOutcome> => {
+    // The 09:00 daily report shares this channel (FR-018 amended 2026-09-22) and is told
+    // apart by its `kind`. Announcements carry none, so every row queued before the report
+    // existed still takes the path below unchanged.
+    if (fields(payload)?.['kind'] === STRAKER_DAILY_REPORT_KIND) {
+      const report = parseStrakerDailyReport(payload);
+      if (!report.ok) return { ok: false, reason: report.reason };
+      return post(chat, renderStrakerDailyReport(report.value));
+    }
     const parsed = parseAnnouncement(payload);
     if (!parsed.ok) return { ok: false, reason: parsed.reason };
     return post(chat, renderOfferAnnouncement(parsed.value));

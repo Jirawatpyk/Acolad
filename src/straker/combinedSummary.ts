@@ -109,7 +109,6 @@ import type { CardRow } from '../reporting/chatCard.js';
 import { STRAKER_EFFORT_UNIT } from './outcomePolicy.js';
 import { STRAKER_DB_FILENAME, StrakerStore, type WorkKind } from './strakerStore.js';
 import { STRAKER_LOG_NAME } from './logger.js';
-import { WEAK_SIGNAL_BELOW, computeWinRate } from './winRate.js';
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -862,107 +861,6 @@ export function readStrakerWorkload(spec: StrakerReadSpec): PortalResult {
   }
 }
 
-/**
- * The window the win-rate row is measured over, which is deliberately NOT the card's.
- *
- * The rest of the card describes the last 24 hours. At the spec's stated 2-3 offers a day
- * that makes `winnable` 0-3, so the figure could never reach {@link WEAK_SIGNAL_BELOW} and
- * the weak-signal caveat would be permanently attached — a caveat that is always true is one
- * people stop reading. Worse, SC-004's "target set only after two weeks of baseline" would
- * never arrive on this surface at all, which is the whole reason T076 exists.
- *
- * Fourteen days is that baseline, and at 2-3 offers a day it crosses ten winnable in about a
- * week, so the caveat drops off when it stops being true.
- */
-export const WIN_RATE_WINDOW_DAYS = 14;
-
-/** The fourteen-day window {@link WIN_RATE_WINDOW_DAYS} describes, as a period. */
-function winRatePeriod(nowMs: number): SummaryPeriod {
-  return {
-    fromMs: nowMs - WIN_RATE_WINDOW_DAYS * 24 * 3_600_000,
-    toMs: nowMs,
-    label: `the last ${String(WIN_RATE_WINDOW_DAYS)} days`,
-  };
-}
-
-/**
- * The Straker win rate as one row of the 09:00 report (T076, SC-004).
- *
- * SC-004 asks for the win rate to be "measured and reported **continuously**". It was
- * measured — `computeWinRate` is correct and covered — but its only caller was
- * `npm run straker:win-rate`, a command somebody has to remember to type. The gap that
- * mattered was never a missing number: SC-004 sets a target only after roughly two weeks of
- * baseline, and a baseline nobody is shown is a baseline nobody reads, which leaves the
- * polling rhythm untuned for want of a figure the bot already knew.
- *
- * Deliberately **not** part of the combined view. That machinery exists to decide when two
- * portals' numbers may be added together, and a win rate is not combinable: XTM has no
- * equivalent, and averaging one portal's rate with nothing would invent a figure. So this is
- * a Straker-only row appended beside the combined ones, not a third column in them.
- *
- * Three things it refuses to do, each a way the number could mislead:
- * - report a bare percentage — the counts travel with it, because at 2-3 offers a day "33%"
- *   invites a decision the sample cannot support;
- * - report `0%` when nothing was winnable — FR-017's only exclusion is work the team's own
- *   rules turned away, and a day of those is not a day of losing;
- * - go quiet when the record cannot be read — an absent row reads as "no races", which is
- *   the one thing an unreadable record does not say.
- *
- * Never throws: `combinedReportRows` promises the report still goes out, and a win rate is
- * the least important thing on it.
- */
-export function strakerWinRateRow(period: SummaryPeriod, stateDir: string): CardRow {
-  const label = 'Straker win rate';
-  const source = join(stateDir, STRAKER_DB_FILENAME);
-
-  let db: Database.Database;
-  try {
-    db = openRecordReadOnly(source);
-  } catch (err) {
-    return { emoji: '⚠️', label, value: `record unreadable — ${describe(err)}` };
-  }
-
-  try {
-    // Bounded in SQL. Unbounded, this read materialises every event ever written in order to
-    // answer a fourteen-day question, inside the XTM bot's 09:00 report.
-    const window = { fromMs: period.fromMs, toMs: period.toMs };
-    const rate = computeWinRate(new StrakerStore(db).listEvents(window), window);
-
-    // FR-017a: the turn-away count travels with the rate, always, including on the n/a line.
-    // "Reporting only one of the two numbers makes the other invisible" — and the two point at
-    // opposite fixes: a low rate with a high turn-away count is a configuration question, a low
-    // rate with a low one is a speed question. The ops script prints both; a row that dropped
-    // one would leave FR-017a unreported on the surface T076 argues is the one that counts.
-    const turnedAway = ` · ${String(rate.turnedAway)} turned away by our own rules`;
-
-    if (rate.ratePct === null) {
-      return { label, value: `n/a — no genuinely winnable offers in ${period.label}${turnedAway}` };
-    }
-
-    // An unresolved claim is one reconciliation has not settled yet. Counting it as a loss
-    // would understate the rate; omitting it lets a temporarily depressed figure read as a
-    // verdict. So the rate is named as a lower bound for exactly as long as that is true.
-    const unresolved =
-      rate.unknownPending > 0
-        ? ` · ${String(rate.unknownPending)} unresolved, so this is a lower bound`
-        : '';
-    const caveat =
-      rate.winnable < WEAK_SIGNAL_BELOW
-        ? ` (weak signal — fewer than ${String(WEAK_SIGNAL_BELOW)} winnable)`
-        : '';
-    return {
-      label,
-      value:
-        `${rate.ratePct.toFixed(1)}% — ${String(rate.won)} won of ` +
-        `${String(rate.winnable)} winnable in ${period.label}${caveat}${turnedAway}${unresolved}`,
-    };
-  } catch (err) {
-    return { emoji: '⚠️', label, value: `record unreadable — ${describe(err)}` };
-  } finally {
-    db.close();
-  }
-}
-
 function readStrakerRetries(db: Database.Database, period: SummaryPeriod): Measured<number> {
   try {
     const rows = db.prepare('SELECT attempts, created_at_ms FROM straker_outbox').all() as {
@@ -1191,34 +1089,31 @@ export interface CombinedRowsSpec {
 }
 
 /**
- * The combined view as rows for the daily report card — **and it never throws.**
+ * The XTM figure and ONE combined line for the XTM bot's 09:00 card — **and it never throws.**
  *
- * `npm run report:combined` puts this view somewhere a human has to go and type a command.
- * FR-018 is about *the* daily summary, and the daily summary anyone actually reads is the
- * `📋 Daily Report` the XTM bot sends at 09:00. A mitigation for the two-ceiling problem
- * that lives where nobody looks is not a mitigation — which is the mistake this feature has
- * now made four times, and the reason T052a and T056a exist.
+ * **Why only two rows (FR-018 amended 2026-09-22, owner decision).** Straker now sends its own
+ * 09:00 report into its own room — its workload, its overdue work and its win rate. Repeating
+ * any of that on the XTM card put Straker's work in front of the XTM room every morning. What
+ * stays here is the one figure that genuinely needs both portals: the crew's combined
+ * commitment, because separate ledgers let the two ceilings sum past what one crew can do, and
+ * shared visibility of that sum is the mitigation the isolation decision rested on.
  *
- * **Why the total absence of throwing matters more here than anywhere else in this module.**
- * This runs inside the live XTM bot's report. That report is already built inside a
- * try/catch whose comment records why — PR #14 fixed a bug in it that took the whole poll
- * loop down. Relying on someone else's guard for a property this function can hold itself
- * is how that bug happened; and degrading to the XTM-only report is strictly better than
- * losing the report, because the combined figure is the addition and the report is the
- * thing being added to.
+ * The combined line names its parts — `470 words committed (XTM 350 · Straker 120)` — so a
+ * reader can see where the total comes from without a second Straker row.
  *
- * So every failure becomes a **row that says so**. A silently omitted combined line is
- * indistinguishable from two portals that happened to sum to nothing.
+ * **Never throws.** This runs inside the live XTM bot's report, and PR #14 fixed a bug in that
+ * report which took the whole poll loop down. Every failure becomes a row that says so — an
+ * unreadable record, a total withheld because the units differ — carrying the ⚠️ that keeps the
+ * card worth sending (`reporting/dailyReport.reportWorthSending`). A silently omitted combined
+ * line is indistinguishable from two portals that happened to sum to nothing.
  */
-export function combinedReportRows(spec: CombinedRowsSpec): CardRow[] {
+export function combinedTotalRows(spec: CombinedRowsSpec): CardRow[] {
   try {
     const period = parseSummaryPeriod([], spec.nowMs);
-    const strakerStateDir =
-      spec.strakerStateDir ?? env('STRAKER_STATE_DIR', STRAKER_DEFAULT_STATE_DIR);
     const view = combineDailyView(period, [
       readXtmWorkload({ ...spec.xtm, period, uptime: unmeasured('not read for this card') }),
       readStrakerWorkload({
-        stateDir: strakerStateDir,
+        stateDir: spec.strakerStateDir ?? env('STRAKER_STATE_DIR', STRAKER_DEFAULT_STATE_DIR),
         ceilingPerDay: readCeilingFromEnv('STRAKER_MAX_WORDS_PER_DAY'),
         dtpCeilingPerDay: readCeilingFromEnv('STRAKER_DTP_MAX_WORDS_PER_DAY'),
         period,
@@ -1226,40 +1121,7 @@ export function combinedReportRows(spec: CombinedRowsSpec): CardRow[] {
         dayOf: spec.xtm.dayOf,
       }),
     ]);
-    const rows = combinedRowsOf(view);
-
-    // Pushed in its own guard rather than inside the outer one, and the difference is the
-    // whole point: the outer `catch` REPLACES every row with a single "unavailable" line, so
-    // a throw from the least important row here would discard the XTM figure, the Straker
-    // figure and the combined total that were already computed successfully. The section is
-    // not optional; this row is.
-    // Built BEFORE deciding whether to show it, which is the difference between suppressing a
-    // duplicate message and suppressing information. An earlier cut skipped the row whenever
-    // the portal read had failed — but `readStrakerWorkload` fails when `heldWork()` does, and
-    // `offer_events` can read perfectly while `held_work` cannot. That dropped a computable
-    // figure for a fault in a different table, which is the "going quiet on an unreadable
-    // record" this row's own docstring refuses to do.
-    let winRateRow: CardRow;
-    try {
-      winRateRow = strakerWinRateRow(winRatePeriod(spec.nowMs), strakerStateDir);
-    } catch (err) {
-      // Never silent. `strakerWinRateRow` already turns every failure it can see into a stated
-      // row, so reaching here means something outside its contract changed — and a row that
-      // vanishes is indistinguishable from one that was never wanted. Fail loud, in the card.
-      winRateRow = {
-        emoji: '⚠️',
-        label: 'Straker win rate',
-        value: `could not be computed — ${describe(err)}`,
-      };
-    }
-
-    // One fault, one line — but only when it really is the same fault. Both rows have to be
-    // reporting the record as unreadable before the second is dropped as a repetition.
-    const portalUnread = view.portals.some((p) => !p.read && p.failure.portal === 'Straker');
-    const rowIsUnreadable = (winRateRow.value ?? '').includes('record unreadable');
-    if (!(portalUnread && rowIsUnreadable)) rows.push(winRateRow);
-
-    return rows;
+    return totalRowsOf(view);
   } catch (err) {
     // The last line of defence, and it should never be reached: both readers already turn
     // their own failures into a stated `PortalResult`. If it IS reached, something changed
@@ -1268,41 +1130,46 @@ export function combinedReportRows(spec: CombinedRowsSpec): CardRow[] {
       {
         emoji: '⚠️',
         label: 'Both portals',
-        value: `combined view unavailable: ${err instanceof Error ? err.message : String(err)}`,
+        value: `combined view unavailable: ${describe(err)}`,
       },
     ];
   }
 }
 
-/** One row per portal, then the combined line — or the reason there is not one. */
-function combinedRowsOf(view: CombinedDailyView): CardRow[] {
+/** The XTM row, then the combined line — or the reason there is not one. */
+function totalRowsOf(view: CombinedDailyView): CardRow[] {
   const rows: CardRow[] = [];
-  for (const portal of view.portals) {
+  const xtm = view.portals.find((p) => (p.read ? p.workload.portal : p.failure.portal) === 'XTM');
+  if (xtm !== undefined) {
     rows.push(
-      portal.read
+      xtm.read
         ? {
-            label: portal.workload.portal,
-            value: `${portal.workload.committedEffort} ${portal.workload.unit.noun} committed`,
+            label: 'XTM',
+            value: `${xtm.workload.committedEffort} ${xtm.workload.unit.noun} committed`,
           }
-        : {
-            emoji: '⚠️',
-            label: portal.failure.portal,
-            value: `record unreadable — ${portal.failure.why}`,
-          },
+        : { emoji: '⚠️', label: 'XTM', value: `record unreadable — ${xtm.failure.why}` },
     );
   }
-  rows.push(
-    view.committedTotal.shown
-      ? {
-          label: 'Both portals',
-          value: `${view.committedTotal.value} ${view.committedTotal.unit.noun} committed`,
-        }
-      : {
-          emoji: '⚠️',
-          label: 'Both portals',
-          value: `no combined total: ${view.committedTotal.why}`,
-        },
-  );
+
+  if (!view.committedTotal.shown) {
+    rows.push({
+      emoji: '⚠️',
+      label: 'Both portals',
+      value: `no combined total: ${view.committedTotal.why}`,
+    });
+    return rows;
+  }
+  // Shown means every portal read and shares a unit, so both parts are readings.
+  const part = (name: PortalName): number => {
+    const found = view.portals.find((p) => p.read && p.workload.portal === name);
+    return found?.read === true ? found.workload.committedEffort : 0;
+  };
+  rows.push({
+    label: 'Both portals',
+    value:
+      `${view.committedTotal.value} ${view.committedTotal.unit.noun} committed ` +
+      `(XTM ${part('XTM')} · Straker ${part('Straker')})`,
+  });
   return rows;
 }
 

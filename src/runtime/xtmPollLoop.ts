@@ -14,8 +14,8 @@ import {
 } from '../reporting/dailyReport.js';
 // The Straker side of FR-018's combined view. A one-symbol dependency on purpose: this
 // loop is the live bot's, and the surface it takes on should be as small as the
-// requirement allows. `combinedReportRows` is documented never to throw.
-import { combinedReportRows, effectiveDayMapper } from '../straker/combinedSummary.js';
+// requirement allows. `combinedTotalRows` is documented never to throw.
+import { combinedTotalRows, effectiveDayMapper } from '../straker/combinedSummary.js';
 import { getThaiHolidays, holidaysForEffectiveDay } from '../schedule/thaiHolidays.js';
 import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { makeEffectiveDayOf } from '../schedule/deadlineDay.js';
@@ -396,7 +396,9 @@ export class XtmPollLoop {
           const held = this.store.listByLifecycle('accepted');
           // Bucket "Due today" by the EFFECTIVE deadline day (the working day the work lands on)
           // so the report's headline matches the capacity cap — same mapper the cycle uses.
-          const companion = combinedReportRows({
+          // The XTM figure and ONE combined line (FR-018 amended 2026-09-22): Straker sends
+          // its own 09:00 report into its own room, so no Straker rows or win rate here.
+          const companion = combinedTotalRows({
             xtm: {
               stateDir: this.cfg.STATE_DIR,
               metric: this.cfg.ACCEPT_EFFORT_METRIC,
@@ -440,13 +442,12 @@ export class XtmPollLoop {
               // off the cap is not enforced (accept 24/7), so the headline must not claim a limit.
               this.cfg.ACCEPT_SCHEDULE_ENABLED,
               this.cfg.ACCEPT_EFFORT_METRIC,
-              // FR-018 / US3: the other portal's committed workload and the combined total.
-              // The two bots keep separate ledgers — total isolation, at the accepted cost
-              // that the two daily ceilings can sum past what the one crew can actually do.
-              // Shared visibility is the agreed mitigation, and this report is the only place
-              // a human reliably looks, so it is where the mitigation has to appear.
+              // FR-018 / US3: the combined commitment across both portals. The two bots keep
+              // separate ledgers — total isolation, at the accepted cost that the two daily
+              // ceilings can sum past what the one crew can actually do. Shared visibility of
+              // the SUM is the agreed mitigation; Straker's own detail is in Straker's report.
               //
-              // `combinedReportRows` never throws and degrades to rows that state the gap, so
+              // `combinedTotalRows` never throws and degrades to rows that state the gap, so
               // a Straker record that cannot be read costs the extra section and not the
               // report. That matters here specifically: PR #14 fixed a bug in this report that
               // took the whole poll loop down.

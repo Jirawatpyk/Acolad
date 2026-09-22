@@ -223,6 +223,9 @@ function recordingSenders(): RecordingSenders {
     (into: Record<string, unknown>[]) =>
     async (payload: unknown): Promise<SendOutcome> => {
       if (state.down) return { ok: false, reason: 'destination unavailable' };
+      // The 09:00 daily report shares the offers channel and these tests run during working
+      // hours; it has its own suite (`dailyReport.test.ts`), so it is not counted here.
+      if ((payload as { kind?: unknown }).kind === 'daily_report') return { ok: true };
       into.push(payload as Record<string, unknown>);
       return { ok: true };
     };

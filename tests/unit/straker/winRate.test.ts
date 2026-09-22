@@ -30,25 +30,50 @@ import { formatWinRateReport, parseWinRateWindow } from '../../../src/straker/wi
 const T0 = Date.UTC(2026, 8, 15, 6, 38, 0); // 2026-09-15 13:38 Bangkok — a real arrival
 const MINUTE = 60_000;
 
-function claim(objId: string, outcome: ClaimOutcome, atMs: number = T0): ClaimEvent {
+/** What names the work, and the two numbers a legacy recovery is matched on. */
+interface WorkOptions {
+  readonly workKey?: string;
+  readonly effortWords?: number | null;
+  readonly deadlineMs?: number | null;
+}
+
+function workOf(opts: WorkOptions): Pick<ClaimEvent, 'effortWords' | 'deadlineMs' | 'identity'> {
   return {
-    objId,
-    eventType: 'claim',
-    outcome,
-    effortWords: 4,
-    deadlineMs: T0 + 8 * 60 * MINUTE,
-    occurredAtMs: atMs,
+    effortWords: opts.effortWords === undefined ? 4 : opts.effortWords,
+    deadlineMs: opts.deadlineMs === undefined ? T0 + 8 * 60 * MINUTE : opts.deadlineMs,
+    ...(opts.workKey === undefined
+      ? {}
+      : {
+          identity: {
+            jobRef: opts.workKey.split('|')[0] ?? null,
+            title: null,
+            service: null,
+            workKey: opts.workKey,
+          },
+        }),
   };
 }
 
-function recovery(objId: string, atMs: number = T0 + 15 * MINUTE): ClaimEvent {
+function claim(
+  objId: string,
+  outcome: ClaimOutcome,
+  atMs: number = T0,
+  opts: WorkOptions = {},
+): ClaimEvent {
+  return { objId, eventType: 'claim', outcome, occurredAtMs: atMs, ...workOf(opts) };
+}
+
+function recovery(
+  objId: string,
+  atMs: number = T0 + 15 * MINUTE,
+  opts: WorkOptions = {},
+): ClaimEvent {
   return {
     objId,
     eventType: 'recovery',
     outcome: 'recovered',
-    effortWords: 4,
-    deadlineMs: T0 + 8 * 60 * MINUTE,
     occurredAtMs: atMs,
+    ...workOf(opts),
   };
 }
 
@@ -293,6 +318,164 @@ describe('an unknown claim, while it is still unknown', () => {
 // ---------------------------------------------------------------------------
 // The companion count
 // ---------------------------------------------------------------------------
+
+describe('a recovery recorded under another id is the same work as its claim (A3)', () => {
+  /**
+   * Live on 2026-09-22 the ops script printed "29 won of 34" while only 16 claims had been
+   * won. Reconciliation records a recovery under the id the work wears when it is found — the
+   * purchase order's or the assigned job's — never the offer's, so grouping by `objId` alone
+   * counted one job twice: once for the claim, once for the recovery.
+   */
+  const KEY = 'aj-301|ms-my|translation';
+  const DUE = T0 + 26 * 60 * MINUTE;
+
+  it('merges a recovery into the claim with the same work key', () => {
+    const rate = computeWinRate([
+      claim('offer-1', 'won', T0, { workKey: KEY }),
+      recovery('po-1', T0 + 20 * MINUTE, { workKey: KEY }),
+    ]);
+
+    expect(rate).toMatchObject({ won: 1, winnable: 1, offers: 1 });
+    // The claim said won; the recovery only confirms it, so this is not a reconciliation gap.
+    expect(rate.recovered).toBe(0);
+  });
+
+  it('settles an unknown claim into a win via recovery when the recovery is the same work', () => {
+    const rate = computeWinRate([
+      claim('offer-1', 'unknown', T0, { workKey: KEY }),
+      recovery('po-1', T0 + 20 * MINUTE, { workKey: KEY }),
+    ]);
+
+    expect(rate).toMatchObject({ won: 1, recovered: 1, unknownPending: 0, winnable: 1, offers: 1 });
+  });
+
+  it('does not merge across different work keys', () => {
+    const rate = computeWinRate([
+      claim('offer-1', 'won', T0, { workKey: KEY }),
+      recovery('po-1', T0 + 20 * MINUTE, { workKey: 'aj-999|ms-my|translation' }),
+    ]);
+
+    expect(rate).toMatchObject({ won: 2, recovered: 1, offers: 2 });
+  });
+
+  it('matches a legacy claim with no key by equal effort and a deadline within a minute', () => {
+    const rate = computeWinRate([
+      claim('offer-1', 'won', T0, { effortWords: 1_250, deadlineMs: DUE }),
+      recovery('po-1', T0 + 20 * MINUTE, {
+        workKey: KEY,
+        effortWords: 1_250,
+        deadlineMs: DUE + 30_000,
+      }),
+    ]);
+
+    expect(rate).toMatchObject({ won: 1, recovered: 0, offers: 1 });
+  });
+
+  it('refuses a legacy match on different effort, a deadline over a minute off, or a later claim', () => {
+    const effortDiffers = computeWinRate([
+      claim('a', 'won', T0, { effortWords: 1_250, deadlineMs: DUE }),
+      recovery('po-a', T0 + MINUTE, { effortWords: 1_251, deadlineMs: DUE }),
+    ]);
+    const deadlineFar = computeWinRate([
+      claim('a', 'won', T0, { effortWords: 1_250, deadlineMs: DUE }),
+      recovery('po-a', T0 + MINUTE, { effortWords: 1_250, deadlineMs: DUE + 60_001 }),
+    ]);
+    const claimAfter = computeWinRate([
+      claim('a', 'won', T0 + 10 * MINUTE, { effortWords: 1_250, deadlineMs: DUE }),
+      recovery('po-a', T0, { effortWords: 1_250, deadlineMs: DUE }),
+    ]);
+
+    for (const rate of [effortDiffers, deadlineFar, claimAfter]) {
+      expect(rate).toMatchObject({ won: 2, recovered: 1, offers: 2 });
+    }
+  });
+
+  it('never merges into a lost claim — that would let a recovery overturn a settled loss', () => {
+    const rate = computeWinRate([
+      claim('offer-1', 'lost', T0, { workKey: KEY }),
+      recovery('po-1', T0 + 20 * MINUTE, { workKey: KEY }),
+    ]);
+
+    expect(rate).toMatchObject({ won: 1, lost: 1, offers: 2 });
+  });
+
+  it('still counts a recovery that matches no claim — work nobody announced is a real win', () => {
+    const rate = computeWinRate([recovery('po-orphan', T0, { workKey: KEY })]);
+
+    expect(rate).toMatchObject({ won: 1, recovered: 1, winnable: 1, offers: 1 });
+  });
+
+  it('lets one claim absorb at most one recovery, earliest recovery first, nearest claim first', () => {
+    const same = { effortWords: 500, deadlineMs: DUE };
+    const rate = computeWinRate([
+      claim('far', 'won', T0, same),
+      claim('near', 'unknown', T0 + 30 * MINUTE, same),
+      // po-1 goes to the nearest claim ('near', settling it); po-2 to the one left ('far');
+      // po-3 finds no claim free and stands on its own.
+      recovery('po-1', T0 + 40 * MINUTE, same),
+      recovery('po-2', T0 + 50 * MINUTE, same),
+      recovery('po-3', T0 + 60 * MINUTE, same),
+    ]);
+
+    expect(rate).toMatchObject({ won: 3, recovered: 2, unknownPending: 0, offers: 3 });
+  });
+
+  it('prefers a key match over a nearer legacy match for the same recovery', () => {
+    const rate = computeWinRate([
+      claim('legacy', 'unknown', T0 + 19 * MINUTE, { effortWords: 4, deadlineMs: DUE }),
+      claim('keyed', 'won', T0, { workKey: KEY, effortWords: 4, deadlineMs: DUE }),
+      recovery('po-1', T0 + 20 * MINUTE, { workKey: KEY, effortWords: 4, deadlineMs: DUE }),
+    ]);
+
+    // The keyed claim absorbed it; the legacy unknown claim is still unknown.
+    expect(rate).toMatchObject({ won: 1, unknownPending: 1, offers: 2 });
+  });
+
+  it('gives the same answer whatever order the events arrive in', () => {
+    const same = { effortWords: 500, deadlineMs: DUE };
+    const events = [
+      claim('far', 'unknown', T0, same),
+      claim('near', 'won', T0 + 30 * MINUTE, same),
+      recovery('po-1', T0 + 40 * MINUTE, same),
+    ];
+
+    const forward = computeWinRate(events);
+    expect(computeWinRate([...events].reverse())).toEqual(forward);
+    // 'near' took the recovery, so 'far' is still pending.
+    expect(forward).toMatchObject({ won: 1, unknownPending: 1 });
+  });
+
+  it('reads the live shape — 16 won claims plus duplicate recoveries — as 16 won, not 29', () => {
+    const events: ClaimEvent[] = [];
+    const deadlineOf = (i: number): number => T0 + (30 + i) * 60 * MINUTE;
+    const keyOf = (i: number): string => `aj-${String(400 + i)}|ms-my|translation`;
+    for (let i = 0; i < 16; i++) {
+      // Half the claims predate identities (no key); half carry one.
+      const opts =
+        i % 2 === 0
+          ? { effortWords: 100 + i, deadlineMs: deadlineOf(i) }
+          : { workKey: keyOf(i), effortWords: 100 + i, deadlineMs: deadlineOf(i) };
+      events.push(claim(`offer-${String(i)}`, 'won', T0 + i * MINUTE, opts));
+    }
+    // Thirteen of them were found again by reconciliation under their purchase-order id.
+    for (let i = 0; i < 13; i++) {
+      events.push(
+        recovery(`po-${String(i)}`, T0 + (60 + i) * MINUTE, {
+          workKey: keyOf(i),
+          effortWords: 100 + i,
+          deadlineMs: deadlineOf(i),
+        }),
+      );
+    }
+    ['lost', 'lost', 'failed', 'unknown', 'lost'].forEach((outcome, i) => {
+      events.push(claim(`other-${String(i)}`, outcome as ClaimOutcome, T0 + 2 * 60 * MINUTE));
+    });
+
+    const rate = computeWinRate(events);
+
+    expect(rate).toMatchObject({ won: 16, recovered: 0, winnable: 21, offers: 21 });
+  });
+});
 
 describe('the companion count — offers our own rules turned away (FR-017a)', () => {
   it('counts each turned-away offer once and breaks the total down by rule', () => {

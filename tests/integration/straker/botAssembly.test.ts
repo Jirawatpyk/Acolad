@@ -518,7 +518,9 @@ describe('assembleStrakerBot — the outcomes actually reach a destination (T056
   function recordingSenders(): StrakerSenders & { readonly got: Delivered } {
     const got: Delivered = { offers: [], tracking: [], alerts: [] };
     const make = (into: unknown[]) => async (payload: unknown) => {
-      into.push(payload);
+      // The 09:00 daily report shares the offers channel and these tests run at 10:00 on a
+      // working day; it has its own suite (`dailyReport.test.ts`), so it is not counted here.
+      if ((payload as { kind?: unknown }).kind !== 'daily_report') into.push(payload);
       return { ok: true } as const;
     };
     return {
