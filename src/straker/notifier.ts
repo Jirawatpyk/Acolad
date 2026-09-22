@@ -160,6 +160,12 @@ export const OFFER_ALERT_CONDITIONS = [
   'work_recovered',
   'offer_effort_unknown',
   'offer_deadline_unknown',
+  // Raised by reconciliation about held work (2026-09-22). Each was a per-pass warn log that
+  // nobody reads at 03:00; each now reaches Chat ONCE per offer — the event id is
+  // `<condition>:<objId>` and the outbox dedups on it — while the warn keeps every pass.
+  'held_work_unmatched',
+  'held_work_absent_keyless',
+  'adopted_without_effort',
 ] as const;
 export type OfferAlertCondition = (typeof OFFER_ALERT_CONDITIONS)[number];
 
@@ -341,6 +347,30 @@ const ALERT_SPECS: Readonly<Record<StrakerAlertCondition, AlertSpec>> = {
       'The scheduling rules could not decide, so the offer was skipped — and the assumption every later decision rests on has failed',
     action:
       'Compare the offer payload against the recorded capture evidence and update src/straker/offerParse.ts if the field moved',
+  },
+  held_work_unmatched: {
+    severity: 'warn',
+    title: 'Held Work Matches No Portal Record',
+    impact:
+      'Work we hold matches no purchase order and no assigned job, so nothing can tell when it is finished — it stays counted against its deadline day until a day after the deadline',
+    action:
+      "Check that the offer's `service` still equals the portal's `po_type` (the work key depends on it), and look the job up on the portal",
+  },
+  held_work_absent_keyless: {
+    severity: 'warn',
+    title: 'Held Work Absent From The Portal',
+    impact:
+      'Work we hold carries no work key and is absent from both the purchase-order and the assigned-job lists, so it stays counted against its deadline day until a day after the deadline',
+    action:
+      'Check on the portal whether the job still exists — if it was cancelled, the ceiling is under-stating what the team can take until the hold lapses',
+  },
+  adopted_without_effort: {
+    severity: 'warn',
+    title: 'Purchase Order Adopted Without A Word Count',
+    impact:
+      'A purchase order won before work identities existed was held at zero words, because no earlier claim gave its word count — the ceiling under-counts that deadline day',
+    action:
+      "Check the job's word count on the portal; reconciliation re-weighs the hold once its assigned job reports one",
   },
   read_retries_exhausted: {
     severity: 'critical',

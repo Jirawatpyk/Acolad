@@ -78,6 +78,7 @@ import type { StrakerOutbox, StrakerOutboxChannel } from './outbox.js';
 import { countsTowardLedger } from './outcomePolicy.js';
 import {
   CLAIM_ALERT_CONDITION,
+  type OfferAlertCondition,
   type StrakerOfferAlert,
   type StrakerOfferAnnouncement,
 } from './notifier.js';
@@ -127,6 +128,12 @@ const RECOVERED: ClaimOutcome = 'recovered';
  */
 const RECOVERED_ANNOUNCED: StrakerOfferAnnouncement['outcome'] = 'recovered';
 const RECOVERED_ALERT_CONDITION = CLAIM_ALERT_CONDITION[RECOVERED]!;
+
+/** The alerts reconciliation raises about held work it keeps — once per offer. */
+type HeldWorkAlertCondition = Extract<
+  OfferAlertCondition,
+  'held_work_unmatched' | 'held_work_absent_keyless' | 'adopted_without_effort'
+>;
 
 /** How many jobs to ask for per page. The read is paginated; the offer list is not. */
 const DEFAULT_PAGE_LIMIT = 100;
@@ -1141,6 +1148,13 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
             'held work matches no purchase order and no assigned job — kept held; check whether ' +
               "the offer's service and the portal's po_type still agree",
           );
+          raiseHeldWorkAlert(
+            'held_work_unmatched',
+            row,
+            `held under work key ${key}, which no purchase order and no assigned job carries — ` +
+              'kept held until a day after its deadline',
+            atMs,
+          );
         } else {
           deps.logger.warn(
             {
@@ -1153,6 +1167,13 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
             'held work has no work key and is absent from both lists — kept held until its ' +
               'deadline is a day past, because its purchase order or job could not be matched anyway',
           );
+          raiseHeldWorkAlert(
+            'held_work_absent_keyless',
+            row,
+            'held with no work key and absent from both the purchase-order and the assigned-job ' +
+              'lists — kept held until a day after its deadline',
+            atMs,
+          );
         }
         continue;
       }
@@ -1164,6 +1185,58 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       );
     }
     return released;
+  }
+
+  /**
+   * Queue a once-per-offer alert about held work (2026-09-22) — the conditions that were a
+   * per-pass warn log only. The event id is `<condition>:<objId>`, so the outbox's dedup on
+   * (event id, channel) makes the per-pass call harmless: the first pass queues the card,
+   * every later pass is refused as a duplicate.
+   *
+   * **Never throws.** The callers are outside any transaction (`releaseFinished`) or after
+   * one has committed (`adopt`), so a throw would fail a pass whose real work succeeded, or —
+   * inside the release loop — skip every held row after this one. A lost alert is logged at
+   * error level instead; the warn log beside every call still carries the signal.
+   */
+  function raiseHeldWorkAlert(
+    condition: HeldWorkAlertCondition,
+    subject: {
+      readonly objId: string;
+      readonly effortWords: number | null;
+      readonly deadlineMs: number | null;
+      readonly languageDirection?: string | null;
+      readonly identity?: WorkIdentity;
+    },
+    detail: string,
+    atMs: number,
+  ): void {
+    const alert: StrakerOfferAlert = {
+      kind: 'offer',
+      condition,
+      objId: subject.objId,
+      detail,
+      occurredAtMs: atMs,
+      ...(subject.languageDirection == null
+        ? {}
+        : { languageDirection: subject.languageDirection }),
+      ...(subject.effortWords === null ? {} : { effortWords: subject.effortWords }),
+      ...(subject.deadlineMs === null ? {} : { deadlineMs: subject.deadlineMs }),
+      ...workLabels(subject.identity),
+    };
+    try {
+      enqueue('alerts', `${condition}:${subject.objId}`, atMs, alert);
+    } catch (err) {
+      deps.logger.error(
+        {
+          module: 'reconcile',
+          action: 'alert',
+          outcome: 'failed',
+          condition,
+          objId: subject.objId,
+        },
+        `an alert about held work could not be queued and will not be delivered: ${message(err)}`,
+      );
+    }
   }
 
   /**
@@ -1307,6 +1380,10 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    * nearest deadline, then oldest hold, then id — and one-to-one within a pass.
    *
    * Called inside the transaction that made the new row, so a failure rolls back both.
+   *
+   * Returns the row the hold was taken from, or null when nothing was transferred. A transfer
+   * means the work was already announced — as the claim's own Won card and row — so the
+   * caller must not announce it again as "recovered" (2026-09-22).
    */
   function transferKeyless(
     pool: KeylessPool,
@@ -1314,8 +1391,8 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
     effortWords: number | null,
     deadlineMs: number | null,
     atMs: number,
-  ): void {
-    if (effortWords === null || deadlineMs === null) return;
+  ): HeldWork | null {
+    if (effortWords === null || deadlineMs === null) return null;
     const from = pool.rows
       .filter(
         (w) =>
@@ -1331,7 +1408,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
           a.heldSinceMs - b.heldSinceMs ||
           (a.objId < b.objId ? -1 : a.objId > b.objId ? 1 : 0),
       )[0];
-    if (from === undefined) return;
+    if (from === undefined) return null;
     deps.ledger.release(from.objId, atMs);
     pool.taken.add(from.objId);
     deps.logger.info(
@@ -1339,12 +1416,16 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         module: 'reconcile',
         action: 'transfer',
         outcome: 'ok',
+        // Always false: the claim was announced when won, and neither caller (recovery or
+        // the silent adoption) announces the new row again.
+        announced: false,
         from: from.objId,
         to: toObjId,
         effortWords,
       },
       "moved a keyless claim's hold onto its purchase order / assigned job, so the work is counted once",
     );
+    return from;
   }
 
   /**
@@ -1386,6 +1467,25 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         'was announced when won' +
         (effort === null ? '; no earlier claim gave its word count, so it is held at zero' : ''),
     );
+    // Zero is the one answer that under-counts the day, whether no claim was found or the
+    // one found recorded zero. After the commit and never-throwing: a warn card must not be
+    // able to roll back the adoption, fail the pass and keep claiming paused at start.
+    if (effort === null || effort === 0) {
+      raiseHeldWorkAlert(
+        'adopted_without_effort',
+        {
+          objId: order.poObjId,
+          effortWords: effort,
+          deadlineMs: order.deadlineMs,
+          languageDirection: order.languageDirection,
+          identity: order.identity,
+        },
+        effort === null
+          ? 'adopted at zero words: no earlier claim for this deadline recorded a word count'
+          : 'adopted at zero words: the earlier claim for this deadline recorded zero',
+        atMs,
+      );
+    }
   }
 
   /**
@@ -1426,7 +1526,19 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
           )
         : null;
       // Same transaction as the hold, so the work is never counted twice nor not at all.
-      transferKeyless(pool, item.objId, item.effortWords, item.deadlineMs, atMs);
+      const transferredFrom = transferKeyless(
+        pool,
+        item.objId,
+        item.effortWords,
+        item.deadlineMs,
+        atMs,
+      );
+      // The work was a keyless claim we won and already announced — its Won card and its
+      // tracking row exist (the pool holds only won claims: nothing else is ever held under a
+      // claim's id). The recovery event and the hold above are bookkeeping;
+      // a "Work Recovered" card, an unrecorded-work alert and a second sheet row would all
+      // say the claim path lost a record it did not lose (2026-09-22).
+      if (transferredFrom !== null) return;
 
       const detail = describeRecovery(item, hold);
 
