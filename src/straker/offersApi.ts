@@ -41,6 +41,13 @@ export interface ListOffersOptions {
    * `tests/integration/straker/botWiring.test.ts` started asserting which door was used.
    */
   readonly retry?: boolean;
+  /**
+   * Keep the first entry of any `obj_id` the reply lists more than once, and report the
+   * repeats here (2026-09-22). One offer listed twice would otherwise be decided twice and
+   * claimed twice in the same cycle — an irreversible double commitment. Opt-in for the same
+   * reason as `retry`: the capture probe must keep reading the reply byte-for-byte.
+   */
+  readonly onDuplicate?: (objIds: readonly string[]) => void;
 }
 
 export async function listOpenOffers(
@@ -66,5 +73,20 @@ export async function listOpenOffers(
     }
   }
 
-  return reply as readonly RawOffer[];
+  const offers = reply as readonly RawOffer[];
+  if (options.onDuplicate === undefined) return offers;
+
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  const unique: RawOffer[] = [];
+  for (const offer of offers) {
+    if (seen.has(offer.obj_id)) {
+      repeated.add(offer.obj_id);
+      continue;
+    }
+    seen.add(offer.obj_id);
+    unique.push(offer);
+  }
+  if (repeated.size > 0) options.onDuplicate([...repeated]);
+  return unique;
 }

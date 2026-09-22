@@ -844,6 +844,19 @@ export function isSessionExpired(error: unknown): boolean {
 }
 
 /**
+ * The portal refusing a sign-in's credentials — 401 or 403 — as against failing to answer it.
+ *
+ * The poll cycle's sign-in backoff escalates to an hour on refusals, and it used to count
+ * every failure as one. On 2026-09-21 the portal answered HTML and 405 for eight hours while
+ * it moved domains, and the bot read each as a refused password, backed off accordingly and
+ * logged "refused these credentials" throughout. A timeout, a 5xx, a 405 or a body that is
+ * not JSON says nothing about the password; only these two statuses do.
+ */
+export function isCredentialRefusal(error: unknown): boolean {
+  return error instanceof StrakerHttpError && (error.status === 401 || error.status === 403);
+}
+
+/**
  * Equal jitter — half the step fixed, half of it random — rather than full jitter. Full
  * jitter can draw a near-zero wait, and a client that comes back immediately has not
  * backed off at all; this way every interval still grows however the dice fall, which is

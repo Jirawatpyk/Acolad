@@ -69,6 +69,7 @@ interface FakeStraker {
   offers: Handler;
   claim: ClaimHandler;
   assigned: Handler;
+  orders: Handler;
   readonly calls: Exchange[];
   readonly fetch: typeof fetch;
 }
@@ -129,6 +130,7 @@ function fakeStraker(): FakeStraker {
     offers: (async () => json([])) as Handler,
     claim: (async () => json({})) as ClaimHandler,
     assigned: (async () => json(envelope([]))) as Handler,
+    orders: (async () => json(envelope([]))) as Handler,
   };
 
   const impl: typeof fetch = async (input, init) => {
@@ -154,7 +156,7 @@ function fakeStraker(): FakeStraker {
       return handlers.assigned(exchange);
     }
     // Reconciliation also reads where won work waits for a person (2026-09-22).
-    if (exchange.path === '/api/hitl/vendor/purchase-orders') return json(envelope([]));
+    if (exchange.path === '/api/hitl/vendor/purchase-orders') return handlers.orders(exchange);
     throw new Error(
       `STUB: nothing routes ${exchange.method} ${exchange.path} — the bot asked for something ` +
         'this suite did not expect, which is itself the finding',
@@ -651,6 +653,18 @@ describe('failure mode: the reply is not the shape the contract says', () => {
     expect(bot.assembly.store.sightingsOf(objId)[0]?.notFoundAtMs).toBeNull();
   });
 
+  it('claims an offer listed twice in one reply exactly once', async () => {
+    const portal = fakeStraker();
+    const offer = offerFixture('aj-265:ms-my');
+    portal.offers = async () => json([offer, { ...offer }]);
+    const bot = assemble(portal);
+
+    await bot.assembly.cycle.runOnce();
+
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
+    expect(bot.assembly.store.heldWork()).toHaveLength(1);
+  });
+
   it('refuses an entry with no identity, because an offer we cannot name we cannot track', async () => {
     const portal = fakeStraker();
     const { bot, objId } = await botThatHasSeenAnOffer(portal);
@@ -974,6 +988,108 @@ describe('failure mode: a reporting destination is unavailable', () => {
 // Restart mid-cycle
 // ===========================================================================
 
+describe('failure mode: reconciliation cannot complete on start', () => {
+  /**
+   * The restart guard reads held work, and held work after a crash is only as good as the
+   * first reconciliation. If that pass fails — the purchase-order endpoint down, say — a
+   * claim whose record died with the previous process is invisible, and a still-listed offer
+   * would be claimed a second time. So nothing is claimed until one pass has succeeded.
+   */
+  it('claims nothing until a pass succeeds, retrying it every minute rather than every fifteen', async () => {
+    const offer = offerFixture('aj-265:ms-my');
+    const portal = fakeStraker();
+    portal.offers = async () => json([offer]);
+    let ordersDown = true;
+    portal.orders = async () => (ordersDown ? json({ error: 'down' }, 503) : json(envelope([])));
+    const bot = assemble(portal);
+
+    await bot.assembly.cycle.runOnce();
+    clock += 10_000;
+    await bot.assembly.cycle.runOnce();
+
+    // Read and recorded, never claimed — and no skip row, because nothing was decided against it.
+    expect(callsTo(portal, 'offers').length).toBeGreaterThan(0);
+    expect(callsTo(portal, 'claim')).toEqual([]);
+    expect(bot.assembly.store.sightingsOf(offer.obj_id)).toHaveLength(1);
+    expect(bot.assembly.store.eventsOf(offer.obj_id)).toEqual([]);
+
+    // The portal recovers. Until a first pass succeeds the reconciler retries on a one-minute
+    // cadence, so claiming resumes a minute after the failed pass, not fifteen.
+    ordersDown = false;
+    clock = NOW + 60_000;
+    await bot.assembly.cycle.runOnce();
+
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
+    expect(bot.assembly.store.eventsOf(offer.obj_id)).toContainEqual(
+      expect.objectContaining({ eventType: 'claim', outcome: 'won' }),
+    );
+  });
+
+  it('fails the heartbeat once claiming has been paused for more than ten minutes', async () => {
+    const portal = fakeStraker();
+    portal.offers = async () => json([]);
+    portal.orders = async () => json({ error: 'down' }, 503);
+    const bot = assemble(portal);
+
+    // Reconciliation failing is FR-016c's alert for the first ten minutes: the bot is still
+    // reading and recording, so the liveness signal stays green...
+    await expect(bot.assembly.cycle.runOnce()).resolves.toBe(true);
+    clock = NOW + 9 * 60_000;
+    await expect(bot.assembly.cycle.runOnce()).resolves.toBe(true);
+
+    // ...but a bot that cannot claim at all for longer than that is not doing its job.
+    clock = NOW + 10 * 60_000 + 1;
+    await expect(bot.assembly.cycle.runOnce()).resolves.toBe(false);
+
+    // And it clears the moment a pass succeeds.
+    portal.orders = async () => json(envelope([]));
+    clock = NOW + 12 * 60_000;
+    await expect(bot.assembly.cycle.runOnce()).resolves.toBe(true);
+  });
+});
+
+describe('failure mode: a KEYLESS claim lands and the process dies before recording it', () => {
+  /**
+   * The restart guard matches held work by key, and an offer without a job reference has no
+   * key. Its purchase order does (the portal fills `job_ref` there) and carries no word count,
+   * so the recovered row is weighed at zero. The guard therefore also matches a keyless offer
+   * against recovered held work by deadline (within a minute) and effort, zero counting as
+   * unknown, so the restart cannot claim it a second time.
+   */
+  it('does not claim it again after the restart recovers its purchase order', async () => {
+    const offer = { ...offerFixture('aj-265:ms-my'), job_ref: null };
+    const portal = fakeStraker();
+    const orders: Record<string, unknown>[] = [];
+    portal.orders = async () => json(envelope(orders));
+    portal.offers = async () => json([offer]);
+    const before = assemble(portal);
+    portal.claim = async () => {
+      orders.push({
+        po_obj_id: 'po-keyless-1',
+        status: 'pending',
+        job_ref: 'aj-265',
+        source_language_code: 'en-us',
+        target_language_code: 'ms-my',
+        po_type: 'translation',
+        due_at: '2026-09-15T23:20:00Z',
+      });
+      before.assembly.close();
+      return json({});
+    };
+    await before.assembly.cycle.runOnce();
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
+
+    clock = NOW + 60_000;
+    const after = reopen(portal, before.stateDir);
+    await after.assembly.cycle.runOnce();
+    clock += 10_000;
+    await after.assembly.cycle.runOnce();
+
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
+    expect(after.assembly.store.heldWork().map((h) => h.objId)).toEqual(['po-keyless-1']);
+  });
+});
+
 describe('failure mode: the process dies between claiming and recording', () => {
   /**
    * The window FR-003 deliberately opens and FR-016a closes.
@@ -1011,15 +1127,20 @@ describe('failure mode: the process dies between claiming and recording', () => 
 
     // Cycle 2: the claim lands on the portal, and the process dies before it is recorded.
     portal.offers = async () => json([seen, lost]);
-    portal.claim = async (_exchange, offerId) => {
+    // The assigned job carries an id of its OWN (2026-09-22) and shares only the work key
+    // with the offer — job ref, target language, service. It used to reuse the offer's id,
+    // which let a same-id lookup stand in for the key and hid the restart re-claim below.
+    const jobId = `job-of-${lost.obj_id}`;
+    portal.claim = async () => {
       assignedOnPortal.push({
-        obj_id: offerId,
+        obj_id: jobId,
         status: 'assigned',
         words: lost['words'],
         due_at: '2026-09-15T16:20:00Z',
         source_lang: lost['source_lang'],
         target_lang: lost['target_lang'],
         external_job_id: lost['job_ref'],
+        service: lost['service'],
       });
       before.assembly.close();
       return json({});
@@ -1027,25 +1148,36 @@ describe('failure mode: the process dies between claiming and recording', () => 
     await before.assembly.cycle.runOnce();
 
     // The state the crash left: the portal holds the work, our record does not.
-    expect(assignedOnPortal.map((w) => w['obj_id'])).toEqual([lost.obj_id]);
+    expect(assignedOnPortal.map((w) => w['obj_id'])).toEqual([jobId]);
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
 
     // --- the restart ---------------------------------------------------------
+    // The offer is STILL LISTED after the restart. This test used to empty the list here,
+    // which hid the worst thing a restart could do: nothing recorded the claim, the in-memory
+    // guard died with the process, and the first cycle — which ran before reconciliation —
+    // sent a second /accept for work the team already held (FR-019c).
     clock = NOW + 60_000;
-    portal.offers = async () => json([]);
+    portal.offers = async () => json([lost]);
     const after = reopen(portal, before.stateDir, { STRAKER_EXCLUDED_LANGUAGE_PAIRS: 'en-us>th' });
 
     await after.assembly.cycle.runOnce();
+    clock += 10_000;
+    await after.assembly.cycle.runOnce();
+
+    // Exactly one claim request, ever: reconciliation runs before the first cycle on start
+    // and holds the work under its key, and the cycle will not claim held work again.
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
 
     // One pass, and the gap is closed: reconciliation is due on the first call by design,
     // which is FR-016a's "on start".
     const recovered = after.assembly.store
-      .eventsOf(lost.obj_id)
+      .eventsOf(jobId)
       .filter((e): e is ClaimEvent => e.eventType === 'claim' || e.eventType === 'recovery');
     expect(recovered.map((e) => e.outcome)).toContain('recovered');
     // Marked recovered rather than claimed, so a recurring gap between the two records is
     // visible instead of smoothed over (FR-016b) — and counted, so the day it lands on
     // stops pretending it has room it does not have.
-    expect(after.assembly.store.heldWork().map((h) => h.objId)).toEqual([lost.obj_id]);
+    expect(after.assembly.store.heldWork().map((h) => h.objId)).toEqual([jobId]);
     expect(after.senders.got.offers.map((o) => o['outcome'])).toContain('recovered');
 
     // And the tracker came back from disk rather than from zero. The appearance `seen`
@@ -1055,6 +1187,6 @@ describe('failure mode: the process dies between claiming and recording', () => 
     // listed it would reopen row 1 and push `last_seen_at_ms` past its own `not_found_at_ms`.
     const rows = after.assembly.store.sightingsOf(seen.obj_id);
     expect(rows.map((r) => r.sighting)).toEqual([1]);
-    expect(rows[0]?.notFoundAtMs).toBe(clock);
+    expect(rows[0]?.notFoundAtMs).toBe(NOW + 60_000);
   });
 });

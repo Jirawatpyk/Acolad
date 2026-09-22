@@ -168,6 +168,7 @@ function fixture(opts: FixtureOptions = {}): Fixture {
       store.legacyClaimEffortNear(deadlineMs, windowMs),
     metaFlagSetAt: (key: string) => store.metaFlagSetAt(key),
     setMetaFlag: (key: string, atMs: number) => store.setMetaFlag(key, atMs),
+    claimedObjIds: () => store.claimedObjIds(),
   };
 
   const tracingOutbox = {
@@ -1070,6 +1071,21 @@ describe('reading the portal assigned-work list (contract 5)', () => {
     expect(c.paths).toEqual(['/api/vendors/v1/assigned-jobs?limit=100&offset=0']);
   });
 
+  it('refuses a replayed page rather than counting it toward the total (page 2 = page 1)', async () => {
+    // A portal that serves page one twice delivers `total` entries and looks complete — while
+    // the real second page, and the work on it, was never read.
+    const page = { items: [item('a'), item('b')], total: 4, limit: 2, offset: 0 };
+    const c = client([page, { ...page, offset: 2 }]);
+
+    await expect(readAssignedWork(c, 'v1', { pageLimit: 2 })).rejects.toThrow(/duplicate/i);
+  });
+
+  it('refuses a duplicate obj_id inside one page too', async () => {
+    const c = client([{ items: [item('a'), item('a')], total: 2, limit: 100, offset: 0 }]);
+
+    await expect(readAssignedWork(c, 'v1')).rejects.toThrow(/duplicate/i);
+  });
+
   it('refuses a bare array rather than reading an envelope change as no work', async () => {
     // The silent zero, from the other side: `job-offers` returns a bare array and
     // `assigned-jobs` an envelope, and a permissive cast that reads one as the other says
@@ -1133,7 +1149,16 @@ describe('reading the portal assigned-work list (contract 5)', () => {
   });
 
   it('stops rather than looping forever when the portal never finishes the list', async () => {
-    const c = client([{ items: [item('a')], total: 10_000, limit: 1, offset: 0 }]);
+    // Distinct entries per page: a replayed page is refused on its own grounds (duplicates),
+    // and this test is about the page cap.
+    const c = client(
+      ['a', 'b', 'c', 'd'].map((id, offset) => ({
+        items: [item(id)],
+        total: 10_000,
+        limit: 1,
+        offset,
+      })),
+    );
 
     await expect(readAssignedWork(c, 'v1', { pageLimit: 1, maxPages: 3 })).rejects.toThrow(
       /pages|incomplete/i,
@@ -1376,6 +1401,24 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     // The portal now lists only job-1, and says so completely: job-2 is gone.
     f.setAssigned([assignedWork('job-1')]);
     f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    const early = await f.reconciler.runIfDue();
+
+    // Not yet (2026-09-22). This work carries no work key, so a purchase order or assigned
+    // job for it would never match by id either — absence from both lists cannot tell
+    // "gone" from "moved on under a new id". It is held until its deadline is a day past,
+    // the same rule keyed work has, and said so on the pass.
+    expect(early).toMatchObject({ ran: true, ok: true, released: [] });
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['job-1', 'job-2']);
+    expect(
+      f.logs.some(
+        (l) =>
+          l.level === 'warn' &&
+          l.fields['outcome'] === 'held_work_absent_keyless' &&
+          l.fields['objId'] === 'job-2',
+      ),
+    ).toBe(true);
+
+    f.setNow(DEADLINE_MS + 24 * 3_600_000 + RECONCILE_INTERVAL_MS);
     const outcome = await f.reconciler.runIfDue();
 
     expect(outcome).toMatchObject({ ran: true, ok: true, released: ['job-2'] });
@@ -1412,9 +1455,11 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     ).toBe(false);
   });
 
-  it('releases it once it has been absent for a full interval', async () => {
-    // The other edge of the grace: it delays a release, it does not prevent one. Work held
-    // for a whole interval and still unlisted really has gone.
+  it('releases it once its deadline is a day past, not after one interval', async () => {
+    // The other edge of the grace: it delays a release, it does not prevent one. This used
+    // to release after a single interval; a keyless claim (an offer without job_ref or
+    // service is still claimed) can never be matched by its purchase order or assigned job,
+    // so one interval handed its ceiling back while the team still owed it.
     const f = fixture();
     f.store.hold({
       objId: 'long-gone',
@@ -1426,10 +1471,33 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     f.setAssigned([]);
     f.setNow(NOW_MS);
 
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true, released: [] });
+
+    // One minute short of the grace: still held.
+    f.setNow(DEADLINE_MS + 24 * 3_600_000 - 60_000);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true, released: [] });
+
+    f.setNow(DEADLINE_MS + 24 * 3_600_000 + RECONCILE_INTERVAL_MS);
     const outcome = await f.reconciler.runIfDue();
 
     expect(outcome).toMatchObject({ ran: true, ok: true, released: ['long-gone'] });
     expect(f.store.heldWork()).toEqual([]);
+  });
+
+  it('keeps keyless absent work with no deadline held, since no grace can end', async () => {
+    const f = fixture();
+    f.store.hold({
+      objId: 'no-deadline',
+      effortWords: 100,
+      kind: 'translation',
+      deadlineMs: null,
+      heldSinceMs: NOW_MS - RECONCILE_INTERVAL_MS,
+    });
+    f.setAssigned([]);
+    f.setNow(NOW_MS + 30 * 24 * 3_600_000);
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true, released: [] });
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['no-deadline']);
   });
 
   it('gives the ceiling back when the absent work is released, not just the row', async () => {
@@ -1451,9 +1519,28 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
     await f.reconciler.runIfDue();
 
+    // Absent but keyless, and its deadline not yet a day gone: still counted.
+    expect(
+      f.ledger.checkCapacity(
+        { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
+        NOW_MS + RECONCILE_INTERVAL_MS,
+      ).fits,
+    ).toBe(false);
+
+    const later = DEADLINE_MS + 24 * 3_600_000 + RECONCILE_INTERVAL_MS;
+    f.setNow(later);
+    await f.reconciler.runIfDue();
+
+    // A later-deadline offer, so the check is about the released row and not about an
+    // overdue deadline.
     const freed = f.ledger.checkCapacity(
-      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
-      NOW_MS + RECONCILE_INTERVAL_MS,
+      {
+        objId: 'job-2',
+        effortWords: 100,
+        deadlineMs: DEADLINE_MS + 2 * 24 * 3_600_000,
+        kind: 'translation',
+      },
+      later,
     );
     expect(freed.fits).toBe(true);
   });
@@ -1802,6 +1889,14 @@ describe('readPurchaseOrders', () => {
     };
   }
 
+  it('refuses a replayed page rather than counting it toward the total (page 2 = page 1)', async () => {
+    const other = { ...PO, po_obj_id: 'po-other' };
+    const page = { items: [PO, other], total: 4, page: 1, page_size: 2 };
+    const d = door([page, { ...page, page: 2 }]);
+
+    await expect(readPurchaseOrders(d, 'vendor-1', { pageSize: 2 })).rejects.toThrow(/duplicate/i);
+  });
+
   it('reads the page the portal web app reads, and names each order by its key', async () => {
     const d = door([{ items: [PO], total: 1, page: 1, page_size: 100 }]);
 
@@ -2022,5 +2117,219 @@ describe('review fixes — the paths the first cut missed (2026-09-22)', () => {
     expect(f.store.heldWork()).toEqual([
       expect.objectContaining({ objId: 'po-9', effortWords: 300 }),
     ]);
+  });
+});
+
+describe('the pass line counts what the pass did (observability, 2026-09-22)', () => {
+  function passLine(f: Fixture): Record<string, unknown> | undefined {
+    return f.logs.find((l) => l.fields['module'] === 'reconcile' && l.fields['action'] === 'pass')
+      ?.fields;
+  }
+
+  it('counts orders read, settlements and effort upgrades', async () => {
+    const f = fixture();
+    adopted(f);
+    // An unknown claim that its purchase order settles.
+    f.store.recordEvent({
+      objId: 'offer-1',
+      eventType: 'claim',
+      outcome: 'unknown',
+      effortWords: 20,
+      deadlineMs: DEADLINE_MS,
+      occurredAtMs: NOW_MS - 60_000,
+      identity: IDENTITY,
+    });
+    // Held work weighed at zero that its assigned job re-weighs.
+    const otherKey = 'aj-2|ms-my|translation';
+    const other = { jobRef: 'aj-2', title: null, service: 'translation', workKey: otherKey };
+    f.store.hold({
+      objId: 'po-2',
+      effortWords: 0,
+      kind: 'translation',
+      deadlineMs: DEADLINE_MS,
+      heldSinceMs: NOW_MS - 60_000,
+      identity: other,
+    });
+    f.setPurchaseOrders([
+      purchaseOrder('po-1'),
+      purchaseOrder('po-2', { status: 'accepted', identity: other }),
+    ]);
+    f.setAssigned([assignedWork('job-2', { effortWords: 500, identity: other })]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(passLine(f)).toMatchObject({
+      outcome: 'ok',
+      orders: 2,
+      settled: 1,
+      adopted: 0,
+      effortUpgraded: 1,
+    });
+    expect(outcome).toMatchObject({
+      ran: true,
+      ok: true,
+      settled: 1,
+      adopted: 0,
+      effortUpgraded: 1,
+    });
+  });
+
+  it('counts adoptions on the one-time adoption pass', async () => {
+    const f = fixture();
+    f.setPurchaseOrders([purchaseOrder('po-1')]);
+
+    await f.reconciler.runIfDue();
+
+    expect(passLine(f)).toMatchObject({ orders: 1, settled: 0, adopted: 1, effortUpgraded: 0 });
+  });
+});
+
+describe('a keyless win is held once, not twice, when its order or job appears (2026-09-22)', () => {
+  /** A claim the poll cycle won from an offer that carried no job reference: no work key. */
+  function holdKeylessWin(f: Fixture, effortWords = 100): void {
+    f.store.recordEvent({
+      objId: 'offer-k',
+      eventType: 'claim',
+      outcome: 'won',
+      effortWords,
+      deadlineMs: DEADLINE_MS,
+      occurredAtMs: NOW_MS - 60_000,
+    });
+    f.store.hold({
+      objId: 'offer-k',
+      effortWords,
+      kind: 'translation',
+      deadlineMs: DEADLINE_MS,
+      heldSinceMs: NOW_MS - 60_000,
+    });
+  }
+  const sum = (f: Fixture): number => f.store.heldWork().reduce((n, w) => n + w.effortWords, 0);
+
+  it('transfers the hold to the recovered purchase order: one row, the same effort', async () => {
+    const f = fixture();
+    adopted(f);
+    holdKeylessWin(f);
+    f.setPurchaseOrders([purchaseOrder('po-1', { deadlineMs: DEADLINE_MS + 30_000 })]);
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['po-1']);
+    expect(sum(f)).toBe(100);
+    expect(
+      f.logs.some(
+        (l) =>
+          l.fields['action'] === 'transfer' &&
+          l.fields['from'] === 'offer-k' &&
+          l.fields['to'] === 'po-1',
+      ),
+    ).toBe(true);
+  });
+
+  it('transfers on the one-time adoption too', async () => {
+    const f = fixture();
+    holdKeylessWin(f);
+    f.setPurchaseOrders([purchaseOrder('po-1')]);
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['po-1']);
+    expect(sum(f)).toBe(100);
+  });
+
+  it('transfers to a recovered assigned job whose words match', async () => {
+    const f = fixture();
+    adopted(f);
+    holdKeylessWin(f);
+    f.setAssigned([assignedWork('job-1', { identity: IDENTITY })]);
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['job-1']);
+    expect(sum(f)).toBe(100);
+  });
+
+  it('does not transfer when the deadline is more than a minute away', async () => {
+    const f = fixture();
+    adopted(f);
+    holdKeylessWin(f);
+    f.setAssigned([
+      assignedWork('job-1', { identity: IDENTITY, deadlineMs: DEADLINE_MS + 61_000 }),
+    ]);
+
+    await f.reconciler.runIfDue();
+
+    expect(
+      f.store
+        .heldWork()
+        .map((w) => w.objId)
+        .sort(),
+    ).toEqual(['job-1', 'offer-k']);
+  });
+
+  it('transfers one-to-one: two orders cannot both take the same keyless row', async () => {
+    const f = fixture();
+    adopted(f);
+    holdKeylessWin(f);
+    const other = {
+      jobRef: 'aj-2',
+      title: null,
+      service: 'translation',
+      workKey: 'aj-2|ms-my|translation',
+    };
+    f.setAssigned([
+      assignedWork('job-1', { identity: IDENTITY }),
+      assignedWork('job-2', { identity: other }),
+    ]);
+
+    await f.reconciler.runIfDue();
+
+    expect(
+      f.store
+        .heldWork()
+        .map((w) => w.objId)
+        .sort(),
+    ).toEqual(['job-1', 'job-2']);
+    expect(sum(f)).toBe(200);
+  });
+});
+
+describe('until a first pass succeeds, reconciliation retries every minute (2026-09-22)', () => {
+  it('runs again one minute after a failed first pass, then keeps the fifteen-minute cadence', async () => {
+    let down = true;
+    const f = fixture({ poReadFails: () => (down ? new Error('portal down') : null) });
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: false });
+    f.setNow(NOW_MS + 30_000);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: false, reason: 'not_due' });
+    f.setNow(NOW_MS + 60_000);
+    down = false;
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true });
+
+    // Once one has succeeded, a failure is retried on the ordinary cadence again.
+    down = true;
+    f.setNow(NOW_MS + 60_000 + RECONCILE_INTERVAL_MS);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: false });
+    f.setNow(NOW_MS + 2 * 60_000 + RECONCILE_INTERVAL_MS);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: false, reason: 'not_due' });
+  });
+
+  it('does not count a pass shed to protect the budget as the first success', async () => {
+    let shed = true;
+    const f = fixture({
+      readFails: () =>
+        shed
+          ? new StrakerBudgetSuspendedError(
+              '/api/vendors/v/assigned-jobs',
+              'budget_low',
+              5,
+              'suspended',
+            )
+          : null,
+    });
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: false, shed: true });
+    shed = false;
+    f.setNow(NOW_MS + 60_000);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true });
   });
 });

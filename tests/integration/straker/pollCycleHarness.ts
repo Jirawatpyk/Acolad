@@ -4,6 +4,7 @@ import { StrakerHttpError } from '../../../src/straker/httpClient.js';
 import { createSightingTracker, type StrakerPortal } from '../../../src/straker/main.js';
 import { createStrakerPollCycle } from '../../../src/straker/pollCycle.js';
 import type { RawOffer } from '../../../src/straker/probe.js';
+import type { HeldWork } from '../../../src/straker/strakerStore.js';
 
 /**
  * A poll cycle driven by recording doubles.
@@ -29,12 +30,18 @@ export interface HarnessOptions {
   readonly alreadyClaimed?: readonly string[];
   /** Make the store reject one offer's event, to prove one bad write cannot lose the rest. */
   readonly recordEventFails?: (objId: string) => boolean;
+  /** Make every sighting write throw, as a disk that takes no writes would. */
+  readonly sightingFails?: boolean;
+  /** Held work as the store reports it — the restart guard reads its work keys. */
+  readonly held?: readonly HeldWork[];
   /** `false` means the tracker and the store disagree — the caller must notice. */
   readonly endSightingResult?: boolean;
   readonly enqueueResult?: () => 'queued' | 'already_pending' | 'already_sent' | 'already_dead';
   /** An advancing clock, for the rules that are about time rather than about sequence —
    *  the sign-in backoff cannot be exercised at all against a frozen one. */
   readonly now?: () => number;
+  /** Whether reconciliation has succeeded yet — claims are withheld until it has. */
+  readonly claimsPermitted?: () => boolean;
 }
 
 export interface Harness {
@@ -132,7 +139,10 @@ export function harness(opts: HarnessOptions): Harness {
         trace.push('tx:end');
       }
     },
-    recordSighting: (o: { objId: string }) => trace.push(`persist:sighting:${o.objId}`),
+    recordSighting: (o: { objId: string }) => {
+      if (opts.sightingFails === true) throw new Error('SQLITE_FULL: database or disk is full');
+      trace.push(`persist:sighting:${o.objId}`);
+    },
     endSighting: (o: { objId: string }) => {
       trace.push(`persist:endSighting:${o.objId}`);
       return opts.endSightingResult ?? true;
@@ -153,7 +163,7 @@ export function harness(opts: HarnessOptions): Harness {
     },
     heldWork: () => {
       trace.push('read:heldWork');
-      return [];
+      return opts.held ?? [];
     },
     claimedObjIds: () => {
       trace.push('read:claimedObjIds');
@@ -217,6 +227,7 @@ export function harness(opts: HarnessOptions): Harness {
     },
     extractOffers: opts.extract ?? (() => []),
     now: opts.now ?? (() => Date.parse('2026-09-16T10:00:00+07:00')),
+    ...(opts.claimsPermitted === undefined ? {} : { claimsPermitted: opts.claimsPermitted }),
   });
 
   return { cycle, trace, claimed, events, holds, queued, logs };

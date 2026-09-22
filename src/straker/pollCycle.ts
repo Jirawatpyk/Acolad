@@ -23,7 +23,7 @@
 
 import { workLabels } from './workKey.js';
 import type { Logger } from '../monitoring/logger.js';
-import { classifyClaim } from './claimOutcome.js';
+import { classifyClaim, type ClaimResponse } from './claimOutcome.js';
 import { claimOffer, type ClaimFollowUp } from './claim.js';
 import {
   decideClaims,
@@ -31,7 +31,7 @@ import {
   type ClaimDecisionSettings,
   type OfferForDecision,
 } from './claimDecision.js';
-import { isSessionExpired, StrakerHttpError } from './httpClient.js';
+import { isCredentialRefusal, isSessionExpired, StrakerHttpError } from './httpClient.js';
 import type { StrakerLedger } from './ledger.js';
 import type { SightingTracker, StrakerCycle, StrakerPortal } from './main.js';
 import {
@@ -70,7 +70,16 @@ export interface StrakerPollCycleDeps {
   readonly settings: ClaimDecisionSettings;
   readonly extractOffers: OfferExtractor;
   readonly now?: () => number;
+  /**
+   * Whether claims may be dispatched yet. The composition root answers "has a reconciliation
+   * pass succeeded since start" (2026-09-22); until then `claim` decisions are withheld —
+   * not recorded, not skipped, simply left for a later cycle. Absent means always.
+   */
+  readonly claimsPermitted?: () => boolean;
 }
+
+/** Two spellings of one deadline need not agree to the millisecond (as in `reconcile.ts`). */
+const SAME_DEADLINE_WINDOW_MS = 60_000;
 
 /** What one claim attempt produced, carried from `act` to `persist` without touching disk. */
 interface ActedClaim {
@@ -100,6 +109,8 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
    * the store is the authority again and reconciliation is what settles what it missed.
    */
   const attemptedThisProcess = new Set<string>();
+  /** Offers already reported as `already_held`, so the log says it once, not every cycle. */
+  const reportedHeld = new Set<string>();
 
   /**
    * Consecutive refused sign-ins, and when to try again.
@@ -117,6 +128,9 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
    *
    * The backoff never outlives the problem: one success clears it, so a password fixed at
    * 09:00 does not leave the bot idle until a timer elapses.
+   *
+   * **Counts refusals only — 401/403 from the sign-in** (`isCredentialRefusal`). Everything
+   * else is a transport failure and fails the cycle without touching this counter.
    */
   let refusedSignIns = 0;
   let signInBlockedUntilMs = 0;
@@ -136,6 +150,23 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
     try {
       return await deps.portal.signIn();
     } catch (err) {
+      // Only the portal saying no to these credentials counts. A timeout, a 5xx, a 405 or an
+      // HTML page is the transport failing, and escalating the backoff on it is what kept the
+      // bot idle for eight hours on 2026-09-21 while the portal moved domains. That failure
+      // fails the cycle like any other failed read and the next cycle tries again.
+      if (!isCredentialRefusal(err)) {
+        deps.logger.error(
+          {
+            module: 'pollCycle',
+            action: 'sign_in',
+            outcome: 'transport_failed',
+            errName: err instanceof Error ? err.name : typeof err,
+            ...(err instanceof StrakerHttpError ? { status: err.status } : {}),
+          },
+          `sign-in did not get an answer about the credentials (${err instanceof Error ? err.message : String(err)}) — not counted as a refusal, no backoff`,
+        );
+        throw err;
+      }
       refusedSignIns += 1;
       const waitMs = Math.min(
         SIGN_IN_BACKOFF_MAX_MS,
@@ -236,26 +267,94 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       // nobody knows whether it landed, so re-deciding it is how "we do not know" becomes
       // "we may have committed twice". One query per cycle, like the held list.
       const alreadyClaimed = deps.store.claimedObjIds();
-      const candidates = offers.filter(
+      // The restart case neither of the two sets above can see: the process died after its
+      // POST reached the portal and before the claim was recorded, so there is no claim row
+      // and the in-memory set went with the process. Reconciliation runs first on start and
+      // holds what it finds — so held work that IS this offer is already ours, and a second
+      // /accept is the retry FR-019c forbids. Not a skip reason on purpose: nothing was
+      // decided, the work is simply not open to us.
+      //
+      // Only held rows that did NOT come from a recorded claim (recovered or adopted ones):
+      // a row from a recorded claim is already covered by `alreadyClaimed`, and its key coming
+      // round again under a new offer is a genuine second round that must be judged on merit.
+      const recoveredHeld = held.filter((w) => !alreadyClaimed.has(w.objId));
+      const heldKeys = new Set(
+        recoveredHeld
+          .map((w) => w.identity?.workKey ?? null)
+          .filter((k): k is string => k !== null),
+      );
+      const heldMatch = (
+        o: OfferForDecision,
+      ): { match: 'work_key' | 'effort+deadline' | 'deadline'; heldObjId?: string } | null => {
+        const key = o.identity?.workKey ?? null;
+        if (key !== null) return heldKeys.has(key) ? { match: 'work_key' } : null;
+        // A keyless offer has nothing to match by key, and its purchase order — which does
+        // carry a key — carries no word count, so the recovered row is often weighed at zero.
+        // Matched instead by a deadline within a minute and an equal effort, zero standing for
+        // "unknown": a false match costs one offer passed over, a missed one a double claim.
+        if (o.deadlineMs === null) return null;
+        const offerDeadline = o.deadlineMs;
+        for (const w of recoveredHeld) {
+          if (w.deadlineMs === null) continue;
+          if (Math.abs(w.deadlineMs - offerDeadline) > SAME_DEADLINE_WINDOW_MS) continue;
+          if (w.effortWords === 0) return { match: 'deadline', heldObjId: w.objId };
+          if (o.effortWords !== null && w.effortWords === o.effortWords) {
+            return { match: 'effort+deadline', heldObjId: w.objId };
+          }
+        }
+        return null;
+      };
+      const alreadyHeld = (o: OfferForDecision): boolean => {
+        const found = heldMatch(o);
+        if (found === null) return false;
+        // Once per offer per process: the offer can stay listed for hours, and a line every
+        // ten seconds would bury the one that mattered.
+        if (!reportedHeld.has(o.objId)) {
+          reportedHeld.add(o.objId);
+          deps.logger.info(
+            {
+              module: 'pollCycle',
+              action: 'decide',
+              outcome: 'already_held',
+              objId: o.objId,
+              workKey: o.identity?.workKey ?? null,
+              match: found.match,
+              ...(found.heldObjId === undefined ? {} : { heldObjId: found.heldObjId }),
+            },
+            'offer still listed for work the team already holds — not claiming it again',
+          );
+        }
+        return true;
+      };
+      const notAttempted = offers.filter(
         (o) => !alreadyClaimed.has(o.objId) && !attemptedThisProcess.has(o.objId),
       );
-      if (candidates.length < offers.length) {
+      const candidates = notAttempted.filter((o) => !alreadyHeld(o));
+      if (notAttempted.length < offers.length) {
         deps.logger.info(
           {
             module: 'pollCycle',
             action: 'skip_reclaim',
             outcome: 'ok',
-            offers: offers.length - candidates.length,
+            offers: offers.length - notAttempted.length,
           },
           'offers still listed that this bot has already attempted — not claiming them again',
         );
       }
-      const decisions = decideClaims(candidates, {
-        nowMs: atMs,
-        settings: deps.settings,
-        ledger: deps.ledger,
-        held,
-      });
+      // Until reconciliation has succeeded since start, nothing is decided at all — not just
+      // not claimed. Deciding anyway would let withheld claims consume capacity inside
+      // `decideClaims` and write false ceiling/deadline skip rows for the offers behind them.
+      // Sightings are still recorded below; a later cycle decides these offers normally.
+      const permitted = deps.claimsPermitted?.() ?? true;
+      const withheld = permitted ? 0 : candidates.length;
+      const decisions = permitted
+        ? decideClaims(candidates, {
+            nowMs: atMs,
+            settings: deps.settings,
+            ledger: deps.ledger,
+            held,
+          })
+        : [];
 
       // --- act -------------------------------------------------------------------
       // Nothing below writes or announces until every claim has resolved (FR-003).
@@ -279,19 +378,24 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
           halted.push(decision);
           continue;
         }
+        // Defence in depth for one offer decided twice in one read: the filter above ran
+        // before the decisions, so it cannot see a claim made earlier in this same loop.
+        if (attemptedThisProcess.has(decision.objId)) continue;
         // Recorded BEFORE the request, and before anything can fail. The point of this set
         // is the case where the durable record does not happen, so it cannot itself depend
         // on anything that might not happen.
         attemptedThisProcess.add(decision.objId);
+        // Wall-clock elapsed, not the injected clock: the injected one is the cycle's notion
+        // of "now" and tests freeze it, while this measures how long the portal took.
+        const startedAt = performance.now();
         const attempt = await claimOffer(deps.portal.client, {
           vendorId,
           offerId: decision.objId,
         });
-        acted.push({
-          decision,
-          outcome: classifyClaim(attempt.response),
-          detail: attempt.detail,
-        });
+        const latencyMs = Math.round(performance.now() - startedAt);
+        const outcome = classifyClaim(attempt.response);
+        acted.push({ decision, outcome, detail: attempt.detail });
+        logClaimAttempt(deps, decision, outcome, attempt.response, latencyMs);
         // Both follow-ups stop the rest of the cycle, for different reasons.
         //
         // A barred account must never be retried around as though it were transient
@@ -321,6 +425,14 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
         }
         if (attempt.followUp !== 'none') stopClaiming = attempt.followUp;
         if (attempt.followUp === 're_authenticate') session = null;
+      }
+      if (withheld > 0) {
+        deps.logger.warn(
+          { module: 'pollCycle', action: 'claim', outcome: 'held_until_reconciled', withheld },
+          'claiming is paused until reconciliation succeeds — no claim is sent before the held ' +
+            'list has been checked against the portal since start (a restart must not re-claim ' +
+            'work it already won); `reconcile_failing` alerts if the pass keeps failing',
+        );
       }
       if (stopClaiming !== null) {
         // Once for the cycle, not once per offer — which is the whole point of halting.
@@ -450,6 +562,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       // Then the observational half, which is recoverable: a lost sighting costs a lifetime
       // measurement, not a commitment.
       const diverged: string[] = [];
+      let observationsUnrecorded = false;
       try {
         deps.store.transaction(() => {
           for (const offer of sightings.appeared) deps.store.recordSighting(offer);
@@ -492,6 +605,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
           }
         });
       } catch (err) {
+        observationsUnrecorded = true;
         deps.logger.error(
           { module: 'pollCycle', action: 'persist_observations', outcome: 'failed' },
           err instanceof Error ? err.message : String(err),
@@ -515,12 +629,15 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
         },
         'poll cycle',
       );
-      // The verdict, and it drives the liveness signal. A lost claim record is the one
-      // failure in this cycle that the store cannot report on its own — the record is the
-      // thing that failed — so the heartbeat has to carry it. The observational half is
-      // deliberately NOT counted here: a lost sighting costs a lifetime measurement rather
-      // than a commitment, and paging someone for that is how a dead-man switch stops being
-      // read.
+      // The verdict, and it drives the liveness signal. A lost record is the one failure in
+      // this cycle that the store cannot report on its own — the record is the thing that
+      // failed — so the heartbeat has to carry it.
+      //
+      // The observational half counts too (2026-09-22). It used not to, on the argument that
+      // a lost sighting costs a measurement rather than a commitment — true of the row, and
+      // beside the point: SQLite refusing a write is nearly always the disk or the file, and
+      // the next write down that path is a won claim. A store that took no writes at all left
+      // the heartbeat green. Still non-throwing: the loop carries on and keeps racing.
       if (unrecordedClaims > 0) {
         deps.logger.error(
           {
@@ -532,9 +649,39 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
           'the portal committed work this cycle that could not be recorded — the ledger and the record are now behind the portal until reconciliation runs',
         );
       }
-      return unrecordedClaims === 0;
+      return unrecordedClaims === 0 && !observationsUnrecorded;
     },
   };
+}
+
+/**
+ * One line per claim attempt (2026-09-22): outcome, offer, work key, the portal's status
+ * where it gave one, and how long it took. Written after the attempt resolves and before
+ * the next one starts — a log call, not a durable write, so FR-003's ordering holds.
+ */
+function logClaimAttempt(
+  deps: StrakerPollCycleDeps,
+  decision: Extract<ClaimDecision, { action: 'claim' }>,
+  outcome: ReturnType<typeof classifyClaim>,
+  response: ClaimResponse,
+  latencyMs: number,
+): void {
+  const status =
+    response.kind === 'rejected' ? /^http_(\d{3})$/.exec(response.signal.trim()) : null;
+  const fields = {
+    module: 'pollCycle',
+    action: 'claim',
+    outcome,
+    objId: decision.objId,
+    workKey: decision.identity?.workKey ?? null,
+    ...(status === null ? {} : { status: Number(status[1]) }),
+    latencyMs,
+  };
+  if (outcome === 'won' || outcome === 'lost') {
+    deps.logger.info(fields, `claim ${outcome}`);
+  } else {
+    deps.logger.warn(fields, `claim ${outcome}`);
+  }
 }
 
 /**

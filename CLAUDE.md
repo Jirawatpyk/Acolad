@@ -412,9 +412,40 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   อื่นไว้ที่ L–N (ปฏิเสธเสียงดัง ให้ย้ายคอลัมน์ของคนไปขวาของ N). การ์ดแชทมีแถว File / Job ref / Service
 - **claim ไม่เคย retry** ไม่ว่ากรณีใด (R7/FR-019c) — ผลลัพธ์ที่ไม่รู้จะถูกปิดโดย
   reconcile ทุก 15 นาทีแทน ไม่ใช่ยิงซ้ำ
+- **ตอน start บอท reconcile ก่อน poll รอบแรก** (2026-09-22) และ poll cycle **ไม่กด offer ที่
+  ตรงกับงานที่ถืออยู่จาก recovery/adopt** (ไม่ใช่จาก claim ที่บันทึกแล้ว — อันนั้นมี `claimedObjIds`
+  กันอยู่ และคีย์เดิมที่วนมารอบใหม่ = งานใหม่ กดได้): ตรง workKey หรือ — ถ้า offer ไม่มีคีย์ — DL ห่าง
+  ไม่เกิน 60 วินาที + คำเท่ากัน (held ที่ 0 คำ = ไม่รู้ ใช้ DL อย่างเดียว). log info `module:pollCycle
+  action:decide outcome:already_held match:work_key|effort+deadline|deadline` ครั้งเดียวต่อ offer. กันเคส PM2 ฆ่า process หลัง POST `/accept` ถึงพอร์ทัลแต่ยังไม่ได้บันทึก →
+  restart แล้วกดซ้ำ. **หลัง start บอทไม่กด claim — และไม่ตัดสินใจเรื่อง offer เลย — จนกว่า reconcile
+  จะสำเร็จ 1 รอบ** (ok:true — รอบที่ถูก shed/ล้มไม่นับ). ระหว่างนั้นยังอ่าน/บันทึก sighting/แจ้งเตือนปกติ
+  แต่ไม่เขียนแถว skip (กันแถว "เกินเพดาน" ปลอม), log warn `module:pollCycle action:claim
+  outcome:held_until_reconciled withheld:N` ทุกรอบ. ระหว่างยังไม่สำเร็จ reconcile **ลองใหม่ทุก 60 วินาที**
+  (ปกติ 15 นาที) และถ้าหยุดกดเกิน **10 นาที** → heartbeat fail → page (log error `module:main
+  action:claim outcome:claiming_paused pausedForMs`) — หายเองทันทีที่ reconcile สำเร็จ.
+  **งาน claim ที่ไม่มีคีย์** เมื่อ PO/assigned job ของมันโผล่ (id ใหม่ + มีคีย์) → hold ถูก**ย้าย**ไปแถวใหม่
+  ในทรานแซกชันเดียวกัน (DL ห่าง ≤ 60 วิ + คำเท่ากัน, จับคู่ 1:1) log info `module:reconcile
+  action:transfer from to` — ไม่นับซ้ำสองแถว (แต่การ์ด/แถว "recovered" ของแถวใหม่ยังออกตามปกติ). workKey ถูก normalise (NFKC, ตัด zero-width, `_`→`-` เฉพาะรหัสภาษา) —
+  **ค่า key เก่าใน DB ไม่ได้ถูกเขียนใหม่** — ถ้า key เก่ามี `_`/ตัวพิมพ์เต็มความกว้าง/อักขระล่องหน
+  จะไม่ตรงกับ key ใหม่ (ผลตก "ฝั่งถือไว้นานขึ้น" ใน reconcile แต่ guard กันกดซ้ำจะมองไม่เห็น) —
+  เช็กด้วย `SELECT work_key FROM held_work WHERE released_at_ms IS NULL`
+- **งานที่หายจากทั้ง PO และ assigned list ไม่ถูกปล่อยโควต้าจนกว่า DL ผ่านไป 1 วัน — ทั้งมีคีย์และไม่มีคีย์**
+  (2026-09-22; เดิมงานไม่มีคีย์ถูกปล่อยหลัง 15 นาที = เพดานต่ำกว่าจริง). ไม่มี DL = ไม่ปล่อยจากการหาย.
+  งานไม่มีคีย์ log warn `held_work_absent_keyless` ทุกรอบ (คู่กับ `held_work_unmatched` ของงานมีคีย์).
+  หน้า PO/assigned ที่ซ้ำ id (พอร์ทัลส่งหน้าเดิมซ้ำ) = อ่านล้มทั้งรอบ ไม่ปล่อยอะไร
+- **backoff ของ sign-in นับเฉพาะ 401/403 จาก sign-in** (2026-09-22). timeout / 5xx / 405 / HTML
+  = ปัญหา transport → รอบนั้น fail ตามปกติ รอบถัดไปลองใหม่ทันที (log error `action:sign_in
+  outcome:transport_failed` บอกสาเหตุจริง). เดิมนับทุกอย่างเป็น "รหัสผ่านถูกปฏิเสธ" → วันที่ 21/09
+  พอร์ทัลย้ายโดเมน 8 ชม. บอทถอยไปรอ 1 ชม. ทั้งที่รหัสผ่านไม่ผิด. log `backing_off` / alert
+  `sign_in_refused` = รหัสผ่านโดนปฏิเสธจริงเท่านั้น
+- **เขียน SQLite ไม่ได้ (แม้แค่ส่วน sighting/skip) = heartbeat fail** (2026-09-22) — เดิมเขียว
+- **log ใหม่สำหรับไล่ปัญหา:** ทุกการกด claim มี 1 บรรทัด `module:pollCycle action:claim
+  outcome:won|lost|failed|unknown objId workKey status? latencyMs` (won/lost = info, ที่เหลือ = warn).
+  บรรทัด `module:reconcile action:pass` มี `orders settled adopted effortUpgraded` เพิ่ม.
+  offer ซ้ำ id ในคำตอบเดียว = เก็บตัวแรก + warn `module:offersApi outcome:duplicate_obj_id`
 
 **"ทำไมบอทไม่คว้างาน X":** เปิด Google Sheet (`NZTC Tracking` → แท็บ
-`Straker_Tracking`) — **มีสามเคส ไม่ใช่สอง**:
+`Straker_Tracking`) — **มีสี่เคส**:
 
 1. **มีแถว + มี Skip reason** → อ่านเหตุผลได้ตรง ๆ. ที่เจอบ่อย: เกินเพดานวันนั้น ·
    ทำไม่ทันในเวลาทำงานก่อน DL · อ่าน effort/deadline ไม่ได้ (อันนี้ alert ด้วย — FR-023a).
@@ -426,7 +457,12 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
    ตัดสินใจเรื่องมันเลย (เคสนี้เกิดครั้งแรก 2026-09-17). จะมี alert
    `offer_unreadable` หนึ่งใบต่อหนึ่ง offer id และ log `module:offerParse
    action:parse outcome:unreadable` บอก field ที่อ่านไม่ออก
-3. **ไม่มีแถวเลย** → บอทไม่เคยเห็นงานนั้น → ดู log `module:pollCycle action:cycle`
+3. **มีแถว sighting แต่ไม่มีแถว skip — และ parse ผ่าน** (2026-09-22) → อีกสองสถานะที่ตั้งใจไม่เขียน
+   skip: **`already_held`** (log `module:pollCycle action:decide outcome:already_held` — บอทเชื่อว่า
+   งานนี้เป็นของเราอยู่แล้วจาก recovery/adopt; ดู `match`/`heldObjId` ว่าจับคู่กับแถวไหน) หรือ
+   **`held_until_reconciled`** (log `action:claim outcome:held_until_reconciled` — หลัง start ยังไม่มี
+   reconcile รอบไหนสำเร็จ จึงยังไม่ตัดสินใจ; ถ้าค้างเกิน 10 นาที heartbeat จะ fail)
+4. **ไม่มีแถวเลย** → บอทไม่เคยเห็นงานนั้น → ดู log `module:pollCycle action:cycle`
    ว่ารอบนั้น `offers` เป็นเท่าไร. ถ้าเป็น 0 ทั้งที่พอร์ทัลมีงาน ให้สงสัย
    **entry ที่ไม่มี `obj_id`** ซึ่งยังทำให้การอ่านทั้งรอบล้ม (`offersApi.ts` —
    ตั้งใจ เพราะงานที่ไม่มี identity ติดตามไม่ได้) แต่ล้มแบบ**เสียงดัง**: cycle fail

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { StrakerHttpError } from '../../../src/straker/httpClient.js';
+import { StrakerHttpError, StrakerTimeoutError } from '../../../src/straker/httpClient.js';
+import type { HeldWork } from '../../../src/straker/strakerStore.js';
 import { eligible, harness, raw, type HarnessOptions } from './pollCycleHarness.js';
 
 /**
@@ -72,6 +73,280 @@ describe('a claim is never attempted twice for the same offer, across cycles (R7
     await h.cycle.runOnce();
 
     expect(h.trace.filter((t) => t === 'read:claimedObjIds')).toHaveLength(1);
+  });
+});
+
+describe('an offer whose work the team already holds is never claimed again (restart, FR-019c)', () => {
+  /**
+   * The restart case R7's two defences cannot see. `claimedObjIds()` answers from recorded
+   * claims and `attemptedThisProcess` dies with the process — so a bot killed after its POST
+   * reached the portal but before the claim was recorded comes back with neither. If the
+   * offer is still listed, it would claim it again. Reconciliation runs first on start and
+   * holds the work it finds under the key the offer shares (workKey.ts); this is the guard
+   * that reads it.
+   */
+  const KEY = 'aj-1|ms-my|translation';
+  const identity = (workKey: string | null) => ({
+    jobRef: 'aj-1',
+    title: null,
+    service: 'translation',
+    workKey,
+  });
+  const heldRow = (objId: string, workKey: string | null): HeldWork => ({
+    objId,
+    effortWords: 4,
+    kind: 'translation',
+    deadlineMs: Date.parse('2026-09-16T17:00:00+07:00'),
+    heldSinceMs: Date.parse('2026-09-16T09:00:00+07:00'),
+    releasedAtMs: null,
+    identity: identity(workKey),
+  });
+
+  it('does not claim an offer whose work key matches held work, and says why', async () => {
+    const h = harness({
+      offers: [raw('offer-1')],
+      extract: () => [{ ...eligible('offer-1'), identity: identity(KEY) }],
+      held: [heldRow('po-1', KEY)],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual([]);
+    expect(h.logs).toContainEqual({
+      level: 'info',
+      fields: expect.objectContaining({
+        module: 'pollCycle',
+        action: 'decide',
+        outcome: 'already_held',
+        objId: 'offer-1',
+        workKey: KEY,
+      }) as unknown,
+    });
+  });
+
+  it('still claims an offer whose key matches nothing held', async () => {
+    const h = harness({
+      offers: [raw('offer-2')],
+      extract: () => [{ ...eligible('offer-2'), identity: identity('aj-2|ms-my|translation') }],
+      held: [heldRow('po-1', KEY)],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-2']);
+  });
+
+  it('does not block a genuine second round of a key the bot itself claimed and recorded', async () => {
+    // A held row that came from a recorded claim is already guarded by `claimedObjIds`; its
+    // key coming round again under a new offer is new work, and must be judged on its merits.
+    const h = harness({
+      offers: [raw('offer-2nd')],
+      extract: () => [{ ...eligible('offer-2nd'), identity: identity(KEY) }],
+      held: [heldRow('offer-1st', KEY)],
+      alreadyClaimed: ['offer-1st'],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-2nd']);
+  });
+
+  it('matches a keyless offer to recovered held work by deadline and effort', async () => {
+    const h = harness({
+      offers: [raw('offer-k')],
+      extract: () => [{ ...eligible('offer-k'), identity: identity(null) }],
+      held: [{ ...heldRow('po-1', KEY), effortWords: 4 }],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual([]);
+    expect(h.logs).toContainEqual({
+      level: 'info',
+      fields: expect.objectContaining({
+        outcome: 'already_held',
+        objId: 'offer-k',
+        heldObjId: 'po-1',
+        match: 'effort+deadline',
+      }) as unknown,
+    });
+  });
+
+  it('matches a keyless offer to a zero-weighed recovered order by deadline alone', async () => {
+    const h = harness({
+      offers: [raw('offer-k')],
+      extract: () => [{ ...eligible('offer-k'), identity: identity(null) }],
+      held: [{ ...heldRow('po-1', KEY), effortWords: 0 }],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual([]);
+    expect(h.logs.some((l) => l.fields['match'] === 'deadline')).toBe(true);
+  });
+
+  it('does not match a keyless offer whose deadline is more than a minute away', async () => {
+    const h = harness({
+      offers: [raw('offer-k')],
+      extract: () => [{ ...eligible('offer-k'), identity: identity(null) }],
+      held: [
+        {
+          ...heldRow('po-1', KEY),
+          effortWords: 4,
+          deadlineMs: Date.parse('2026-09-16T17:01:01+07:00'),
+        },
+      ],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-k']);
+  });
+
+  it('does not match a keyless offer whose effort differs from a weighed held row', async () => {
+    const h = harness({
+      offers: [raw('offer-k')],
+      extract: () => [{ ...eligible('offer-k'), identity: identity(null) }],
+      held: [{ ...heldRow('po-1', KEY), effortWords: 5 }],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-k']);
+  });
+
+  it('does not match a keyless offer to held work the bot itself claimed', async () => {
+    const h = harness({
+      offers: [raw('offer-k')],
+      extract: () => [{ ...eligible('offer-k'), identity: identity(null) }],
+      held: [{ ...heldRow('offer-old', null), effortWords: 4 }],
+      alreadyClaimed: ['offer-old'],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-k']);
+  });
+
+  it('never matches two keyless records to each other by key', async () => {
+    // A null key is "cannot be made honestly", not a value — two of them are not the same work.
+    // (A keyless offer can still match by deadline and effort; this one's deadline is hours
+    // away from the held row's, so only a null-equals-null key match could block it.)
+    const h = harness({
+      offers: [raw('offer-3')],
+      extract: () => [{ ...eligible('offer-3'), identity: identity(null) }],
+      held: [{ ...heldRow('po-1', null), deadlineMs: Date.parse('2026-09-17T17:00:00+07:00') }],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-3']);
+  });
+});
+
+describe('every claim attempt leaves one log line (observability, 2026-09-22)', () => {
+  // The cycle line only counted wins. A lost race, a refusal and a reply that never came
+  // left nothing an operator could grep for per offer — and the latency, which decides the
+  // race, was not recorded at all.
+  it('logs outcome, identity, work key, status and latency for each attempt', async () => {
+    const key = (id: string) => ({
+      jobRef: id,
+      title: null,
+      service: 'translation',
+      workKey: `${id}|ms-my|translation`,
+    });
+    const h = harness({
+      offers: [raw('a'), raw('b'), raw('c'), raw('d')],
+      extract: () => ['a', 'b', 'c', 'd'].map((id) => ({ ...eligible(id), identity: key(id) })),
+      claim: (id) =>
+        id === 'b'
+          ? { status: 409 }
+          : id === 'c'
+            ? 'no_answer'
+            : id === 'd'
+              ? { status: 404 }
+              : 'accepted',
+    });
+
+    await h.cycle.runOnce();
+
+    const lines = h.logs.filter(
+      (l) => l.fields['module'] === 'pollCycle' && l.fields['action'] === 'claim',
+    );
+    expect(lines.map((l) => [l.fields['objId'], l.fields['outcome']])).toEqual([
+      ['a', 'won'],
+      ['b', 'lost'],
+      ['c', 'unknown'],
+      ['d', 'failed'],
+    ]);
+    for (const l of lines) {
+      expect(l.fields['workKey']).toBe(`${String(l.fields['objId'])}|ms-my|translation`);
+      expect(typeof l.fields['latencyMs']).toBe('number');
+      expect(l.fields['latencyMs']).toBeGreaterThanOrEqual(0);
+    }
+    expect(lines[1]?.fields['status']).toBe(409);
+    expect(lines[3]?.fields['status']).toBe(404);
+    expect(lines[0]?.fields).not.toHaveProperty('status');
+    expect(lines[2]?.fields).not.toHaveProperty('status');
+    // Failures are warnings, a win or a lost race is information.
+    expect(lines.map((l) => l.level)).toEqual(['info', 'info', 'warn', 'warn']);
+  });
+
+  it('logs a null work key rather than leaving the field out', async () => {
+    const h = harness({ offers: [raw('a')], extract: () => [eligible('a')] });
+
+    await h.cycle.runOnce();
+
+    const line = h.logs.find((l) => l.fields['action'] === 'claim');
+    expect(line?.fields['workKey']).toBeNull();
+  });
+});
+
+describe('no claim before reconciliation has succeeded once (restart, FR-019c)', () => {
+  it('withholds every claim decision, logs once per cycle, and records no skip', async () => {
+    let permitted = false;
+    const h = harness({
+      offers: [raw('a'), raw('b')],
+      extract: () => [eligible('a'), eligible('b')],
+      claimsPermitted: () => permitted,
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual([]);
+    expect(h.events).toEqual([]);
+    const held = h.logs.filter((l) => l.fields['outcome'] === 'held_until_reconciled');
+    expect(held).toHaveLength(1);
+    expect(held[0]?.fields).toMatchObject({ module: 'pollCycle', action: 'claim', withheld: 2 });
+
+    // Nothing was decided either: a withheld cycle writes no skip row for any offer.
+    expect(h.queued.filter((q) => q.channel === 'tracking')).toEqual([]);
+
+    // Not remembered as attempted: once reconciliation succeeds, the next cycle claims them.
+    permitted = true;
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['a', 'b']);
+  });
+});
+
+describe('a withheld cycle decides nothing, so it writes no false skip rows', () => {
+  // Withheld claims used to be decided anyway, consuming capacity in `decideClaims`, so an
+  // offer behind them was skipped for a ceiling or a deadline that nothing had actually used.
+  it('writes no skip row and consults no gate while claims are withheld', async () => {
+    const h = harness({
+      offers: [raw('a'), raw('b')],
+      extract: () => [eligible('a'), { ...eligible('b'), eligible: false }],
+      claimsPermitted: () => false,
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.events).toEqual([]);
+    expect(h.queued.filter((q) => q.channel === 'tracking')).toEqual([]);
+    expect(h.trace).not.toContain('gate:capacity');
+    // Sightings are still recorded.
+    expect(h.trace).toContain('persist:sighting:a');
   });
 });
 
@@ -438,15 +713,38 @@ describe('a cycle that lost a claim record does not report success (S1)', () => 
     await expect(h.cycle.runOnce()).resolves.toBe(false);
   });
 
-  it('still returns true when only the observational half failed, which is recoverable', async () => {
-    // A lost sighting costs a lifetime measurement, not a commitment. Failing the heartbeat
-    // for that would page someone about a measurement while the bot keeps winning work —
-    // and a dead-man switch that cries wolf is one nobody reads.
+  it('returns false when the observational half could not be written either', async () => {
+    // This test asserted `true` until 2026-09-22, on the argument that a lost sighting costs
+    // a measurement rather than a commitment. The measurement is not what the write failing
+    // says, though: SQLite refusing a write is almost always the disk or the file (full,
+    // locked, corrupt), and the next thing that write path carries is a won claim. The audit
+    // found a store that took no writes left the heartbeat green. It stays non-throwing — the
+    // loop carries on — but the liveness signal now says what happened.
     const h = harness({
       offers: [raw('a')],
       extract: () => [{ ...eligible('a'), eligible: false }],
       recordEventFails: () => true,
     });
+
+    await expect(h.cycle.runOnce()).resolves.toBe(false);
+    expect(
+      h.logs.some(
+        (l) =>
+          l.level === 'error' &&
+          l.fields['action'] === 'persist_observations' &&
+          l.fields['outcome'] === 'failed',
+      ),
+    ).toBe(true);
+  });
+
+  it('returns false when a sighting write fails, with nothing to claim at all', async () => {
+    const h = harness({ offers: [raw('a')], sightingFails: true });
+
+    await expect(h.cycle.runOnce()).resolves.toBe(false);
+  });
+
+  it('returns true on a quiet cycle whose writes all land', async () => {
+    const h = harness({ offers: [raw('a')] });
 
     await expect(h.cycle.runOnce()).resolves.toBe(true);
   });
@@ -543,6 +841,84 @@ describe('a refused sign-in backs off instead of hammering the portal (T075)', (
     }
 
     expect(h.claimed).toEqual(['a']);
+  });
+
+  /**
+   * 2026-09-21: the portal answered HTML and 405 for eight hours during its domain move, and
+   * every one of those was counted as a refused password — so the bot escalated to its
+   * hour-long backoff and kept waiting it out after the portal came back. Only a 401 or 403
+   * from the sign-in is the portal saying no to these credentials; anything else is the
+   * transport, and the next cycle simply tries again.
+   */
+  it('does not back off on sign-in timeouts: the cycle after recovery polls at once', async () => {
+    const clock = ticking();
+    let failures = 5;
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      signInFails: () =>
+        failures-- > 0 ? new StrakerTimeoutError('/api/vendor/auth/login', 10_000, null) : null,
+      now: clock.now,
+    });
+
+    for (let i = 0; i < 5; i += 1) {
+      await expect(h.cycle.runOnce()).resolves.toBe(false);
+      clock.tick();
+    }
+    // Five cycles, five attempts: a timeout is not a refusal, so nothing was held back.
+    expect(h.trace.filter((t) => t === 'signIn')).toHaveLength(5);
+
+    // Fifty seconds in — inside the one-minute first step a refusal would have set.
+    await expect(h.cycle.runOnce()).resolves.toBe(true);
+    expect(h.trace.filter((t) => t === 'fetch')).toHaveLength(1);
+    expect(h.claimed).toEqual(['a']);
+    // And nothing claimed it was a password problem.
+    expect(h.queued.filter((q) => q.channel === 'alerts')).toEqual([]);
+    expect(h.logs.some((l) => l.fields['outcome'] === 'backing_off')).toBe(false);
+  });
+
+  it.each([
+    ['a 5xx', () => new StrakerHttpError(503, '/api/vendor/auth/login', 'unavailable')],
+    ['a 405', () => new StrakerHttpError(405, '/api/vendor/auth/login', '<html>')],
+    ['an HTML body', () => new SyntaxError('Unexpected token < in JSON at position 0')],
+  ])('treats %s at sign-in as a transport failure, named as such', async (_label, fail) => {
+    const clock = ticking();
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      signInFails: fail,
+      now: clock.now,
+    });
+
+    for (let i = 0; i < 6; i += 1) {
+      await h.cycle.runOnce();
+      clock.tick();
+    }
+
+    expect(h.trace.filter((t) => t === 'signIn')).toHaveLength(6);
+    expect(h.queued.filter((q) => q.channel === 'alerts')).toEqual([]);
+    const signInLogs = h.logs.filter((l) => l.fields['action'] === 'sign_in');
+    expect(signInLogs.length).toBeGreaterThan(0);
+    expect(signInLogs.every((l) => l.fields['outcome'] === 'transport_failed')).toBe(true);
+  });
+
+  it('still backs off on a 401 at the same cadence', async () => {
+    const clock = ticking();
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      signInFails: () => new StrakerHttpError(401, '/api/vendor/auth/login', 'bad'),
+      now: clock.now,
+    });
+
+    for (let i = 0; i < 6; i += 1) {
+      await h.cycle.runOnce();
+      clock.tick();
+    }
+
+    // One attempt, then the one-minute hold covers the next five cycles.
+    expect(h.trace.filter((t) => t === 'signIn')).toHaveLength(1);
+    expect(h.logs.some((l) => l.fields['outcome'] === 'backing_off')).toBe(true);
   });
 });
 

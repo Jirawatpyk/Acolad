@@ -296,6 +296,8 @@ export function createStrakerPortal(
   logger: Logger,
   deps: StrakerPortalDeps = {},
 ): StrakerPortal {
+  /** Offer ids already reported as listed twice, so the warning is said once per offer. */
+  const warnedDuplicates = new Set<string>();
   const client = createHttpClient({
     baseUrl: cfg.baseUrl,
     ...(deps.fetchImpl === undefined ? {} : { fetchImpl: deps.fetchImpl }),
@@ -361,7 +363,20 @@ export function createStrakerPortal(
       }),
     // `retry: true` is the join FR-019b depends on — see `offersApi.ts`. The probe leaves
     // it off, which is what keeps its behaviour unchanged while it finishes collecting.
-    listOpenOffers: (vendorId) => listOpenOffers(client, vendorId, { retry: true }),
+    listOpenOffers: (vendorId) =>
+      listOpenOffers(client, vendorId, {
+        retry: true,
+        // Kept first, dropped after — and said once per offer, not every ten seconds.
+        onDuplicate: (objIds) => {
+          const fresh = objIds.filter((id) => !warnedDuplicates.has(id));
+          if (fresh.length === 0) return;
+          for (const id of fresh) warnedDuplicates.add(id);
+          logger.warn(
+            { module: 'offersApi', action: 'read', outcome: 'duplicate_obj_id', objIds: fresh },
+            'the offer list named the same offer more than once — kept the first, claimed at most once',
+          );
+        },
+      }),
     // Through the single-attempt door on purpose: FR-016c gives this read its own
     // fifteen-minute cadence instead of FR-019b's backoff. See `readAssignedWork`.
     listAssignedWork: (vendorId) => readAssignedWork(client, vendorId),
@@ -513,6 +528,22 @@ export function assembleStrakerBot(
     now,
   });
 
+  /**
+   * Whether one reconciliation pass has completed successfully since this process started.
+   * No claim is dispatched until it has (2026-09-22): the restart guard reads held work, and
+   * held work after a crash is only as good as the first pass. A shed pass (budget suspended)
+   * or a failed one does not count — `ok` is false on both. A reconciler that keeps failing
+   * raises `reconcile_failing` after three passes, which is what names this pause.
+   */
+  let reconciledOk = false;
+  const gatedReconciler = {
+    async runIfDue() {
+      const outcome = await reconciler.runIfDue();
+      if (outcome.ran && outcome.ok) reconciledOk = true;
+      return outcome;
+    },
+  };
+
   const cycle = createStrakerPollCycle({
     portal,
     // Resumed from the store, not started empty. The tracker's sighting count is what keys
@@ -559,6 +590,7 @@ export function assembleStrakerBot(
       },
     }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
+    claimsPermitted: () => reconciledOk,
   });
 
   const dailyReport = createDailyReportStep({
@@ -570,7 +602,16 @@ export function assembleStrakerBot(
   });
 
   return {
-    cycle: withDelivery({ cycle, dispatcher, reconciler, dailyReport, outbox, logger, now }),
+    cycle: withDelivery({
+      cycle,
+      dispatcher,
+      reconciler: gatedReconciler,
+      reconciledOk: () => reconciledOk,
+      dailyReport,
+      outbox,
+      logger,
+      now,
+    }),
     store,
     outbox,
     quarantinedCopyPath: opened.recoveredFromCorruption ? opened.corruptCopyPath : null,
@@ -684,6 +725,8 @@ function withDelivery(deps: {
     flush(nowMs: number): Promise<{ sent: number; failed: number; dead: number; dropped: number }>;
   };
   readonly reconciler: { runIfDue(): Promise<unknown> };
+  /** Whether a reconciliation pass has completed successfully since the process started. */
+  readonly reconciledOk: () => boolean;
   /** The 09:00 report. Promises never to throw; guarded here anyway, like the reconciler. */
   readonly dailyReport: { runIfDue(nowMs: number): void };
   /** Read only, and only for the dead backlog — the dispatcher owns every write. */
@@ -691,8 +734,28 @@ function withDelivery(deps: {
   readonly logger: Logger;
   readonly now: () => number;
 }): StrakerCycle {
+  /** When this process first turned the loop — the start of the claim pause, if any. */
+  let pausedSinceMs: number | null = null;
   return {
     async runOnce(): Promise<boolean> {
+      // Until a pass has succeeded, reconciliation runs BEFORE the poll cycle (2026-09-22). A
+      // process killed after its claim reached the portal but before the claim was recorded
+      // comes back with no claim row and no in-memory guard; if the offer is still listed, a
+      // cycle that ran first would send a second /accept for work the team already holds —
+      // FR-019c's retry, by way of a restart. Reconciling first puts that work in the held
+      // list under its work key, and the cycle will not claim held work again; and the cycle
+      // claims nothing at all until a pass has succeeded (`claimsPermitted`).
+      //
+      // Before the cycle so the turn a pass first succeeds is also the turn claiming resumes.
+      // Once one has, the pass keeps its place behind the cycle, where its two reads do not
+      // add to the latency of the claim that races (FR-003). Not due = one clock read.
+      pausedSinceMs ??= deps.now();
+      if (!deps.reconciledOk()) {
+        await reportAsync(async () => {
+          await deps.reconciler.runIfDue();
+        });
+      }
+
       const ok = await deps.cycle.runOnce();
 
       // `runIfDue` promises never to throw and costs one clock read when it is not due;
@@ -737,10 +800,33 @@ function withDelivery(deps: {
         return false;
       }
 
+      // Claiming paused for too long is a bot not doing its job, and nothing else would say
+      // so: the reads succeed, the cycle returns true, and `reconcile_failing` only fires
+      // after three failed passes. Past ten minutes without a successful pass since start,
+      // the liveness signal goes red (Healthchecks pages after its grace). Clears the moment
+      // a pass succeeds.
+      if (!deps.reconciledOk()) {
+        const pausedForMs = deps.now() - pausedSinceMs;
+        if (pausedForMs > CLAIM_PAUSE_PAGE_AFTER_MS) {
+          deps.logger.error(
+            { module: 'main', action: 'claim', outcome: 'claiming_paused', pausedForMs },
+            'no reconciliation pass has succeeded since start, so claiming has been paused for ' +
+              'over ten minutes — check the purchase-order / assigned-jobs reads',
+          );
+          return false;
+        }
+      }
+
       return ok;
     },
   };
 }
+
+/**
+ * How long claiming may stay paused for want of a successful reconciliation pass before the
+ * liveness signal fails (2026-09-22). Ten minutes: ten one-minute retries of the pass.
+ */
+const CLAIM_PAUSE_PAGE_AFTER_MS = 10 * 60_000;
 
 /** Long-running 24/7 entry point under PM2 (`straker.config.cjs`). */
 async function main(): Promise<void> {

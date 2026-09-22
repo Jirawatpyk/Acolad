@@ -64,8 +64,9 @@
  * A pass therefore reads both lists and ties them to held work by the key they share
  * (`workKey.ts`), not by id. Held work is released only on positive evidence (its assigned
  * job delivered, its order closed) or on absence from both complete lists; keyed work that
- * matches nothing is kept until its deadline is a day gone, because that absence more likely
- * means the key stopped matching than that the work vanished. See {@link releaseFinished}.
+ * matches nothing — and keyless work, which can never be matched — is kept until its deadline
+ * is a day gone, because that absence more likely means the key stopped matching (or never
+ * existed) than that the work vanished. See {@link releaseFinished}.
  */
 
 import { formatLanguageDirection, isMonolingualDirection } from './eligibility.js';
@@ -99,6 +100,14 @@ import { workIdentity, workLabels, type WorkIdentity } from './workKey.js';
  * tuned: SC-009 is expressed in this number.
  */
 export const RECONCILE_INTERVAL_MS = 15 * 60_000;
+
+/**
+ * How soon a failed pass is retried while none has yet succeeded since start (2026-09-22).
+ * The poll cycle claims nothing until one has, so waiting fifteen minutes to retry would
+ * stall claiming for fifteen minutes on one bad read. Four extra reads a minute's worth of
+ * budget at most, and only until the first success.
+ */
+export const RECONCILE_STARTUP_RETRY_MS = 60_000;
 
 /** FR-016c's "three consecutive failures". */
 export const RECONCILE_FAILURE_ALERT_THRESHOLD = 3;
@@ -225,6 +234,7 @@ export async function readAssignedWork(
   const zone = options.deadlineZone ?? STRAKER_DEADLINE_ZONE;
 
   const collected: AssignedWork[] = [];
+  const seen = new Set<string>();
   let offset = 0;
 
   for (let page = 0; page < maxPages; page += 1) {
@@ -232,7 +242,11 @@ export async function readAssignedWork(
       `/api/vendors/${vendorId}/assigned-jobs?limit=${pageLimit}&offset=${offset}`,
     );
     const { items, total } = readEnvelope(reply);
-    for (const entry of items) collected.push(toAssignedWork(entry, zone));
+    for (const entry of items) {
+      const work = toAssignedWork(entry, zone);
+      refuseDuplicate(seen, work.objId, 'assigned-jobs', 'obj_id');
+      collected.push(work);
+    }
 
     // Three ways a page is the last one, and none of them may be guessed. A short page is
     // the portal's own end-of-list signal; an empty one stops a loop that would otherwise
@@ -263,6 +277,22 @@ export async function readAssignedWork(
     `Straker assigned-jobs is still incomplete after ${maxPages} pages ` +
       `(${collected.length} read) — refusing to treat a partial list as the whole of it`,
   );
+}
+
+/**
+ * One id twice across the pages of one read — the portal replaying a page, or shifting its
+ * list under the offset while we page. Either way the entries counted toward `total` include
+ * repeats, so a list that *looks* complete is short by exactly that many, and the work on the
+ * page never served would be released or left unrecovered. Refused, like any short list.
+ */
+function refuseDuplicate(seen: Set<string>, id: string, label: string, field: string): void {
+  if (seen.has(id)) {
+    throw new Error(
+      `Straker ${label} listed ${field} ${id} twice in one read (duplicate across pages) — ` +
+        'refusing to treat a list with repeats as the whole of it',
+    );
+  }
+  seen.add(id);
 }
 
 interface AssignedEnvelope {
@@ -454,6 +484,7 @@ export async function readPurchaseOrders(
   const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
   const zone = options.deadlineZone ?? STRAKER_DEADLINE_ZONE;
   const collected: PurchaseOrder[] = [];
+  const seen = new Set<string>();
 
   for (let page = 1; page <= maxPages; page += 1) {
     const reply = await client.getJson<unknown>(
@@ -461,7 +492,11 @@ export async function readPurchaseOrders(
         `&sort_by=created_at&sort_order=desc&page=${page}&page_size=${pageSize}`,
     );
     const { items, total } = readEnvelope(reply, 'purchase-orders');
-    for (const entry of items) collected.push(toPurchaseOrder(entry, zone));
+    for (const entry of items) {
+      const order = toPurchaseOrder(entry, zone);
+      refuseDuplicate(seen, order.poObjId, 'purchase-orders', 'po_obj_id');
+      collected.push(order);
+    }
     if (items.length === 0 || items.length < pageSize || collected.length >= total) {
       if (collected.length < total) {
         throw new Error(
@@ -520,8 +555,8 @@ function kindOf(
 export const PO_ADOPTION_FLAG = 'po_adoption_done';
 
 /**
- * How long keyed work that matches no purchase order and no assigned job stays held past its
- * deadline. A mismatch between the offer's `service` and the order's `po_type` would make the
+ * How long work that matches no purchase order and no assigned job — keyed or keyless — stays
+ * held past its deadline. A mismatch between the offer's `service` and the order's `po_type` would make the
  * key find nothing; releasing on absence then would bring the original bug straight back.
  */
 const UNMATCHED_KEYED_GRACE_MS = 24 * 3_600_000;
@@ -531,6 +566,12 @@ const SAME_DEADLINE_WINDOW_MS = 60_000;
 
 /** The one-time adoption's second try: keyless claims due within half a day either side. */
 const ADOPTION_FALLBACK_WINDOW_MS = 12 * 3_600_000;
+
+/** Keyless held rows from recorded claims, and which of them a pass has already moved. */
+interface KeylessPool {
+  readonly rows: readonly HeldWork[];
+  readonly taken: Set<string>;
+}
 
 /** What proved an unknown claim was won, as a settlement records it. */
 interface SettlementEvidence {
@@ -574,6 +615,7 @@ export type ReconcileStore = Pick<
   | 'legacyClaimEffortNear'
   | 'metaFlagSetAt'
   | 'setMetaFlag'
+  | 'claimedObjIds'
 >;
 export type ReconcileLedger = Pick<StrakerLedger, 'hold' | 'release'>;
 export type ReconcileOutbox = Pick<StrakerOutbox, 'enqueue'>;
@@ -588,6 +630,12 @@ export interface ReconcileDeps {
   readonly now?: () => number;
   /** Overridable for tests only. SC-009 is expressed in the default. */
   readonly intervalMs?: number;
+  /**
+   * The cadence while no pass has yet succeeded since this reconciler was created
+   * (2026-09-22). The bot claims nothing until one has, so a failed first pass must not wait
+   * the full {@link RECONCILE_INTERVAL_MS} to be retried. A shed pass is not a success.
+   */
+  readonly startupRetryMs?: number;
   readonly failureAlertThreshold?: number;
 }
 
@@ -612,6 +660,12 @@ export type ReconcileOutcome =
        * **positively reported as finished**. Never work the read merely omitted.
        */
       readonly released: readonly string[];
+      /** Unknown claims this pass settled as won from their purchase order or assigned job. */
+      readonly settled: number;
+      /** Purchase orders held by the one-time adoption of pre-identity work. */
+      readonly adopted: number;
+      /** Held rows re-weighed upward at the word count their assigned job reports. */
+      readonly effortUpgraded: number;
       readonly consecutiveFailures: 0;
     }
   | {
@@ -655,6 +709,11 @@ export interface StrakerReconciler {
 export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler {
   const now = deps.now ?? Date.now;
   const intervalMs = deps.intervalMs ?? RECONCILE_INTERVAL_MS;
+  const startupRetryMs = deps.startupRetryMs ?? RECONCILE_STARTUP_RETRY_MS;
+  /** Whether any pass has completed successfully since creation — see `startupRetryMs`. */
+  let succeededOnce = false;
+  const currentInterval = (): number =>
+    succeededOnce ? intervalMs : Math.min(intervalMs, startupRetryMs);
   const threshold = deps.failureAlertThreshold ?? RECONCILE_FAILURE_ALERT_THRESHOLD;
 
   let lastAttemptAtMs: number | null = null;
@@ -682,7 +741,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
   let streakStartedAtMs: number | null = null;
 
   return {
-    nextDueAtMs: () => (lastAttemptAtMs === null ? null : lastAttemptAtMs + intervalMs),
+    nextDueAtMs: () => (lastAttemptAtMs === null ? null : lastAttemptAtMs + currentInterval()),
 
     async runIfDue(): Promise<ReconcileOutcome> {
       // A pass overlapping itself cannot corrupt anything — every write below is idempotent
@@ -694,7 +753,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       // Never run before means due: FR-016a's "on start". A failed pass advances this too,
       // which is FR-016c's "retried on its next scheduled pass" — its own cadence governs
       // it, and FR-019b's backoff explicitly does not apply.
-      if (lastAttemptAtMs !== null && atMs - lastAttemptAtMs < intervalMs) {
+      if (lastAttemptAtMs !== null && atMs - lastAttemptAtMs < currentInterval()) {
         return { ran: false, reason: 'not_due' };
       }
       lastAttemptAtMs = atMs;
@@ -744,12 +803,25 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
     const heldFor = (objId: string, key: string | null | undefined): HeldWork | undefined =>
       heldById.get(objId) ?? (key === null || key === undefined ? undefined : heldByKey.get(key));
     const adopting = deps.store.metaFlagSetAt(PO_ADOPTION_FLAG) === null;
+    // Keyless held rows from recorded claims: a won offer without a job reference. Its order
+    // and assigned job carry ids of their own AND a key, so `heldFor` cannot find it, and a
+    // recovery would hold the same work a second time. See `takeKeyless`.
+    const claimed = deps.store.claimedObjIds();
+    const pool: KeylessPool = {
+      rows: heldRows.filter((w) => (w.identity?.workKey ?? null) === null && claimed.has(w.objId)),
+      taken: new Set<string>(),
+    };
 
     const recovered: string[] = [];
     let firstFailure: unknown = null;
+    // What the pass did, for its one summary line (observability, 2026-09-22).
+    const counts = { settled: 0, adopted: 0, effortUpgraded: 0 };
     const attempt = (objId: string, action: string, fn: () => void): void => {
       try {
         fn();
+        if (action === 'settle') counts.settled += 1;
+        else if (action === 'adopt') counts.adopted += 1;
+        else if (action === 'effort_upgrade') counts.effortUpgraded += 1;
       } catch (err) {
         // Rolled back whole — held work nobody was told about is the state FR-016 exists to
         // make impossible — so the next pass meets this row again. Loud, per item.
@@ -824,7 +896,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         continue;
       }
       attempt(item.objId, 'recover', () => {
-        recover(item, atMs);
+        recover(item, atMs, pool);
         recovered.push(item.objId);
       });
     }
@@ -857,11 +929,11 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         continue;
       }
       if (adopting) {
-        attempt(order.poObjId, 'adopt', () => adopt(order, atMs));
+        attempt(order.poObjId, 'adopt', () => adopt(order, atMs, pool));
         continue;
       }
       attempt(order.poObjId, 'recover', () => {
-        recoverOrder(order, claim, atMs);
+        recoverOrder(order, claim, atMs, pool);
         recovered.push(order.poObjId);
       });
     }
@@ -876,10 +948,18 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
     }
     consecutiveFailures = 0;
     streakStartedAtMs = null;
+    succeededOnce = true;
 
     if (adopting) deps.store.setMetaFlag(PO_ADOPTION_FLAG, atMs);
 
-    const released = releaseFinished(work, orders, heldRows, atMs);
+    // Rows transferred this pass are no longer held; judging them for release would only
+    // log a spurious "absent" warning about work that now sits under its order or job.
+    const released = releaseFinished(
+      work,
+      orders,
+      heldRows.filter((w) => !pool.taken.has(w.objId)),
+      atMs,
+    );
 
     deps.logger.info(
       {
@@ -887,8 +967,10 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         action: 'pass',
         outcome: 'ok',
         assigned: outstanding.length,
+        orders: orders.length,
         recovered: recovered.length,
         released: released.length,
+        ...counts,
       },
       'reconciled the portal assigned list against our record',
     );
@@ -898,6 +980,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       assigned: outstanding.length,
       recovered,
       released,
+      ...counts,
       consecutiveFailures: 0,
     };
   }
@@ -940,6 +1023,9 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    *   "not listed yet", not "gone", so work held for less than one reconcile interval is
    *   never released on absence. See the loop below for why the cost of the other answer is
    *   an irreversible over-claim rather than a delay.
+   * - *(2026-09-22)* Absent work, keyed or keyless, is not released before its deadline is a
+   *   day past: the purchase order and assigned job carry ids of their own, so absence under
+   *   our id — or under no key at all — cannot tell "gone" from "moved on".
    *
    * Failures are per item and never fail the pass. The cost of a missed release is an
    * offer the bot passes over; the cost of failing the pass would be the recoveries that
@@ -1030,13 +1116,20 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       // Absent from both. The grace, and the race it closes: a claim writes `held_work` the
       // moment the portal answers, and the portal takes a while to list the work anywhere.
       if (atMs - row.heldSinceMs < intervalMs) continue;
-      if (key !== null) {
-        // Keyed work that matches nothing is a mismatch to look at, not proof the work is
-        // gone — releasing it would be the original bug again. Held until its deadline is a
-        // day past, and said so on every pass.
-        const graceEndsMs =
-          row.deadlineMs === null ? null : row.deadlineMs + UNMATCHED_KEYED_GRACE_MS;
-        if (graceEndsMs === null || atMs < graceEndsMs) {
+      // Absence is not proof the work is gone, keyed or not, so nothing absent is released
+      // before its deadline is a day past (and work with no deadline is never released on
+      // absence — no grace can end).
+      //
+      // - Keyed work that matches nothing is a mismatch to look at — releasing it would be
+      //   the original bug again.
+      // - Keyless work (2026-09-22) is worse off, not better: an offer without job_ref or
+      //   service is still claimed, and its purchase order and assigned job each carry an id
+      //   of their own, so nothing can EVER match it. It used to be released one interval
+      //   after the claim — the ceiling handed back while the team still owed the work.
+      const graceEndsMs =
+        row.deadlineMs === null ? null : row.deadlineMs + UNMATCHED_KEYED_GRACE_MS;
+      if (graceEndsMs === null || atMs < graceEndsMs) {
+        if (key !== null) {
           deps.logger.warn(
             {
               module: 'reconcile',
@@ -1048,12 +1141,27 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
             'held work matches no purchase order and no assigned job — kept held; check whether ' +
               "the offer's service and the portal's po_type still agree",
           );
-          continue;
+        } else {
+          deps.logger.warn(
+            {
+              module: 'reconcile',
+              action: 'release',
+              outcome: 'held_work_absent_keyless',
+              objId: row.objId,
+              deadlineMs: row.deadlineMs,
+            },
+            'held work has no work key and is absent from both lists — kept held until its ' +
+              'deadline is a day past, because its purchase order or job could not be matched anyway',
+          );
         }
-        give(row.objId, 'matched no purchase order or assigned job a day past its deadline');
         continue;
       }
-      give(row.objId, 'absent from a complete assigned list');
+      give(
+        row.objId,
+        key !== null
+          ? 'matched no purchase order or assigned job a day past its deadline'
+          : 'absent from both complete lists a day past its deadline',
+      );
     }
     return released;
   }
@@ -1159,7 +1267,12 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
   }
 
   /** An open purchase order nobody recorded: recovered like an assigned job would be. */
-  function recoverOrder(order: PurchaseOrder, claim: ClaimOnWorkKey | null, atMs: number): void {
+  function recoverOrder(
+    order: PurchaseOrder,
+    claim: ClaimOnWorkKey | null,
+    atMs: number,
+    pool: KeylessPool,
+  ): void {
     recover(
       {
         objId: order.poObjId,
@@ -1179,6 +1292,58 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         identity: order.identity,
       },
       atMs,
+      pool,
+    );
+  }
+
+  /**
+   * Move a keyless claim's hold onto the row just created for the same work (2026-09-22).
+   *
+   * A won offer without a job reference is held under the offer's id with no key. When its
+   * purchase order or assigned job appears — each with an id of its own, and a key — nothing
+   * can tie the two, so the recovery held the work a second time and both rows then stayed
+   * held until a day past the deadline. The tie is the one `legacyClaimEffortNear` already
+   * uses: equal effort and a deadline within {@link SAME_DEADLINE_WINDOW_MS}. Deterministic —
+   * nearest deadline, then oldest hold, then id — and one-to-one within a pass.
+   *
+   * Called inside the transaction that made the new row, so a failure rolls back both.
+   */
+  function transferKeyless(
+    pool: KeylessPool,
+    toObjId: string,
+    effortWords: number | null,
+    deadlineMs: number | null,
+    atMs: number,
+  ): void {
+    if (effortWords === null || deadlineMs === null) return;
+    const from = pool.rows
+      .filter(
+        (w) =>
+          !pool.taken.has(w.objId) &&
+          w.objId !== toObjId &&
+          w.effortWords === effortWords &&
+          w.deadlineMs !== null &&
+          Math.abs(w.deadlineMs - deadlineMs) <= SAME_DEADLINE_WINDOW_MS,
+      )
+      .sort(
+        (a, b) =>
+          Math.abs((a.deadlineMs ?? 0) - deadlineMs) - Math.abs((b.deadlineMs ?? 0) - deadlineMs) ||
+          a.heldSinceMs - b.heldSinceMs ||
+          (a.objId < b.objId ? -1 : a.objId > b.objId ? 1 : 0),
+      )[0];
+    if (from === undefined) return;
+    deps.ledger.release(from.objId, atMs);
+    pool.taken.add(from.objId);
+    deps.logger.info(
+      {
+        module: 'reconcile',
+        action: 'transfer',
+        outcome: 'ok',
+        from: from.objId,
+        to: toObjId,
+        effortWords,
+      },
+      "moved a keyless claim's hold onto its purchase order / assigned job, so the work is counted once",
     );
   }
 
@@ -1187,7 +1352,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    * claims won before, silently — they were announced when won. Weighed at the largest effort
    * any keyless claim for that deadline had, so the day is not under-counted.
    */
-  function adopt(order: PurchaseOrder, atMs: number): void {
+  function adopt(order: PurchaseOrder, atMs: number, pool: KeylessPool): void {
     // Near the same deadline first; failing that, anything keyless due within the same half
     // day either side — the adoption runs once, and zero is the one answer that under-counts.
     const effort =
@@ -1195,16 +1360,19 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         ? null
         : (deps.store.legacyClaimEffortNear(order.deadlineMs, SAME_DEADLINE_WINDOW_MS) ??
           deps.store.legacyClaimEffortNear(order.deadlineMs, ADOPTION_FALLBACK_WINDOW_MS));
-    deps.ledger.hold(
-      {
-        objId: order.poObjId,
-        effortWords: effort ?? 0,
-        deadlineMs: order.deadlineMs,
-        kind: kindOf(order.languageDirection, order.identity),
-        identity: order.identity,
-      },
-      atMs,
-    );
+    deps.store.transaction(() => {
+      deps.ledger.hold(
+        {
+          objId: order.poObjId,
+          effortWords: effort ?? 0,
+          deadlineMs: order.deadlineMs,
+          kind: kindOf(order.languageDirection, order.identity),
+          identity: order.identity,
+        },
+        atMs,
+      );
+      transferKeyless(pool, order.poObjId, effort, order.deadlineMs, atMs);
+    });
     deps.logger.warn(
       {
         module: 'reconcile',
@@ -1225,7 +1393,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    * **one transaction**, so a destination that cannot be queued takes the whole recovery
    * with it rather than leaving held work nobody was told about (FR-016).
    */
-  function recover(item: AssignedWork, atMs: number): void {
+  function recover(item: AssignedWork, atMs: number, pool: KeylessPool): void {
     deps.store.transaction(() => {
       deps.store.recordEvent({
         objId: item.objId,
@@ -1257,6 +1425,8 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
             atMs,
           )
         : null;
+      // Same transaction as the hold, so the work is never counted twice nor not at all.
+      transferKeyless(pool, item.objId, item.effortWords, item.deadlineMs, atMs);
 
       const detail = describeRecovery(item, hold);
 

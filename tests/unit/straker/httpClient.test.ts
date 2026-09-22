@@ -3,6 +3,7 @@ import {
   createHttpClient,
   DEFAULT_PACING_POLICY,
   isBudgetSuspended,
+  isCredentialRefusal,
   isIndeterminateStatus,
   isSessionExpired,
   StrakerBudgetSuspendedError,
@@ -1006,6 +1007,25 @@ describe('reading the portal status codes — translated here, at the edge (DC-1
   it('is false for anything that never became an HTTP reply, rather than throwing on it', () => {
     expect(isSessionExpired(new Error('socket closed'))).toBe(false);
     expect(isSessionExpired(undefined)).toBe(false);
+  });
+
+  /**
+   * The sign-in backoff escalates to an hour on a credential refusal. On 2026-09-21 an eight
+   * hour outage — the portal answering HTML and 405 during its domain move — was read as a
+   * refused password and backed off for exactly that long. Only 401/403 are refusals.
+   */
+  it('names only 401 and 403 as a credential refusal', () => {
+    expect(isCredentialRefusal(new StrakerHttpError(401, '/login', 'bad'))).toBe(true);
+    expect(isCredentialRefusal(new StrakerHttpError(403, '/login', 'barred'))).toBe(true);
+  });
+
+  it('does not read an outage as a credential refusal', () => {
+    expect(isCredentialRefusal(new StrakerHttpError(405, '/login', 'method'))).toBe(false);
+    expect(isCredentialRefusal(new StrakerHttpError(500, '/login', 'down'))).toBe(false);
+    expect(isCredentialRefusal(new StrakerHttpError(503, '/login', 'down'))).toBe(false);
+    expect(isCredentialRefusal(new StrakerTimeoutError('/login', 10_000, null))).toBe(false);
+    expect(isCredentialRefusal(new SyntaxError('Unexpected token <'))).toBe(false);
+    expect(isCredentialRefusal(undefined)).toBe(false);
   });
 
   it('calls 5xx and 408 indeterminate — the portal answered with "no answer"', () => {
