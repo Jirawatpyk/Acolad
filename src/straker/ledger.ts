@@ -47,6 +47,7 @@
  * for like with the XTM bot.
  */
 
+import type { WorkIdentity } from './workKey.js';
 import { bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { effectiveDeadlineDay } from '../schedule/deadlineDay.js';
 import {
@@ -91,6 +92,8 @@ export interface CommittedWork {
   readonly deadlineMs: number | null;
   /** Which daily budget this work is charged to. Translation and DTP do not share one. */
   readonly kind: WorkKind;
+  /** What ties the work to its purchase order and assigned job; stored, never weighed. */
+  readonly identity?: WorkIdentity;
 }
 
 /** The two capacity outcomes are kept apart because they need different human responses:
@@ -329,6 +332,7 @@ export class StrakerLedger {
       deadlineMs: work.deadlineMs,
       heldSinceMs: nowMs,
       kind: work.kind,
+      ...(work.identity === undefined ? {} : { identity: work.identity }),
     });
 
     const holidays = this.holidaysAt(nowMs);

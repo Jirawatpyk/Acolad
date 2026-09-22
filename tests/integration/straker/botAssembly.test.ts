@@ -98,6 +98,7 @@ function portalListing(offers: readonly RawOffer[] = []): FakePortal {
     // Overridden by the one test that asserts reconciliation is reached; everywhere else a
     // pass finds the portal holding nothing, which is the ordinary case.
     listAssignedWork: async () => [],
+    listPurchaseOrders: async () => [],
   };
 }
 

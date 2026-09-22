@@ -102,6 +102,9 @@ export function harness(opts: HarnessOptions): Harness {
     listAssignedWork: () => {
       throw new Error('the poll cycle must not read the assigned-work list (FR-002)');
     },
+    listPurchaseOrders: () => {
+      throw new Error('the poll cycle must not read the purchase-order list (FR-002)');
+    },
   };
 
   // The barred flag is REAL in-memory state here, not a stub returning a constant: what

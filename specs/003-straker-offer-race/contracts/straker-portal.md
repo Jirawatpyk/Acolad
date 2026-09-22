@@ -79,9 +79,24 @@ The client reads the remainder after every response and responds in defined step
 
 Distinct from an expired session, which self-heals by signing in again. A rejection meaning the account itself is barred must alert immediately and stop claiming; it must never be retried around as though it were transient. The two are easy to conflate because both arrive as a refusal on an authenticated request — and conflating them turns a suspension into a sign-in loop against a portal that has already said no.
 
-## 5. Reading work already assigned to the team — NOT YET EXERCISED
+## 5. Reading work already assigned to the team — exercised 2026-09-22
 
-Reconciliation (FR-016a) depends on being able to ask the portal what it believes the team already holds. Recon observed such a list, returned as an envelope with a count. It is the authority when our record and the portal disagree — the portal is the source of truth, our record is a copy.
+Reconciliation (FR-016a) depends on being able to ask the portal what it believes the team already holds. `GET /api/vendors/{vendorId}/assigned-jobs?limit=&offset=` returns `{ items, total, limit, offset }`; each item carries `obj_id` (its **own** id, not the offer's), `external_job_id` (the job reference, e.g. `aj-310`), `title`, `source_lang`, `target_lang`, `service`, `words`, `due_at` (with `Z`) and `status` (`in_progress`, `delivered`, …). It is the authority when our record and the portal disagree — the portal is the source of truth, our record is a copy.
+
+## 5a. Purchase orders — where won work waits for a person (observed 2026-09-22)
+
+A won claim does **not** go straight to the assigned list. The portal issues a purchase order, which sits `pending` until someone on the team accepts it and names a translator — hours, sometimes a day — and only then does an assigned job appear, under yet another id.
+
+`GET /api/hitl/vendor/purchase-orders?vendor_id=&sort_by=created_at&sort_order=desc&page=&page_size=` (the call the portal's own web app makes) returns `{ items, total, page, page_size }`. Each item: `po_obj_id`, `status`, `job_ref`, `source_language_code`, `target_language_code` (both empty on a DTP order), `po_type` (`translation`, `dtp_prep`), `due_at`, amounts. **No word count.**
+
+| Status | Assigned job | Meaning |
+|---|---|---|
+| `pending` | none yet | Won, waiting for a person — **still owed** |
+| `accepted` | `in_progress` | Being worked |
+| `confirmed`, `approved` | `delivered` | Done |
+| `revoked` | none | Withdrawn |
+
+**The three stages share only `job_ref` + target language + service**; across 27 orders that triple never repeated. `src/straker/workKey.ts` makes it the key (target missing, empty or equal to the source is one value, for DTP). Matching on `obj_id` alone is what released every won claim within one reconcile pass and then recorded it again as "found by reconciliation".
 
 ## 6. Deliberately not used
 

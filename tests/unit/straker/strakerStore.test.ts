@@ -1222,3 +1222,130 @@ describe('the kind column arriving on a database that predates it', () => {
     ).toThrow(/CHECK/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The identity that ties an offer, its purchase order and its assigned job (2026-09-22)
+// ---------------------------------------------------------------------------
+
+describe('work identity on held work and claim events', () => {
+  const IDENTITY = {
+    jobRef: 'aj-310',
+    title: 'NBA - NTRY Hangtag.xlsx',
+    service: 'translation',
+    workKey: 'aj-310|zh-hk|translation',
+  };
+
+  it('keeps the identity a hold was given, and finds held work by its key', () => {
+    const { store } = freshStore();
+    store.hold({ ...hold(), identity: IDENTITY });
+
+    expect(store.heldWork()[0]?.identity).toEqual(IDENTITY);
+  });
+
+  it('never lets a later hold without an identity erase one already recorded', () => {
+    // Reconciliation re-holds work it finds; it must not blank what the claim path knew.
+    const { store } = freshStore();
+    store.hold({ ...hold(), identity: IDENTITY });
+    store.hold(hold());
+
+    expect(store.heldWork()[0]?.identity).toEqual(IDENTITY);
+  });
+
+  it('leaves the identity off held work that never had one', () => {
+    const { store } = freshStore();
+    store.hold(hold());
+
+    expect(store.heldWork()[0]).not.toHaveProperty('identity');
+  });
+
+  it('fills in the identity of a row that lacked one, and only that', () => {
+    const { store } = freshStore();
+    store.hold(hold());
+    expect(store.backfillHeldIdentity(hold().objId, IDENTITY)).toBe(true);
+    expect(store.heldWork()[0]?.identity).toEqual(IDENTITY);
+
+    // A second backfill does not overwrite what is there.
+    store.backfillHeldIdentity(hold().objId, { ...IDENTITY, title: 'other.xlsx' });
+    expect(store.heldWork()[0]?.identity?.title).toBe(IDENTITY.title);
+  });
+
+  it('finds the latest claim made on a work key, with what it was weighed at', () => {
+    const { store } = freshStore();
+    store.recordEvent({
+      objId: 'offer-1',
+      eventType: 'claim',
+      outcome: 'unknown',
+      effortWords: 20,
+      deadlineMs: NOW_MS + 86_400_000,
+      occurredAtMs: NOW_MS,
+      identity: IDENTITY,
+    });
+
+    expect(store.claimEventByWorkKey(IDENTITY.workKey)).toEqual({
+      objId: 'offer-1',
+      outcome: 'unknown',
+      effortWords: 20,
+      deadlineMs: NOW_MS + 86_400_000,
+      occurredAtMs: NOW_MS,
+      identity: IDENTITY,
+      languageDirection: null, // this claim recorded none
+    });
+    expect(store.claimEventByWorkKey('aj-999|th|translation')).toBeNull();
+  });
+
+  it('remembers a one-time step across restarts', () => {
+    const { strakerDir } = tempRoot();
+    const first = openStrakerDatabase(strakerDir, NOW_MS);
+    const store = new StrakerStore(first.db);
+    expect(store.metaFlagSetAt('po_adoption_done')).toBeNull();
+    expect(store.setMetaFlag('po_adoption_done', NOW_MS)).toBe(true);
+    expect(store.setMetaFlag('po_adoption_done', NOW_MS + 1)).toBe(false);
+    first.db.close();
+
+    const second = openStrakerDatabase(strakerDir, NOW_MS);
+    openDbs.push(second.db);
+    expect(new StrakerStore(second.db).metaFlagSetAt('po_adoption_done')).toBe(NOW_MS);
+  });
+
+  it('adds the identity columns to a database that predates them, once', () => {
+    const { strakerDir } = tempRoot();
+    const opened = openStrakerDatabase(strakerDir, NOW_MS);
+    // Rebuilt without the four columns rather than DROP COLUMN, which SQLite refuses on a
+    // table whose definition carries comments. offer_events keeps its real DDL (its CHECKs
+    // are guarded on open); held_work only needs the column set.
+    opened.db.exec('DROP INDEX idx_held_work_key');
+    const identityLine =
+      /^\s*(work_key|job_ref|title|service) TEXT,?\s*$|^\s*-- (What names the work|rows and offers)/;
+    const eventsDdl = (
+      opened.db
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'offer_events'")
+        .get() as { sql: string }
+    ).sql
+      .split('\n')
+      .filter((line) => !identityLine.test(line))
+      .join('\n');
+    expect(eventsDdl).not.toContain('work_key');
+    opened.db.exec('DROP TABLE offer_events');
+    opened.db.exec(eventsDdl);
+    const keep = (opened.db.pragma('table_info(held_work)') as { name: string }[])
+      .map((c) => c.name)
+      .filter((c) => !['work_key', 'job_ref', 'title', 'service'].includes(c));
+    opened.db.exec(`CREATE TABLE held_work_old AS SELECT ${keep.join(', ')} FROM held_work`);
+    opened.db.exec('DROP TABLE held_work');
+    opened.db.exec('ALTER TABLE held_work_old RENAME TO held_work');
+    opened.db.close();
+
+    for (let restart = 0; restart < 3; restart += 1) {
+      const again = openStrakerDatabase(strakerDir, NOW_MS);
+      openDbs.push(again.db);
+      for (const table of ['held_work', 'offer_events']) {
+        const cols = (again.db.pragma(`table_info(${table})`) as { name: string }[]).map(
+          (c) => c.name,
+        );
+        for (const col of ['work_key', 'job_ref', 'title', 'service']) {
+          expect(cols.filter((c) => c === col)).toHaveLength(1);
+        }
+      }
+    }
+  });
+});

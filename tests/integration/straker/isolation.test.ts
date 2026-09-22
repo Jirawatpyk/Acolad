@@ -399,6 +399,7 @@ describe('SC-008 — a running Straker bot leaves the XTM record byte for byte a
       signIn: async () => ({ vendorId: 'vendor-1' }),
       listOpenOffers: async () => [offer],
       listAssignedWork: async () => [],
+      listPurchaseOrders: async () => [],
     };
 
     const cfg = loadStrakerBotConfig({

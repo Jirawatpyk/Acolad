@@ -50,6 +50,7 @@
  * suite pins by comparing every `detail` against the gate's own output.
  */
 
+import type { WorkIdentity } from './workKey.js';
 import { evaluateAcceptSchedule } from '../schedule/acceptSchedule.js';
 import { resolveHolidaysForSpan } from '../schedule/thaiHolidays.js';
 import type { WorkCalendar } from '../schedule/workingHours.js';
@@ -84,6 +85,13 @@ export interface OfferForDecision {
    * because a word count says much less about how long it takes.
    */
   readonly monolingual: boolean;
+  /**
+   * Job reference, file name, service and the key that ties this offer to its purchase order
+   * and assigned job (`workKey.ts`). Never read by the decision; carried so the record, the
+   * sheet and the card can name the work. Optional so callers that build offers by hand
+   * need not invent one.
+   */
+  readonly identity?: WorkIdentity;
 }
 
 /** Claim it, or skip it and say which rule turned it away. There is no third answer. */
@@ -100,6 +108,7 @@ export type ClaimDecision =
       readonly deadlineMs: number;
       /** The effective deadline day this work will be charged to, from the ledger. */
       readonly deadlineDay: string;
+      readonly identity?: WorkIdentity;
     }
   | {
       readonly objId: string;
@@ -123,6 +132,7 @@ export type ClaimDecision =
        */
       readonly effortWords: number | null;
       readonly deadlineMs: number | null;
+      readonly identity?: WorkIdentity;
     };
 
 /**
@@ -333,6 +343,7 @@ function decideOne(
     effortWords,
     deadlineMs,
     deadlineDay: capacity.deadlineDay,
+    ...(offer.identity === undefined ? {} : { identity: offer.identity }),
   };
 }
 
@@ -369,5 +380,6 @@ function skip(offer: OfferForDecision, reason: SkipReason, detail: string): Clai
     detail,
     effortWords: offer.effortWords,
     deadlineMs: offer.deadlineMs,
+    ...(offer.identity === undefined ? {} : { identity: offer.identity }),
   };
 }

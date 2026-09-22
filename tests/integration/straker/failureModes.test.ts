@@ -153,6 +153,8 @@ function fakeStraker(): FakeStraker {
     if (/^\/api\/vendors\/[^/]+\/assigned-jobs$/.test(exchange.path)) {
       return handlers.assigned(exchange);
     }
+    // Reconciliation also reads where won work waits for a person (2026-09-22).
+    if (exchange.path === '/api/hitl/vendor/purchase-orders') return json(envelope([]));
     throw new Error(
       `STUB: nothing routes ${exchange.method} ${exchange.path} — the bot asked for something ` +
         'this suite did not expect, which is itself the finding',

@@ -511,3 +511,38 @@ describe('alert conditions agree with the outcome policy (one decision, not two)
     }
   });
 });
+
+// =========================================================================================
+// File name, job reference and service on the cards (2026-09-22)
+// =========================================================================================
+
+describe('cards name the work the way people know it', () => {
+  const NAMES = { title: 'NBA - NTRY Hangtag.xlsx', jobRef: 'aj-310', service: 'translation' };
+
+  it('shows the file name, job reference and service on a win', async () => {
+    const chat = chatStub();
+    await createStrakerOffersSender(chat)({ ...WIN, ...NAMES });
+
+    const card = readCard(chat.posted[0]);
+    expect(rowValue(card, 'File')).toBe('NBA - NTRY Hangtag.xlsx');
+    expect(rowValue(card, 'Job ref')).toBe('aj-310');
+    expect(rowValue(card, 'Service')).toBe('translation');
+  });
+
+  it('still posts a win queued before the change, with the new rows marked unknown', async () => {
+    const chat = chatStub();
+    expect(await createStrakerOffersSender(chat)(WIN)).toEqual({ ok: true });
+
+    expect(rowValue(readCard(chat.posted[0]), 'File')).toBe('—');
+  });
+
+  it('shows them on an offer alert too', async () => {
+    const chat = chatStub();
+    await createStrakerAlertsSender(chat)({ ...sampleAlert('claim_failed'), ...NAMES });
+
+    const card = readCard(chat.posted[0]);
+    expect(rowValue(card, 'File')).toBe('NBA - NTRY Hangtag.xlsx');
+    expect(rowValue(card, 'Job ref')).toBe('aj-310');
+    expect(rowValue(card, 'Service')).toBe('translation');
+  });
+});

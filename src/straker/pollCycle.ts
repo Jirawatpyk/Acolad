@@ -21,6 +21,7 @@
  * an irreversible action, is met behind the action instead of in front of it.
  */
 
+import { workLabels } from './workKey.js';
 import type { Logger } from '../monitoring/logger.js';
 import { classifyClaim } from './claimOutcome.js';
 import { claimOffer, type ClaimFollowUp } from './claim.js';
@@ -364,6 +365,10 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
               effortWords: decision.effortWords,
               deadlineMs: decision.deadlineMs,
               occurredAtMs: atMs,
+              // The key reconciliation recognises this work by once it becomes a purchase
+              // order and then an assigned job, each under an id of its own (workKey.ts).
+              ...(decision.identity === undefined ? {} : { identity: decision.identity }),
+              languageDirection: decision.languageDirection,
             });
             // Only work the team actually holds goes on the ledger. A lost race and a fault
             // consume no capacity — counting them would shrink tomorrow's budget for work
@@ -375,6 +380,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
                   effortWords: decision.effortWords,
                   deadlineMs: decision.deadlineMs,
                   kind: decision.monolingual ? 'monolingual' : 'translation',
+                  ...(decision.identity === undefined ? {} : { identity: decision.identity }),
                 },
                 atMs,
               );
@@ -392,6 +398,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
               firstSeenAtMs: atMs,
               claimedAtMs: atMs,
               note: detail,
+              ...workLabels(decision.identity),
             } satisfies TrackingRecord);
             // Announced or alerted — never both, and never neither by accident. The
             // condition comes from `notifier.ts`'s table rather than a literal, so an
@@ -405,6 +412,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
                 detail,
                 occurredAtMs: atMs,
                 ...optionalOffer(decision),
+                ...workLabels(decision.identity),
               } satisfies StrakerOfferAlert);
             } else if (outcome === 'won') {
               enqueue(deps, 'offers', `claim:${decision.objId}:${outcome}`, atMs, {
@@ -415,6 +423,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
                 deadlineMs: decision.deadlineMs,
                 occurredAtMs: atMs,
                 detail,
+                ...workLabels(decision.identity),
               } satisfies StrakerOfferAnnouncement);
             }
           });
@@ -575,6 +584,7 @@ function enqueueSkipRow(
     deadlineMs: decision.deadlineMs,
     firstSeenAtMs: atMs,
     note,
+    ...workLabels(decision.identity),
   } satisfies TrackingRecord);
 }
 

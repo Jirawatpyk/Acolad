@@ -35,7 +35,8 @@ it (FR-023).
 | `due_at` | string | **Deadline** — and it carries **no timezone** (`2026-09-15T23:20:00`). Which zone the portal means is unknown and cannot be derived from two samples. Read as Bangkok, following the same precedent the XTM bot set for its zone-less Due cell, through one named constant so changing it is one line. |
 | `listing_type` | string | Only ever `direct_po`. Any other value **fails loud** — Q3's meanings are still Straker's to supply. |
 | `status` | string | Only ever `open`; the list is already queried for it, so anything else means the portal contradicts itself. |
-| `job_ref`, `title`, `budget`, `currency`, `rate_type`, `total_unit`, `unit_cost`, `service` | — | Present, and no decision reads them. Recorded so the next reader knows they were seen and deliberately unused. |
+| `job_ref`, `title`, `service` | string | **Read since 2026-09-22**, never for deciding: they name the work on the sheet and the cards, and `job_ref` + target + `service` is the key (`workKey.ts`) that ties an offer to its purchase order and assigned job, whose ids differ. |
+| `budget`, `currency`, `rate_type`, `total_unit`, `unit_cost` | — | Present, and no decision reads them. Recorded so the next reader knows they were seen and deliberately unused. |
 
 **The pricing identity does not hold on every offer — corrected 2026-09-15.** An earlier
 version of this document claimed `budget = unit_cost × total_unit` holds on all three

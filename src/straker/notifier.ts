@@ -84,6 +84,10 @@ export interface StrakerOfferAnnouncement {
   /** When the claim landed, or when reconciliation found the work. */
   readonly occurredAtMs: number;
   readonly detail: string | null;
+  /** The file name, job reference and service (2026-09-22). Absent when unknown. */
+  readonly title?: string;
+  readonly jobRef?: string;
+  readonly service?: string;
 }
 
 /** The two outcomes §2 announces, as a value so the refusal has one source. */
@@ -106,6 +110,7 @@ export function renderOfferAnnouncement(announcement: StrakerOfferAnnouncement):
     ...(won ? {} : { headerSubtitle: 'Found by reconciliation — this work was never announced' }),
     rows: [
       { label: 'Offer', value: announcement.objId },
+      ...workRows(announcement),
       { label: 'Language', value: announcement.languageDirection },
       { label: 'Words', value: wordsValue(announcement.effortWords) },
       { label: 'Deadline', value: bangkok(announcement.deadlineMs) },
@@ -193,6 +198,9 @@ export interface StrakerOfferAlert {
   readonly languageDirection?: string;
   readonly effortWords?: number;
   readonly deadlineMs?: number;
+  readonly title?: string;
+  readonly jobRef?: string;
+  readonly service?: string;
 }
 
 /**
@@ -432,6 +440,7 @@ function systemContextRows(alert: StrakerSystemAlert): { label: string; value: s
 function offerContextRows(alert: StrakerOfferAlert): { label: string; value: string | null }[] {
   return [
     { label: 'Offer', value: alert.objId },
+    ...workRows(alert),
     { label: 'Language', value: alert.languageDirection ?? null },
     { label: 'Words', value: wordsValue(alert.effortWords) },
     { label: 'Deadline', value: bangkok(alert.deadlineMs ?? null) },
@@ -723,7 +732,39 @@ function parseAnnouncement(payload: unknown): Parsed<StrakerOfferAnnouncement> {
       deadlineMs: count(raw['deadlineMs']),
       occurredAtMs,
       detail: text(raw['detail']),
+      ...parsedLabels(raw),
     },
+  };
+}
+
+/**
+ * The file name, job reference and service rows (2026-09-22). Always shown — a dash where a
+ * payload queued before the change carries none — so every card reads the same way.
+ */
+function workRows(named: {
+  readonly title?: string;
+  readonly jobRef?: string;
+  readonly service?: string;
+}): { label: string; value: string | null }[] {
+  return [
+    { label: 'File', value: named.title ?? null },
+    { label: 'Job ref', value: named.jobRef ?? null },
+    { label: 'Service', value: named.service ?? null },
+  ];
+}
+
+function parsedLabels(raw: Record<string, unknown>): {
+  title?: string;
+  jobRef?: string;
+  service?: string;
+} {
+  const title = text(raw['title']);
+  const jobRef = text(raw['jobRef']);
+  const service = text(raw['service']);
+  return {
+    ...(title === null ? {} : { title }),
+    ...(jobRef === null ? {} : { jobRef }),
+    ...(service === null ? {} : { service }),
   };
 }
 
@@ -816,6 +857,7 @@ function parseAlert(payload: unknown): Parsed<StrakerAlert> {
       ...(languageDirection === null ? {} : { languageDirection }),
       ...(effortWords === null ? {} : { effortWords }),
       ...(deadlineMs === null ? {} : { deadlineMs }),
+      ...parsedLabels(raw),
     },
   };
 }

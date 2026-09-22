@@ -49,7 +49,14 @@ const EXPECTED_HEADER = [
   'Claimed at', // I
   'Note', // J
   '_row_key', // K
+  // Version 2 (2026-09-22): appended to the right of the key, so no existing row moves.
+  'File name', // L
+  'Job ref', // M
+  'Service', // N
 ];
+
+/** Version 1 — the layout a sheet written before 2026-09-22 carries. */
+const V1_HEADER = EXPECTED_HEADER.slice(0, 11);
 
 /** Column K — the hidden upsert key. Hardcoded for the same reason as the header above. */
 const ROW_KEY_COLUMN = 10;
@@ -174,6 +181,9 @@ describe('every offer seen produces a row — won, lost and skipped alike (FR-01
       '15/09/2026 13:56:22',
       '',
       '66ae223e-8828-45f7-91c8-e6a841cc346e|claim',
+      '', // L — File name (version 2): WON carries none
+      '', // M — Job ref
+      '', // N — Service
     ]);
   });
 
@@ -382,9 +392,9 @@ describe('a shifted layout fails loud rather than writing into the wrong columns
     expect(sheet.writes).toEqual([]);
   });
 
-  it('does NOT refuse extra columns a human added to the right of the key', async () => {
+  it('does NOT refuse extra columns a human added to the right of the layout', async () => {
     // The XTM bot's lesson: an over-strict check turns a harmless notes column into a
-    // dead-lettered outcome and a page at 03:00. Nothing left of the key has moved.
+    // dead-lettered outcome and a page at 03:00. Nothing inside the layout has moved.
     const sheet = fakeSheet({ header: [...EXPECTED_HEADER, 'Invoice', 'Paid?'] });
 
     const result = await createTrackingSink(sheet.api)(viaQueue(WON));
@@ -555,5 +565,53 @@ describe('the exported layout is the one the sink writes', () => {
     // The sink and its transport both derive their ranges from this array, so publishing
     // it is what lets a caller build the sheet without re-deriving the column letters.
     expect([...TRACKING_HEADER]).toEqual(EXPECTED_HEADER);
+  });
+});
+
+describe('version 2 — file name, job reference and service (2026-09-22)', () => {
+  const NAMED: TrackingRecord = {
+    ...WON,
+    title: 'NBA - NTRY Hangtag.xlsx',
+    jobRef: 'aj-310',
+    service: 'translation',
+  };
+
+  it('writes the three new cells after the key, where the header names them', async () => {
+    const sheet = headedSheet();
+
+    await createTrackingSink(sheet.api)(viaQueue(NAMED));
+
+    expect(sheet.rows[0]?.slice(11)).toEqual(['NBA - NTRY Hangtag.xlsx', 'aj-310', 'translation']);
+    expect(sheet.rows[0]?.[ROW_KEY_COLUMN]).toBe(`${WON.objId}|claim`);
+  });
+
+  it('leaves them blank for a record that carries none — rows queued before the change still send', async () => {
+    const sheet = headedSheet();
+
+    expect(await createTrackingSink(sheet.api)(viaQueue(WON))).toEqual({ ok: true });
+    expect(sheet.rows[0]?.slice(11)).toEqual(['', '', '']);
+  });
+
+  it('brings a version-1 sheet up to date by naming the three columns, and moves no row', async () => {
+    const sheet = fakeSheet({ header: V1_HEADER });
+
+    const result = await createTrackingSink(sheet.api)(viaQueue(NAMED));
+
+    expect(result).toEqual({ ok: true });
+    expect([...sheet.header()]).toEqual(EXPECTED_HEADER);
+    expect(sheet.rows[0]?.[ROW_KEY_COLUMN]).toBe(`${WON.objId}|claim`);
+  });
+
+  it('refuses to name the columns over headings a human already put there', async () => {
+    // On a version-1 sheet L–N were "a human's own". Writing over them would silently
+    // relabel someone's invoice column as the file name.
+    const sheet = fakeSheet({ header: [...V1_HEADER, 'Invoice'] });
+
+    const result = await createTrackingSink(sheet.api)(viaQueue(NAMED));
+
+    expect(result.ok).toBe(false);
+    expect(sheet.header()).toEqual([...V1_HEADER, 'Invoice']);
+    expect(sheet.rows).toEqual([]);
+    if (!result.ok) expect(result.reason).toContain('Invoice');
   });
 });

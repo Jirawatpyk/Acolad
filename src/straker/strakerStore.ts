@@ -35,6 +35,7 @@ import { STRAKER_OUTBOX_CHANNELS, STRAKER_OUTBOX_STATUSES } from './outbox.js';
 import type { StrakerEnqueueResult, StrakerOutbox } from './outbox.js';
 import { CLAIM_OUTCOMES, SKIP_REASONS } from './outcomePolicy.js';
 import type { ClaimOutcome, EndedOfferSighting, OfferSighting, SkipReason } from './types.js';
+import type { WorkIdentity } from './workKey.js';
 
 export type StrakerDB = Database.Database;
 
@@ -190,6 +191,15 @@ CREATE TABLE IF NOT EXISTS offer_events (
   effort_words INTEGER CHECK (effort_words IS NULL OR effort_words >= 0),
   deadline_ms INTEGER,
   occurred_at_ms INTEGER NOT NULL,
+  -- What names the work across its stages (2026-09-22, see workKey.ts). Nullable: older
+  -- rows and offers that lack a job reference carry none.
+  work_key TEXT,
+  job_ref TEXT,
+  title TEXT,
+  service TEXT,
+  -- The claim's own direction, so a claim settled from a purchase order that carries no
+  -- language codes (DTP) can still rewrite its sheet row (2026-09-22).
+  language_direction TEXT,
   PRIMARY KEY (obj_id, event_type),
   -- An outcome belongs to the two event types that produce one, and a skip reason to the
   -- one that produces one. Enforced here so a caller bug fails at the write rather than
@@ -208,7 +218,13 @@ CREATE TABLE IF NOT EXISTS held_work (
   -- both counted in words, and a word means something entirely different in each, so they
   -- cannot share a daily ceiling. Defaulted rather than required so the ALTER below can add
   -- it to a database that already holds rows.
-  kind TEXT NOT NULL DEFAULT 'translation' CHECK (kind IN ('translation', 'monolingual'))
+  kind TEXT NOT NULL DEFAULT 'translation' CHECK (kind IN ('translation', 'monolingual')),
+  -- The key that ties this work to its purchase order and assigned job, whose ids differ
+  -- from the offer's (2026-09-22, see workKey.ts), and the fields people read it by.
+  work_key TEXT,
+  job_ref TEXT,
+  title TEXT,
+  service TEXT
 );
 
 -- Durable flags that must outlive a process, of which there is exactly one today: the
@@ -392,13 +408,58 @@ export function enqueueQuarantineAlert(
  * predates DTP support and was translation work, so `'translation'` is not a guess.
  */
 function addMissingColumns(db: StrakerDB): void {
-  const columns = (db.pragma('table_info(held_work)') as { name: string }[]).map((c) => c.name);
-  if (!columns.includes('kind')) {
+  const columnsOf = (table: string): string[] =>
+    (db.pragma(`table_info(${table})`) as { name: string }[]).map((c) => c.name);
+  if (!columnsOf('held_work').includes('kind')) {
     db.exec(
       "ALTER TABLE held_work ADD COLUMN kind TEXT NOT NULL DEFAULT 'translation' " +
         "CHECK (kind IN ('translation', 'monolingual'))",
     );
   }
+  // The work identity (2026-09-22). Nullable with no default: a row written before it has
+  // no job reference to record, and inventing one would join unrelated work.
+  for (const table of ['held_work', 'offer_events']) {
+    const present = columnsOf(table);
+    for (const column of IDENTITY_COLUMNS) {
+      if (!present.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
+    }
+  }
+  if (!columnsOf('offer_events').includes('language_direction')) {
+    db.exec('ALTER TABLE offer_events ADD COLUMN language_direction TEXT');
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_held_work_key ON held_work (work_key)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_offer_events_key ON offer_events (work_key)');
+}
+
+const IDENTITY_COLUMNS = ['work_key', 'job_ref', 'title', 'service'] as const;
+
+interface IdentityColumns {
+  work_key: string | null;
+  job_ref: string | null;
+  title: string | null;
+  service: string | null;
+}
+
+/** The identity a row carries, or undefined when it carries none at all. */
+function identityOf(r: IdentityColumns): WorkIdentity | undefined {
+  if (r.work_key === null && r.job_ref === null && r.title === null && r.service === null) {
+    return undefined;
+  }
+  return { jobRef: r.job_ref, title: r.title, service: r.service, workKey: r.work_key };
+}
+
+function withIdentity(r: IdentityColumns): { identity?: WorkIdentity } {
+  const identity = identityOf(r);
+  return identity === undefined ? {} : { identity };
+}
+
+function identityParams(identity: WorkIdentity | undefined): (string | null)[] {
+  return [
+    identity?.workKey ?? null,
+    identity?.jobRef ?? null,
+    identity?.title ?? null,
+    identity?.service ?? null,
+  ];
 }
 
 function migrate(db: StrakerDB): void {
@@ -467,6 +528,10 @@ interface OfferEventWork {
 export interface ClaimEvent extends OfferEventCommon, OfferEventWork {
   readonly eventType: 'claim' | 'recovery';
   readonly outcome: ClaimOutcome;
+  /** What names the work across its stages; optional, and never erased once recorded. */
+  readonly identity?: WorkIdentity;
+  /** The offer's direction, kept for a settlement that has none to read (DTP orders). */
+  readonly languageDirection?: string;
 }
 
 /** An offer passed over, and the rule that passed it over (FR-010). */
@@ -534,9 +599,25 @@ export interface HeldWork {
   readonly deadlineMs: number | null;
   readonly heldSinceMs: number;
   readonly releasedAtMs: number | null;
+  /**
+   * The key tying this work to its purchase order and assigned job, and the fields people
+   * read it by (2026-09-22). Absent on rows that never had one.
+   */
+  readonly identity?: WorkIdentity;
 }
 
 export type NewHold = Omit<HeldWork, 'releasedAtMs'>;
+
+/** The claim made on a work key, as `claimEventByWorkKey` finds it. */
+export interface ClaimOnWorkKey {
+  readonly objId: string;
+  readonly outcome: ClaimOutcome;
+  readonly effortWords: number | null;
+  readonly deadlineMs: number | null;
+  readonly occurredAtMs: number;
+  readonly identity: WorkIdentity;
+  readonly languageDirection: string | null;
+}
 
 interface SightingRow {
   obj_id: string;
@@ -546,7 +627,8 @@ interface SightingRow {
   not_found_at_ms: number | null;
 }
 
-interface EventRow {
+interface EventRow extends IdentityColumns {
+  language_direction: string | null;
   obj_id: string;
   event_type: OfferEventType;
   outcome: ClaimOutcome | null;
@@ -556,7 +638,7 @@ interface EventRow {
   occurred_at_ms: number;
 }
 
-interface HeldRow {
+interface HeldRow extends IdentityColumns {
   obj_id: string;
   effort_words: number;
   kind: WorkKind;
@@ -703,14 +785,20 @@ export class StrakerStore {
       this.db
         .prepare(
           `INSERT INTO offer_events
-             (obj_id, event_type, outcome, skip_reason, effort_words, deadline_ms, occurred_at_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+             (obj_id, event_type, outcome, skip_reason, effort_words, deadline_ms, occurred_at_ms,
+              work_key, job_ref, title, service, language_direction)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (obj_id, event_type) DO UPDATE SET
              outcome = excluded.outcome,
              skip_reason = excluded.skip_reason,
              effort_words = excluded.effort_words,
              deadline_ms = excluded.deadline_ms,
-             occurred_at_ms = excluded.occurred_at_ms`,
+             occurred_at_ms = excluded.occurred_at_ms,
+             work_key = COALESCE(excluded.work_key, offer_events.work_key),
+             job_ref = COALESCE(excluded.job_ref, offer_events.job_ref),
+             title = COALESCE(excluded.title, offer_events.title),
+             service = COALESCE(excluded.service, offer_events.service),
+             language_direction = COALESCE(excluded.language_direction, offer_events.language_direction)`,
         )
         .run(
           objId,
@@ -720,6 +808,14 @@ export class StrakerStore {
           cols.effortWords,
           cols.deadlineMs,
           event.occurredAtMs,
+          ...identityParams(
+            event.eventType === 'skip' || event.eventType === 'sighting'
+              ? undefined
+              : event.identity,
+          ),
+          event.eventType === 'claim' || event.eventType === 'recovery'
+            ? (event.languageDirection ?? null)
+            : null,
         );
     })();
   }
@@ -797,15 +893,109 @@ export class StrakerStore {
     this.db
       .prepare(
         `INSERT INTO held_work
-           (obj_id, effort_words, deadline_ms, held_since_ms, released_at_ms, kind)
-         VALUES (?, ?, ?, ?, NULL, ?)
+           (obj_id, effort_words, deadline_ms, held_since_ms, released_at_ms, kind,
+            work_key, job_ref, title, service)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
          ON CONFLICT (obj_id) DO UPDATE SET
            effort_words = excluded.effort_words,
            deadline_ms = excluded.deadline_ms,
            kind = excluded.kind,
-           released_at_ms = NULL`,
+           released_at_ms = NULL,
+           work_key = COALESCE(excluded.work_key, held_work.work_key),
+           job_ref = COALESCE(excluded.job_ref, held_work.job_ref),
+           title = COALESCE(excluded.title, held_work.title),
+           service = COALESCE(excluded.service, held_work.service)`,
       )
-      .run(objId, work.effortWords, work.deadlineMs, work.heldSinceMs, work.kind);
+      .run(
+        objId,
+        work.effortWords,
+        work.deadlineMs,
+        work.heldSinceMs,
+        work.kind,
+        ...identityParams(work.identity),
+      );
+  }
+
+  /**
+   * Fill in the identity of held work that lacks one — work held before identities were
+   * recorded, matched later by its own id. Never overwrites a value already there. Answers
+   * whether a row was touched.
+   */
+  backfillHeldIdentity(objId: string, identity: WorkIdentity): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE held_work SET
+           work_key = COALESCE(work_key, ?),
+           job_ref = COALESCE(job_ref, ?),
+           title = COALESCE(title, ?),
+           service = COALESCE(service, ?)
+         WHERE obj_id = ?`,
+      )
+      .run(...identityParams(identity), requireIdentity(objId, 'an identity backfill'));
+    return res.changes > 0;
+  }
+
+  /**
+   * The latest claim made on a work key, or null. How reconciliation settles a claim that
+   * came back `unknown` once its purchase order turns up, and learns the effort a purchase
+   * order does not carry.
+   */
+  claimEventByWorkKey(key: string): ClaimOnWorkKey | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM offer_events WHERE work_key = ? AND event_type = 'claim'
+         ORDER BY occurred_at_ms DESC LIMIT 1`,
+      )
+      .get(key) as EventRow | undefined;
+    if (row === undefined || row.outcome === null) return null;
+    return {
+      objId: row.obj_id,
+      outcome: row.outcome,
+      effortWords: row.effort_words,
+      deadlineMs: row.deadline_ms,
+      occurredAtMs: row.occurred_at_ms,
+      identity: identityOf(row) ?? { jobRef: null, title: null, service: null, workKey: key },
+      languageDirection: row.language_direction,
+    };
+  }
+
+  /**
+   * The largest effort any claim without a work key was weighed at for a deadline within
+   * `windowMs` of this one, or null. For purchase orders of claims won before identities were
+   * recorded, or won from an offer that carried no key: an order carries no word count, and
+   * the largest is the side that cannot under-count the day. A window, not equality — the two
+   * endpoints are not promised to spell a deadline to the millisecond.
+   */
+  legacyClaimEffortNear(deadlineMs: number, windowMs: number): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(effort_words) AS effort FROM offer_events
+         WHERE event_type = 'claim' AND outcome IN ('won', 'unknown')
+           AND work_key IS NULL AND deadline_ms BETWEEN ? AND ?`,
+      )
+      .get(deadlineMs - windowMs, deadlineMs + windowMs) as { effort: number | null } | undefined;
+    return row?.effort ?? null;
+  }
+
+  /** When a one-time step was done, or null while it has not been. */
+  metaFlagSetAt(key: string): number | null {
+    const row = this.db
+      .prepare('SELECT value FROM straker_meta WHERE key = ?')
+      .get(requireIdentity(key, 'a meta flag')) as { value: string } | undefined;
+    if (row === undefined) return null;
+    const ms = Number(row.value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  /** Mark a one-time step done. True only the first time. */
+  setMetaFlag(key: string, atMs: number): boolean {
+    const res = this.db
+      .prepare(
+        `INSERT INTO straker_meta (key, value, updated_at_ms) VALUES (?, ?, ?)
+         ON CONFLICT (key) DO NOTHING`,
+      )
+      .run(requireIdentity(key, 'a meta flag'), String(atMs), atMs);
+    return res.changes > 0;
   }
 
   /**
@@ -883,6 +1073,7 @@ export class StrakerStore {
       deadlineMs: r.deadline_ms,
       heldSinceMs: r.held_since_ms,
       releasedAtMs: r.released_at_ms,
+      ...withIdentity(r),
     }));
   }
 }

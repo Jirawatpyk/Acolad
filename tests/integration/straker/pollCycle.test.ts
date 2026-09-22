@@ -164,6 +164,23 @@ describe('T040 every offer not claimed is recorded with the reason that blocked 
 });
 
 describe('what each claim outcome then causes', () => {
+  it('records the work identity on the claim and on the hold (2026-09-22)', async () => {
+    // Without it reconciliation cannot recognise the purchase order or the assigned job this
+    // claim becomes, whose ids differ from the offer's — the release-then-recover bug.
+    const identity = {
+      jobRef: 'aj-310',
+      title: 'NBA - NTRY Hangtag.xlsx',
+      service: 'translation',
+      workKey: 'aj-310|ms-my|translation',
+    };
+    const h = harness({ offers: [raw('a')], extract: () => [{ ...eligible('a'), identity }] });
+
+    await h.cycle.runOnce();
+
+    expect(h.events.find((e) => e['eventType'] === 'claim')?.['identity']).toEqual(identity);
+    expect(h.holds[0]?.['identity']).toEqual(identity);
+  });
+
   it('holds a won offer on the ledger and announces it', async () => {
     const h = harness({ offers: [raw('a')], extract: () => [eligible('a')] });
 

@@ -57,17 +57,15 @@
  * as always; only the spreadsheet row is withheld, and the alert says which job and why.
  * The durable record is `offer_events`; the sheet is the human-readable copy of it.
  *
- * ## What this module deliberately does NOT do
+ * ## Two lists, one piece of work (2026-09-22)
  *
- * **It never releases held work.** Reconciliation is the only thing that reads the portal's
- * assigned list, so it is the only thing that *could* notice work the team no longer holds —
- * and both `StrakerStore.release` and `StrakerLedger.release` were written anticipating this
- * caller ("a repeated reconciliation pass is a no-op"). It is left unbuilt because FR-016a
- * mandates only the additive direction, and the subtractive one is not safe on the same
- * evidence: a partial read would free capacity for work the team genuinely holds, and
- * over-committing an irreversible claim is the one error this feature cannot take back.
- * Until something releases, the ledger's budget never returns — see the report accompanying
- * this task.
+ * A won claim becomes a **purchase order** — waiting, often for hours, for someone to accept
+ * it and name a translator — and only then an **assigned job**, each under an id of its own.
+ * A pass therefore reads both lists and ties them to held work by the key they share
+ * (`workKey.ts`), not by id. Held work is released only on positive evidence (its assigned
+ * job delivered, its order closed) or on absence from both complete lists; keyed work that
+ * matches nothing is kept until its deadline is a day gone, because that absence more likely
+ * means the key stopped matching than that the work vanished. See {@link releaseFinished}.
  */
 
 import { formatLanguageDirection, isMonolingualDirection } from './eligibility.js';
@@ -85,7 +83,8 @@ import {
 import type { StrakerSession } from './session.js';
 import { trackingRowKey, type TrackingRecord } from './trackingSink.js';
 import type { ClaimOutcome } from './types.js';
-import type { StrakerStore } from './strakerStore.js';
+import type { ClaimOnWorkKey, HeldWork, StrakerStore } from './strakerStore.js';
+import { workIdentity, workLabels, type WorkIdentity } from './workKey.js';
 
 // ---------------------------------------------------------------------------
 // The cadence and the alert threshold
@@ -178,6 +177,11 @@ export interface AssignedWork {
   readonly languageDirection: string | null;
   /** The portal's human-readable handle (`aj-175`), so an operator can find the job. */
   readonly reference: string | null;
+  /**
+   * Job reference, file name, service and the key that ties this job back to the offer we
+   * claimed and its purchase order (workKey.ts) — whose ids all differ from this one.
+   */
+  readonly identity?: WorkIdentity;
 }
 
 /** The read door this module comes through: **one attempt, no backoff** (FR-016c). */
@@ -266,17 +270,17 @@ interface AssignedEnvelope {
   readonly total: number;
 }
 
-function readEnvelope(reply: unknown): AssignedEnvelope {
+function readEnvelope(reply: unknown, label = 'assigned-jobs'): AssignedEnvelope {
   if (typeof reply !== 'object' || reply === null || Array.isArray(reply)) {
     throw new Error(
-      `Straker assigned-jobs reply is not the { items, total } envelope it has always been ` +
+      `Straker ${label} reply is not the { items, total } envelope it has always been ` +
         `(got ${describe(reply)}) — refusing to read it as "the team holds nothing"`,
     );
   }
   const record = reply as { items?: unknown; total?: unknown };
   if (!Array.isArray(record.items)) {
     throw new Error(
-      `Straker assigned-jobs reply has no items array (got ${describe(record.items)}) — ` +
+      `Straker ${label} reply has no items array (got ${describe(record.items)}) — ` +
         'refusing to read it as "the team holds nothing"',
     );
   }
@@ -285,7 +289,7 @@ function readEnvelope(reply: unknown): AssignedEnvelope {
   const total = record.total;
   if (typeof total !== 'number' || !Number.isInteger(total) || total < 0) {
     throw new Error(
-      `Straker assigned-jobs envelope carries no usable total (got ${describe(total)}) — ` +
+      `Straker ${label} envelope carries no usable total (got ${describe(total)}) — ` +
         'the read cannot tell whether it saw the whole list',
     );
   }
@@ -314,6 +318,13 @@ function toAssignedWork(entry: unknown, zone: DeadlineZone): AssignedWork {
     deadlineMs: readDeadline(record['due_at'], zone),
     languageDirection: readDirection(record['source_lang'], record['target_lang']),
     reference: typeof record['external_job_id'] === 'string' ? record['external_job_id'] : null,
+    identity: workIdentity(
+      record['external_job_id'],
+      record['source_lang'],
+      record['target_lang'],
+      record['service'],
+      record['title'],
+    ),
   };
 }
 
@@ -380,6 +391,155 @@ function utcOffsetMs(designator: string): number | null {
   return (sign === '-' ? -1 : 1) * (Number(hours) * 3_600_000 + Number(minutes) * 60_000);
 }
 
+// ---------------------------------------------------------------------------
+// Purchase orders — where won work waits for a person (2026-09-22)
+// ---------------------------------------------------------------------------
+
+/**
+ * A purchase order: the stage between a won claim and an assigned job. The portal issues one
+ * when it accepts our claim, and it sits `pending` until someone on the team accepts it and
+ * names a translator — hours, or a day. Only then does the job appear on the assigned list,
+ * under an id of its own. Reading only the assigned list is what released every won claim
+ * one pass after it was won.
+ */
+export interface PurchaseOrder {
+  readonly poObjId: string;
+  readonly status: string;
+  readonly deadlineMs: number | null;
+  /** Null on a DTP order, whose language codes are empty. */
+  readonly languageDirection: string | null;
+  /** Always present; its `workKey` is null only when the order names no job or service. */
+  readonly identity: WorkIdentity;
+}
+
+/**
+ * Statuses that mean the order no longer holds work against the team (observed 2026-09-22:
+ * `confirmed` and `approved` pair with a delivered assigned job, `revoked` with none).
+ * Everything else — `pending`, `accepted`, and any status never seen — keeps the work held:
+ * over-stating the ceiling costs an offer passed over, under-stating it an over-commitment.
+ */
+export const CLOSED_ORDER_STATUSES = [
+  'revoked',
+  'rejected',
+  'cancelled',
+  'expired',
+  'approved',
+  'confirmed',
+  'completed',
+  'closed',
+] as const;
+
+export function isOpenOrder(status: string): boolean {
+  return !(CLOSED_ORDER_STATUSES as readonly string[]).includes(status);
+}
+
+export interface ReadPurchaseOrdersOptions {
+  readonly pageSize?: number;
+  readonly maxPages?: number;
+  readonly deadlineZone?: DeadlineZone;
+}
+
+/**
+ * Every page of the vendor's purchase orders, exactly as the portal's own web app reads them.
+ * Same guards as {@link readAssignedWork}: an envelope or nothing, and never a list shorter
+ * than the `total` the portal claims — this read now keeps work held, so a short one would
+ * hand back a ceiling for work the team still owes.
+ */
+export async function readPurchaseOrders(
+  client: AssignedWorkReadDoor,
+  vendorId: string,
+  options: ReadPurchaseOrdersOptions = {},
+): Promise<readonly PurchaseOrder[]> {
+  const pageSize = options.pageSize ?? DEFAULT_PAGE_LIMIT;
+  const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
+  const zone = options.deadlineZone ?? STRAKER_DEADLINE_ZONE;
+  const collected: PurchaseOrder[] = [];
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const reply = await client.getJson<unknown>(
+      `/api/hitl/vendor/purchase-orders?vendor_id=${encodeURIComponent(vendorId)}` +
+        `&sort_by=created_at&sort_order=desc&page=${page}&page_size=${pageSize}`,
+    );
+    const { items, total } = readEnvelope(reply, 'purchase-orders');
+    for (const entry of items) collected.push(toPurchaseOrder(entry, zone));
+    if (items.length === 0 || items.length < pageSize || collected.length >= total) {
+      if (collected.length < total) {
+        throw new Error(
+          `Straker purchase-orders stopped at ${collected.length} of ${total} it says exist — ` +
+            'refusing to treat a short list as the whole of it',
+        );
+      }
+      return collected;
+    }
+  }
+  throw new Error(
+    `Straker purchase-orders is still incomplete after ${maxPages} pages ` +
+      `(${collected.length} read) — refusing to treat a partial list as the whole of it`,
+  );
+}
+
+function toPurchaseOrder(entry: unknown, zone: DeadlineZone): PurchaseOrder {
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+    throw new Error(`Straker purchase-orders entry is not an object (got ${describe(entry)})`);
+  }
+  const record = entry as Record<string, unknown>;
+  const poObjId = record['po_obj_id'];
+  if (typeof poObjId !== 'string' || poObjId.trim() === '') {
+    throw new Error(
+      'Straker purchase-orders entry has no po_obj_id — an order we cannot name is one we ' +
+        'cannot hold against a ceiling',
+    );
+  }
+  const status = record['status'];
+  const source = record['source_language_code'];
+  const target = record['target_language_code'];
+  return {
+    poObjId: poObjId.trim(),
+    status: typeof status === 'string' ? status : describe(status),
+    deadlineMs: readDeadline(record['due_at'], zone),
+    languageDirection: readDirection(source, target),
+    identity: workIdentity(record['job_ref'], source, target, record['po_type'], null),
+  };
+}
+
+/**
+ * Which budget recovered work is charged to. A readable same-language direction or a DTP
+ * service is monolingual; anything else — including an unreadable direction — is translation,
+ * the stricter budget, so an unknown kind cannot quietly buy extra capacity.
+ */
+function kindOf(
+  languageDirection: string | null,
+  identity: WorkIdentity | undefined,
+): 'translation' | 'monolingual' {
+  if (languageDirection !== null && isMonolingualDirection(languageDirection)) return 'monolingual';
+  if (identity?.service?.toLowerCase().startsWith('dtp') === true) return 'monolingual';
+  return 'translation';
+}
+
+/** Marks the one-time adoption of purchase orders that predate recorded work identities. */
+export const PO_ADOPTION_FLAG = 'po_adoption_done';
+
+/**
+ * How long keyed work that matches no purchase order and no assigned job stays held past its
+ * deadline. A mismatch between the offer's `service` and the order's `po_type` would make the
+ * key find nothing; releasing on absence then would bring the original bug straight back.
+ */
+const UNMATCHED_KEYED_GRACE_MS = 24 * 3_600_000;
+
+/** Two endpoints spelling one deadline need not agree to the millisecond. */
+const SAME_DEADLINE_WINDOW_MS = 60_000;
+
+/** The one-time adoption's second try: keyless claims due within half a day either side. */
+const ADOPTION_FALLBACK_WINDOW_MS = 12 * 3_600_000;
+
+/** What proved an unknown claim was won, as a settlement records it. */
+interface SettlementEvidence {
+  /** For the note: `its purchase order (pending)`, `its assigned job (in_progress)`. */
+  readonly what: string;
+  readonly deadlineMs: number | null;
+  readonly languageDirection: string | null;
+}
+
 function describe(value: unknown): string {
   if (typeof value === 'string') return JSON.stringify(value);
   if (value === undefined) return 'nothing';
@@ -398,12 +558,22 @@ export interface ReconcilePortal {
   signIn(): Promise<StrakerSession>;
   /** One attempt at the assigned-work list — see {@link readAssignedWork}. */
   listAssignedWork(vendorId: string): Promise<readonly AssignedWork[]>;
+  /** One attempt at the purchase-order list — see {@link readPurchaseOrders}. */
+  listPurchaseOrders(vendorId: string): Promise<readonly PurchaseOrder[]>;
 }
 
 /** Exactly what a pass touches, declared so the dependency is visible (as `LedgerStore` is). */
 export type ReconcileStore = Pick<
   StrakerStore,
-  'transaction' | 'recordEvent' | 'heldWork' | 'sightingsOf'
+  | 'transaction'
+  | 'recordEvent'
+  | 'heldWork'
+  | 'sightingsOf'
+  | 'backfillHeldIdentity'
+  | 'claimEventByWorkKey'
+  | 'legacyClaimEffortNear'
+  | 'metaFlagSetAt'
+  | 'setMetaFlag'
 >;
 export type ReconcileLedger = Pick<StrakerLedger, 'hold' | 'release'>;
 export type ReconcileOutbox = Pick<StrakerOutbox, 'enqueue'>;
@@ -419,6 +589,12 @@ export interface ReconcileDeps {
   /** Overridable for tests only. SC-009 is expressed in the default. */
   readonly intervalMs?: number;
   readonly failureAlertThreshold?: number;
+}
+
+/** What one pass reads: both lists, or neither — a pass never judges on half the picture. */
+interface PortalView {
+  readonly assigned: readonly AssignedWork[];
+  readonly orders: readonly PurchaseOrder[];
 }
 
 /** What one call to {@link StrakerReconciler.runIfDue} did. */
@@ -545,40 +721,149 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
   };
 
   async function runPass(atMs: number): Promise<ReconcileOutcome> {
-    let work: readonly AssignedWork[];
+    let view: PortalView;
     try {
-      work = await read();
+      view = await read();
     } catch (err) {
       return fail('read', err, [], atMs);
     }
+    const { assigned: work, orders } = view;
 
     const outstanding = work.filter((w) => !isFinished(w.status));
-    // objId → when it was first held. A map rather than a set because release-on-absence
-    // needs the age: see `releaseFinished`, and the race it closes.
-    const held = new Map(deps.store.heldWork().map((w) => [w.objId, w.heldSinceMs] as const));
-    const missing = outstanding.filter((w) => !held.has(w.objId));
+    // Held work, by its own id and by its work key: the purchase order and the assigned job
+    // each carry an id of their own, so the id alone finds only what reconciliation itself
+    // recovered. Read once, before anything below writes, so release judges the held set as
+    // the pass found it.
+    const heldRows = deps.store.heldWork();
+    const heldById = new Map(heldRows.map((w) => [w.objId, w] as const));
+    const heldByKey = new Map<string, HeldWork>();
+    for (const row of heldRows) {
+      const key = row.identity?.workKey;
+      if (key !== undefined && key !== null) heldByKey.set(key, row);
+    }
+    const heldFor = (objId: string, key: string | null | undefined): HeldWork | undefined =>
+      heldById.get(objId) ?? (key === null || key === undefined ? undefined : heldByKey.get(key));
+    const adopting = deps.store.metaFlagSetAt(PO_ADOPTION_FLAG) === null;
 
     const recovered: string[] = [];
     let firstFailure: unknown = null;
-    for (const item of missing) {
+    const attempt = (objId: string, action: string, fn: () => void): void => {
       try {
+        fn();
+      } catch (err) {
+        // Rolled back whole — held work nobody was told about is the state FR-016 exists to
+        // make impossible — so the next pass meets this row again. Loud, per item.
+        firstFailure ??= err;
+        deps.logger.error({ module: 'reconcile', action, outcome: 'failed', objId }, message(err));
+      }
+    };
+
+    // Keys this pass has already accounted for — settled or recovered — so a second record of
+    // the same work in the other list is not counted again before the next pass re-reads.
+    const handledKeys = new Set<string>();
+
+    for (const item of outstanding) {
+      const key = item.identity?.workKey ?? null;
+      const row = heldFor(item.objId, key);
+      if (row !== undefined) {
+        const identity = item.identity;
+        if (identity !== undefined && key !== null && (row.identity?.workKey ?? null) === null) {
+          attempt(
+            row.objId,
+            'backfill',
+            () => void deps.store.backfillHeldIdentity(row.objId, identity),
+          );
+        }
+        // Work held from a purchase order was weighed at what it could be — often zero, since
+        // an order carries no word count. The assigned job says; the larger figure wins, so
+        // the day never reads emptier than it is.
+        if (item.effortWords !== null && item.effortWords > row.effortWords) {
+          const effortWords = item.effortWords;
+          attempt(row.objId, 'effort_upgrade', () => {
+            deps.ledger.hold(
+              {
+                objId: row.objId,
+                effortWords,
+                deadlineMs: row.deadlineMs ?? item.deadlineMs,
+                kind: row.kind,
+                ...(row.identity === undefined ? {} : { identity: row.identity }),
+              },
+              atMs,
+            );
+            deps.logger.info(
+              {
+                module: 'reconcile',
+                action: 'effort_upgrade',
+                outcome: 'ok',
+                objId: row.objId,
+                from: row.effortWords,
+                to: effortWords,
+              },
+              'held work re-weighed at the word count its assigned job reports',
+            );
+          });
+        }
+        continue;
+      }
+      if (key !== null) handledKeys.add(key);
+      // A claim whose reply never came, whose order the team accepted before this pass: the
+      // assigned job is the proof. Settled as the win it was, not recovered as a lost record.
+      const claim = key === null ? null : deps.store.claimEventByWorkKey(key);
+      if (claim !== null && claim.outcome === 'unknown') {
+        attempt(claim.objId, 'settle', () =>
+          settleUnknown(
+            claim,
+            {
+              what: `its assigned job (${item.status})`,
+              deadlineMs: item.deadlineMs,
+              languageDirection: item.languageDirection,
+            },
+            atMs,
+          ),
+        );
+        continue;
+      }
+      attempt(item.objId, 'recover', () => {
         recover(item, atMs);
         recovered.push(item.objId);
-      } catch (err) {
-        // The recovery is rolled back whole — held work nobody was told about is the state
-        // FR-016 exists to make impossible — so the next pass meets this row again. Loud,
-        // per item, and named so it can be searched for.
-        firstFailure ??= err;
-        deps.logger.error(
-          {
-            module: 'reconcile',
-            action: 'recover',
-            outcome: 'failed',
-            objId: item.objId,
-          },
-          message(err),
+      });
+    }
+
+    // Orders whose assigned job is under way are spoken for by it. A `pending` order never
+    // is: it has no assigned job yet by definition, so a same-key job already seen is an
+    // earlier round of the same reference, not this one.
+    const assignedKeys = new Set(
+      work.map((w) => w.identity?.workKey ?? null).filter((k): k is string => k !== null),
+    );
+    for (const order of orders) {
+      if (!isOpenOrder(order.status)) continue;
+      const key = order.identity.workKey;
+      if (order.status !== 'pending' && key !== null && assignedKeys.has(key)) continue;
+      if (key !== null && handledKeys.has(key)) continue;
+      if (heldFor(order.poObjId, key) !== undefined) continue;
+      const claim = key === null ? null : deps.store.claimEventByWorkKey(key);
+      if (claim !== null && claim.outcome === 'unknown') {
+        attempt(claim.objId, 'settle', () =>
+          settleUnknown(
+            claim,
+            {
+              what: `its purchase order (${order.status})`,
+              deadlineMs: order.deadlineMs,
+              languageDirection: order.languageDirection,
+            },
+            atMs,
+          ),
         );
+        continue;
       }
+      if (adopting) {
+        attempt(order.poObjId, 'adopt', () => adopt(order, atMs));
+        continue;
+      }
+      attempt(order.poObjId, 'recover', () => {
+        recoverOrder(order, claim, atMs);
+        recovered.push(order.poObjId);
+      });
     }
 
     if (firstFailure !== null) return fail('record', firstFailure, recovered, atMs);
@@ -592,7 +877,9 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
     consecutiveFailures = 0;
     streakStartedAtMs = null;
 
-    const released = releaseFinished(work, held, atMs);
+    if (adopting) deps.store.setMetaFlag(PO_ADOPTION_FLAG, atMs);
+
+    const released = releaseFinished(work, orders, heldRows, atMs);
 
     deps.logger.info(
       {
@@ -660,11 +947,11 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    */
   function releaseFinished(
     work: readonly AssignedWork[],
-    held: ReadonlyMap<string, number>,
+    orders: readonly PurchaseOrder[],
+    heldRows: readonly HeldWork[],
     atMs: number,
   ): string[] {
     const released: string[] = [];
-    const listed = new Set(work.map((item) => item.objId));
 
     const give = (objId: string, why: string): void => {
       try {
@@ -685,23 +972,88 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       }
     };
 
-    for (const item of work) {
-      if (isFinished(item.status) && held.has(item.objId)) give(item.objId, 'reported finished');
-    }
-    for (const [objId, heldSinceMs] of held) {
-      if (listed.has(objId)) continue;
-      // The grace, and the race it closes. A claim writes `held_work` the moment the portal
-      // answers, but the portal can take a while to move the job onto its assigned list. A
-      // pass landing in that gap sees work held and not listed, and without this line it
-      // would hand back the ceiling for a job the bot has JUST WON — and the next offer
-      // claimed against that freed ceiling is an over-commitment nothing can undo. The next
-      // pass would find the job listed and recover it, so the damage heals; the claims made
-      // in between do not.
-      //
-      // One full interval is generous against a propagation delay of seconds, and costs
-      // nothing: a cancelled job's budget comes back one pass later than it could have.
-      if (atMs - heldSinceMs < intervalMs) continue;
-      give(objId, 'absent from a complete assigned list');
+    // Each stage indexed by id and by key, keeping every entry: one key can come round twice.
+    const byIdAndKey = <T>(
+      items: readonly T[],
+      idOf: (t: T) => string,
+      keyOf: (t: T) => string | null | undefined,
+    ): ((objId: string, key: string | null) => T[]) => {
+      const byId = new Map<string, T[]>();
+      const byKey = new Map<string, T[]>();
+      const push = (map: Map<string, T[]>, k: string, t: T): void => {
+        map.set(k, [...(map.get(k) ?? []), t]);
+      };
+      for (const t of items) {
+        push(byId, idOf(t), t);
+        const key = keyOf(t);
+        if (key !== null && key !== undefined) push(byKey, key, t);
+      }
+      return (objId, key) => [
+        ...new Set([...(byId.get(objId) ?? []), ...(key === null ? [] : (byKey.get(key) ?? []))]),
+      ];
+    };
+    const jobsFor = byIdAndKey(
+      work,
+      (w) => w.objId,
+      (w) => w.identity?.workKey,
+    );
+    const ordersFor = byIdAndKey(
+      orders,
+      (o) => o.poObjId,
+      (o) => o.identity.workKey,
+    );
+
+    for (const row of heldRows) {
+      const key = row.identity?.workKey ?? null;
+      const jobs = jobsFor(row.objId, key);
+      const orderList = ordersFor(row.objId, key);
+      // Still owed while any stage says so: an assigned job under way, a `pending` order (a
+      // round not yet assigned — never spoken for by an earlier round's finished job), or an
+      // open order with no assigned job at all. One key can come round twice.
+      const owed =
+        jobs.some((j) => !isFinished(j.status)) ||
+        orderList.some((o) => o.status === 'pending') ||
+        (jobs.length === 0 && orderList.some((o) => isOpenOrder(o.status)));
+      if (owed) continue;
+      const done = jobs.find((j) => isFinished(j.status));
+      if (done !== undefined) {
+        give(row.objId, 'reported finished');
+        continue;
+      }
+      const closed = orderList.find((o) => !isOpenOrder(o.status));
+      if (closed !== undefined) {
+        give(row.objId, `purchase order ${closed.status}`);
+        continue;
+      }
+      // A job in a status never seen matched, and is neither under way nor finished: keep.
+      if (jobs.length > 0) continue;
+      // Absent from both. The grace, and the race it closes: a claim writes `held_work` the
+      // moment the portal answers, and the portal takes a while to list the work anywhere.
+      if (atMs - row.heldSinceMs < intervalMs) continue;
+      if (key !== null) {
+        // Keyed work that matches nothing is a mismatch to look at, not proof the work is
+        // gone — releasing it would be the original bug again. Held until its deadline is a
+        // day past, and said so on every pass.
+        const graceEndsMs =
+          row.deadlineMs === null ? null : row.deadlineMs + UNMATCHED_KEYED_GRACE_MS;
+        if (graceEndsMs === null || atMs < graceEndsMs) {
+          deps.logger.warn(
+            {
+              module: 'reconcile',
+              action: 'release',
+              outcome: 'held_work_unmatched',
+              objId: row.objId,
+              workKey: key,
+            },
+            'held work matches no purchase order and no assigned job — kept held; check whether ' +
+              "the offer's service and the portal's po_type still agree",
+          );
+          continue;
+        }
+        give(row.objId, 'matched no purchase order or assigned job a day past its deadline');
+        continue;
+      }
+      give(row.objId, 'absent from a complete assigned list');
     }
     return released;
   }
@@ -715,29 +1067,157 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    * is narrow (401 only): a 403 is a barred account, and re-signing in against a portal that
    * has already said no is how a suspension becomes a sign-in storm (contract 4a).
    */
-  async function read(): Promise<readonly AssignedWork[]> {
-    // The sign-in is OUTSIDE the guard on purpose. It used to be inside it, and a 401 from
-    // the login POST itself is indistinguishable from a 401 on the read — so a refused
-    // password was posted, read as "the session expired", and posted again immediately.
-    //
-    // RP-1 records that this account's password was shared over chat and is to be treated
-    // as compromised, and the portal's lockout policy is unknown. Doubling the failed
-    // logins is the wrong direction to be wrong in, and it is the same mistake contract §4a
-    // forbids on the claim path: a bot that argues with a refusal is how an account earns a
-    // permanent block rather than recovers from one.
+  async function read(): Promise<PortalView> {
+    // The sign-in is OUTSIDE the guard on purpose. A 401 from the login POST itself is
+    // indistinguishable from a 401 on the read, and doubling failed logins against an account
+    // whose password is treated as compromised (RP-1) is the wrong direction to be wrong in.
     session ??= await deps.portal.signIn();
-    const vendorId = session.vendorId;
     try {
-      return await deps.portal.listAssignedWork(vendorId);
+      return await readBoth(session.vendorId);
     } catch (err) {
-      // Only the READ's 401 means the session expired, and only that is worth one retry:
-      // the next pass is fifteen minutes away, so losing one to an ordinary expiry costs a
-      // whole window. `isSessionExpired` is narrow (401 only) — a 403 is a barred account.
+      // Only a READ's 401 means the session expired, and only that is worth one retry.
       if (!isSessionExpired(err)) throw err;
       session = null;
       session = await deps.portal.signIn();
-      return deps.portal.listAssignedWork(session.vendorId);
+      return readBoth(session.vendorId);
     }
+  }
+
+  /** Both lists, one after the other so the pacer sees them as two requests, not a burst. */
+  async function readBoth(vendorId: string): Promise<PortalView> {
+    const assigned = await deps.portal.listAssignedWork(vendorId);
+    const orders = await deps.portal.listPurchaseOrders(vendorId);
+    return { assigned, orders };
+  }
+
+  /**
+   * A claim whose reply never came (`unknown`), settled by its purchase order: the portal gave
+   * us the work. Recorded as the win it was — the claim's own outcome, row and card — rather
+   * than as a recovery, which would say the claim path lost the record.
+   */
+  function settleUnknown(claim: ClaimOnWorkKey, evidence: SettlementEvidence, atMs: number): void {
+    deps.store.transaction(() => {
+      const deadlineMs = claim.deadlineMs ?? evidence.deadlineMs;
+      // The claim's own direction first: a DTP order carries no language codes at all.
+      const languageDirection = claim.languageDirection ?? evidence.languageDirection;
+      deps.store.recordEvent({
+        objId: claim.objId,
+        eventType: 'claim',
+        outcome: 'won',
+        effortWords: claim.effortWords,
+        deadlineMs: claim.deadlineMs,
+        occurredAtMs: claim.occurredAtMs,
+        identity: claim.identity,
+      });
+      deps.ledger.hold(
+        {
+          objId: claim.objId,
+          effortWords: claim.effortWords ?? 0,
+          deadlineMs,
+          kind: kindOf(languageDirection, claim.identity),
+          identity: claim.identity,
+        },
+        atMs,
+      );
+      const detail =
+        `the claim's reply never came, so it was recorded as unknown; ${evidence.what} ` +
+        'shows the portal gave us the work';
+      const announcement: StrakerOfferAnnouncement = {
+        objId: claim.objId,
+        outcome: 'won',
+        languageDirection,
+        effortWords: claim.effortWords,
+        deadlineMs,
+        occurredAtMs: atMs,
+        detail,
+        ...workLabels(claim.identity),
+      };
+      enqueue('offers', `claim:${claim.objId}:won`, atMs, announcement);
+      if (languageDirection !== null) {
+        const row: TrackingRecord = {
+          eventType: 'claim',
+          objId: claim.objId,
+          languageDirection,
+          firstSeenAtMs: firstSightingOf(claim.objId) ?? claim.occurredAtMs,
+          effortWords: claim.effortWords,
+          deadlineMs,
+          outcome: 'won',
+          claimedAtMs: claim.occurredAtMs,
+          note: detail,
+          ...workLabels(claim.identity),
+        };
+        // A new event id for the same sheet row: the sink upserts on the row key, so this
+        // overwrites the claim's `unknown` row, while the outbox would drop a repeat of the
+        // original id as a duplicate.
+        enqueue('tracking', `row:${trackingRowKey(claim.objId, 'claim')}:settled`, atMs, row);
+      }
+      deps.logger.info(
+        { module: 'reconcile', action: 'settle', outcome: 'won', objId: claim.objId },
+        'a claim recorded as unknown was confirmed by its purchase order',
+      );
+    });
+  }
+
+  /** An open purchase order nobody recorded: recovered like an assigned job would be. */
+  function recoverOrder(order: PurchaseOrder, claim: ClaimOnWorkKey | null, atMs: number): void {
+    recover(
+      {
+        objId: order.poObjId,
+        // Its status here is the order's; the recovery reads it as the one outstanding state
+        // every open order means, so the card does not call a routine `accepted` unknown.
+        status: 'pending',
+        // A purchase order carries no word count. A claim on the same key may know it; failing
+        // that, a keyless claim won for the same deadline (an offer that carried no key).
+        effortWords:
+          claim?.effortWords ??
+          (order.deadlineMs === null
+            ? null
+            : deps.store.legacyClaimEffortNear(order.deadlineMs, SAME_DEADLINE_WINDOW_MS)),
+        deadlineMs: order.deadlineMs,
+        languageDirection: order.languageDirection,
+        reference: order.identity.jobRef,
+        identity: order.identity,
+      },
+      atMs,
+    );
+  }
+
+  /**
+   * Once, on the first pass after work identities arrived: hold the open purchase orders of
+   * claims won before, silently — they were announced when won. Weighed at the largest effort
+   * any keyless claim for that deadline had, so the day is not under-counted.
+   */
+  function adopt(order: PurchaseOrder, atMs: number): void {
+    // Near the same deadline first; failing that, anything keyless due within the same half
+    // day either side — the adoption runs once, and zero is the one answer that under-counts.
+    const effort =
+      order.deadlineMs === null
+        ? null
+        : (deps.store.legacyClaimEffortNear(order.deadlineMs, SAME_DEADLINE_WINDOW_MS) ??
+          deps.store.legacyClaimEffortNear(order.deadlineMs, ADOPTION_FALLBACK_WINDOW_MS));
+    deps.ledger.hold(
+      {
+        objId: order.poObjId,
+        effortWords: effort ?? 0,
+        deadlineMs: order.deadlineMs,
+        kind: kindOf(order.languageDirection, order.identity),
+        identity: order.identity,
+      },
+      atMs,
+    );
+    deps.logger.warn(
+      {
+        module: 'reconcile',
+        action: 'adopt',
+        outcome: 'held',
+        objId: order.poObjId,
+        workKey: order.identity.workKey,
+        effortWords: effort,
+      },
+      'held a purchase order won before work identities were recorded — silently, because it ' +
+        'was announced when won' +
+        (effort === null ? '; no earlier claim gave its word count, so it is held at zero' : ''),
+    );
   }
 
   /**
@@ -754,6 +1234,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         effortWords: item.effortWords,
         deadlineMs: item.deadlineMs,
         occurredAtMs: atMs,
+        ...(item.identity === undefined ? {} : { identity: item.identity }),
       });
 
       // The predicate rather than a literal `true`: what counts toward the ledger is one
@@ -766,14 +1247,12 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
               // produced this work is long gone. `ja>ja` is DTP preparation; anything with two
               // different sides is translation. An unreadable direction falls to translation —
               // the stricter budget, so an unknown kind cannot quietly buy extra capacity.
-              kind:
-                item.languageDirection !== null && isMonolingualDirection(item.languageDirection)
-                  ? 'monolingual'
-                  : 'translation',
+              kind: kindOf(item.languageDirection, item.identity),
               // Zero, not a guess. An unreadable effort makes the day under-state by an
               // unknown amount, which is what the alert's detail says in words.
               effortWords: item.effortWords ?? 0,
               deadlineMs: item.deadlineMs,
+              ...(item.identity === undefined ? {} : { identity: item.identity }),
             },
             atMs,
           )
@@ -794,6 +1273,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         // unknown to us, which is the whole meaning of `recovered`.
         occurredAtMs: atMs,
         detail,
+        ...workLabels(item.identity),
       };
       enqueue('offers', `recovery:${item.objId}`, atMs, announcement);
 
@@ -819,6 +1299,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         ...(item.languageDirection === null ? {} : { languageDirection: item.languageDirection }),
         ...(item.effortWords === null ? {} : { effortWords: item.effortWords }),
         ...(item.deadlineMs === null ? {} : { deadlineMs: item.deadlineMs }),
+        ...workLabels(item.identity),
       };
       enqueue('alerts', `recovery:${item.objId}`, atMs, alert);
 
@@ -844,6 +1325,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
           // every recovery row beats a timestamp that silently changes what it denotes.
           claimedAtMs: atMs,
           note: detail,
+          ...workLabels(item.identity),
         };
         enqueue('tracking', `row:${trackingRowKey(item.objId, 'recovery')}`, atMs, row);
       }

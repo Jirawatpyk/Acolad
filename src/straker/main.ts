@@ -30,7 +30,13 @@ import {
   type TransportAlertHooks,
 } from './notifier.js';
 import { GoogleChatSender } from '../reporting/googleChat.js';
-import { createStrakerReconciler, readAssignedWork, type AssignedWork } from './reconcile.js';
+import {
+  createStrakerReconciler,
+  readAssignedWork,
+  readPurchaseOrders,
+  type AssignedWork,
+  type PurchaseOrder,
+} from './reconcile.js';
 import { createTrackingSink, GoogleTrackingSheet } from './trackingSink.js';
 import { listOpenOffers } from './offersApi.js';
 import {
@@ -239,6 +245,8 @@ export interface StrakerPortal {
    * (FR-002/V32). Two named reads cost one line each and keep it.
    */
   listAssignedWork(vendorId: string): Promise<readonly AssignedWork[]>;
+  /** Where won work waits for a person before it is assigned (2026-09-22). */
+  listPurchaseOrders(vendorId: string): Promise<readonly PurchaseOrder[]>;
 }
 
 /**
@@ -259,6 +267,15 @@ export interface StrakerPortal {
  * shorter measured offer lifetime, which is the same observation that would reopen T044.
  */
 const REQUEST_TIMEOUT_MS = 2_000;
+
+/**
+ * The claim's (and sign-in's) deadline. Accepting an offer creates a purchase order on the
+ * portal and takes longer than a read: at 2 s, 4 of the first 20 real claims timed out and
+ * were recorded `unknown` though they had been won (2026-09-22). Waiting longer costs nothing
+ * on the race — the request has already reached the portal — and a claim is still never
+ * retried; a reply that never comes is settled by reconciliation from the purchase order.
+ */
+const CLAIM_TIMEOUT_MS = 10_000;
 
 /** Seams the tests use to drive the portal without a network. Production passes none. */
 export interface StrakerPortalDeps {
@@ -283,6 +300,7 @@ export function createStrakerPortal(
     // happened once in this feature with the retrying read door; the wiring is asserted in
     // `tests/integration/straker/botWiring.test.ts` so it cannot happen a third time.
     timeoutMs: REQUEST_TIMEOUT_MS,
+    postTimeoutMs: CLAIM_TIMEOUT_MS,
     // FR-019 / SC-003. Opt-in, exactly as the deadline and the retry door are, and for the
     // same reason: the live capture probe builds its client with `{ baseUrl }` alone and
     // must keep behaving as it does. Which makes this line the whole of the bot's pacing —
@@ -342,6 +360,7 @@ export function createStrakerPortal(
     // Through the single-attempt door on purpose: FR-016c gives this read its own
     // fifteen-minute cadence instead of FR-019b's backoff. See `readAssignedWork`.
     listAssignedWork: (vendorId) => readAssignedWork(client, vendorId),
+    listPurchaseOrders: (vendorId) => readPurchaseOrders(client, vendorId),
   };
 }
 

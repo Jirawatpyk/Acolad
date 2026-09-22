@@ -88,6 +88,7 @@
  *    Straker's to answer, so both fail loud.
  */
 
+import { workIdentity } from './workKey.js';
 import type { Logger } from '../monitoring/logger.js';
 import type { OfferForDecision } from './claimDecision.js';
 import {
@@ -231,6 +232,22 @@ export function parseOffer(entry: unknown, options: OfferParseOptions): OfferFor
     );
   }
 
+  const identity = workIdentity(
+    record['job_ref'],
+    sourceLang,
+    monolingual ? null : record['target_lang'],
+    record['service'],
+    record['title'],
+  );
+  if (identity.workKey === null) {
+    // Still claimable — but the purchase order and assigned job this offer becomes cannot be
+    // recognised as the same work, so reconciliation will weigh them by deadline instead.
+    options.logger.warn(
+      { module: 'offerParse', action: 'parse', outcome: 'no_work_key', objId },
+      'offer carries no job_ref or service — its later stages cannot be tied back to it',
+    );
+  }
+
   return {
     objId,
     languageDirection,
@@ -242,6 +259,9 @@ export function parseOffer(entry: unknown, options: OfferParseOptions): OfferFor
       options.deadlineZone ?? STRAKER_DEADLINE_ZONE,
       objId,
     ),
+    // Read, never required: they name the work for people and tie its stages together
+    // (`workKey.ts`), and none of them is a reason to claim or not.
+    identity,
   };
 }
 

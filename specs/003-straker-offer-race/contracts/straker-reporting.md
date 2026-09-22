@@ -27,6 +27,8 @@ A **separate spreadsheet file** from the XTM record, not a tab within it.
 
 **Column layout was deferred** with the offer model (SC-000) and is no longer: SC-000 was resolved on 2026-09-15, and `trackingSink.ts` fixes the layout with its header guard enforcing it.
 
+**Version 2 (2026-09-22)** appends **File name, Job ref, Service** (L–N) to the right of the `_row_key` column (K), so no existing row moves; a version-1 sheet has L–N named on its next write unless a human already put headings there, which is refused loudly. The offer announcement and offer alert cards carry the same three rows.
+
 Writes are upserts on the offer identifier **together with the event type** so a re-run never duplicates a row. That agrees with the table above, with FR-014 and with Constitution VII; an earlier draft of this sentence said "on the offer identifier" alone, which contradicted its own table two lines up and would have collapsed an offer's sighting, claim and recovery into one row. The layout is checked before writing, and a shifted layout fails loud rather than writing into the wrong columns — the XTM bot needed that guard after a real incident.
 
 ## 2. Job announcements — Straker's own channel
