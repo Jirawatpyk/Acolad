@@ -30,6 +30,13 @@
  * | I   | Claimed at         | The latency measure's end |
  * | J   | Note               | The gate's own sentence, or the failure detail — the specifics column H generalises |
  * | K   | `_row_key`         | `objId\|eventType`, the hidden upsert key |
+ * | L   | File name          | Version 2 (2026-09-22): the job's title, so a row names the work people know |
+ * | M   | Job ref            | Version 2: the portal's job reference (`aj-310`), shared by the offer, its purchase order and its assigned job |
+ * | N   | Service            | Version 2: `translation`, `dtp_prep`, … |
+ *
+ * Version 2 appends to the RIGHT of the key on purpose: no existing row moves, and the key
+ * stays in K, so every row written before still matches its upsert. A version-1 sheet is
+ * brought up to date by naming L–N on the next write — see {@link requireExpectedLayout}.
  *
  * The reading order deliberately follows the XTM sheet's — when, what, which job,
  * languages, due, effort, note, key — because an operator reads both and should not have to
@@ -69,10 +76,10 @@ import type { SendOutcome, StrakerSender } from './dispatcher.js';
 import { CLAIM_OUTCOMES, SKIP_REASONS, type SkipReason } from './outcomePolicy.js';
 
 /**
- * The column layout, version 1. Changing it is a migration, not an edit: existing rows do
+ * The column layout, version 2. Changing it is a migration, not an edit: existing rows do
  * not move, so anything but appending to the right leaves history misaligned.
  */
-export const TRACKING_HEADER: readonly string[] = [
+const TRACKING_HEADER_V1: readonly string[] = [
   'First seen', // A
   'Event', // B
   'Outcome', // C
@@ -86,10 +93,19 @@ export const TRACKING_HEADER: readonly string[] = [
   '_row_key', // K
 ];
 
+export const TRACKING_HEADER: readonly string[] = [
+  ...TRACKING_HEADER_V1,
+  'File name', // L
+  'Job ref', // M
+  'Service', // N
+];
+
+/** `K` — where the upsert key lives, in both versions. */
+const KEY_COLUMN_LETTER = columnLetter(TRACKING_HEADER.indexOf('_row_key'));
+
 /**
- * `K` — the last column of the layout, derived from its width so the transport's A1 ranges
- * cannot drift from the header, and so the `_row_key` column the upsert reads is the same
- * column the layout declares.
+ * `N` — the last column of the layout, derived from its width so the transport's A1 ranges
+ * cannot drift from the header.
  */
 const LAST_COLUMN_LETTER = columnLetter(TRACKING_HEADER.length - 1);
 
@@ -124,6 +140,10 @@ const common = {
   firstSeenAtMs: z.number().finite().nullable(),
   /** The gate's own sentence, or the failure detail. */
   note: z.string().nullable().optional(),
+  /** Version 2. Optional so a row queued before 2026-09-22 still sends. */
+  title: z.string().nullable().optional(),
+  jobRef: z.string().nullable().optional(),
+  service: z.string().nullable().optional(),
 };
 
 /** The two numbers the gate decided on. Null where the payload carried none — never a 0,
@@ -245,6 +265,9 @@ function toRowValues(record: TrackingRecord): string[] {
     settledEvent ? bangkokClock(record.claimedAtMs, true) : '',
     record.note ?? '',
     trackingRowKey(record.objId, record.eventType),
+    record.title ?? '',
+    record.jobRef ?? '',
+    record.service ?? '',
   ];
 }
 
@@ -279,16 +302,36 @@ export class StrakerSheetLayoutError extends Error {
  * moved, so refusing them would turn a harmless edit into a page at 03:00. That over-strict
  * check is the second half of the XTM bot's lesson, learned after the first.
  */
-function requireExpectedLayout(header: readonly string[]): void {
-  for (const [index, expected] of TRACKING_HEADER.entries()) {
-    const found = header[index];
-    if (found === expected) continue;
-    throw new StrakerSheetLayoutError(
-      header,
-      `column ${columnLetter(index)} should be '${expected}' but is ` +
-        (found === undefined ? '(missing)' : `'${found}'`),
-    );
+function requireExpectedLayout(header: readonly string[]): 'current' | 'v1' {
+  const mismatch = (layout: readonly string[]): number =>
+    layout.findIndex((expected, index) => header[index] !== expected);
+
+  if (mismatch(TRACKING_HEADER) === -1) return 'current';
+
+  // A version-1 sheet: A–K exactly, and L–N free to be named. Headings a human already put
+  // in L–N (allowed under version 1) are never written over — that would silently relabel
+  // someone's own column as ours.
+  if (mismatch(TRACKING_HEADER_V1) === -1) {
+    const v1Width = TRACKING_HEADER_V1.length;
+    for (let index = v1Width; index < TRACKING_HEADER.length; index += 1) {
+      const found = header[index];
+      if (found === undefined || found === '' || found === TRACKING_HEADER[index]) continue;
+      throw new StrakerSheetLayoutError(
+        header,
+        `column ${columnLetter(index)} should be '${TRACKING_HEADER[index]}' (layout version 2) ` +
+          `but a human has put '${found}' there — move it right of ${LAST_COLUMN_LETTER}`,
+      );
+    }
+    return 'v1';
   }
+
+  const index = mismatch(TRACKING_HEADER);
+  const found = header[index];
+  throw new StrakerSheetLayoutError(
+    header,
+    `column ${columnLetter(index)} should be '${TRACKING_HEADER[index] ?? ''}' but is ` +
+      (found === undefined ? '(missing)' : `'${found}'`),
+  );
 }
 
 // --- the sink ------------------------------------------------------------------------
@@ -298,14 +341,14 @@ function requireExpectedLayout(header: readonly string[]): void {
  * unit-tested against an in-memory fake: nothing under test opens `google-credentials.json`
  * or reaches Google. {@link GoogleTrackingSheet} is the real one.
  *
- * There is no `insertColumn` here, unlike the XTM sink's transport. That one exists to
- * migrate a live sheet whose shape predates a column; this file is version 1 and has no
- * history to migrate. A sheet that does not match is a human's edit and needs a human.
+ * There is no `insertColumn` here, unlike the XTM sink's transport. Version 2 only appends
+ * to the right, so a version-1 sheet is migrated by rewriting its header row — nothing moves.
+ * Any other sheet that does not match is a human's edit and needs a human.
  */
 export interface TrackingSheetApi {
   /** Header row (row 1), or `[]` when the sheet is empty. */
   getHeader(): Promise<string[]>;
-  /** Write the header row (row 1). Only ever called on an empty sheet. */
+  /** Write the header row (row 1). Called on an empty sheet, or to name v2's new columns. */
   setHeader(values: readonly string[]): Promise<void>;
   /** The `_row_key` column including its header cell at index 0, for the upsert lookup. */
   getKeyColumn(): Promise<string[]>;
@@ -339,7 +382,11 @@ export function createTrackingSink(sheet: TrackingSheetApi): StrakerSender {
     try {
       const header = await sheet.getHeader();
       if (header.length === 0) await sheet.setHeader(TRACKING_HEADER);
-      else requireExpectedLayout(header);
+      else if (requireExpectedLayout(header) === 'v1') {
+        // A–K rewritten with what they already say; L–N named. Anything a human put right
+        // of N is kept by writing only the layout's own width.
+        await sheet.setHeader(TRACKING_HEADER);
+      }
 
       const values = toRowValues(parsed.data);
       const rowKey = trackingRowKey(parsed.data.objId, parsed.data.eventType);
@@ -407,7 +454,7 @@ export class GoogleTrackingSheet implements TrackingSheetApi {
   async getKeyColumn(): Promise<string[]> {
     const res = await this.sheets.spreadsheets.values.get({
       spreadsheetId: this.spreadsheetId,
-      range: `${this.tab}!${LAST_COLUMN_LETTER}:${LAST_COLUMN_LETTER}`,
+      range: `${this.tab}!${KEY_COLUMN_LETTER}:${KEY_COLUMN_LETTER}`,
     });
     return ((res.data.values ?? []) as string[][]).map((row) => row[0] ?? '');
   }

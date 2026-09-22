@@ -86,7 +86,7 @@ import type { StrakerSession } from './session.js';
 import { trackingRowKey, type TrackingRecord } from './trackingSink.js';
 import type { ClaimOutcome } from './types.js';
 import type { ClaimOnWorkKey, HeldWork, StrakerStore } from './strakerStore.js';
-import { workIdentity, type WorkIdentity } from './workKey.js';
+import { workIdentity, workLabels, type WorkIdentity } from './workKey.js';
 
 // ---------------------------------------------------------------------------
 // The cadence and the alert threshold
@@ -1043,6 +1043,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         deadlineMs,
         occurredAtMs: atMs,
         detail,
+        ...workLabels(claim.identity),
       };
       enqueue('offers', `claim:${claim.objId}:won`, atMs, announcement);
       if (order.languageDirection !== null) {
@@ -1056,6 +1057,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
           outcome: 'won',
           claimedAtMs: claim.occurredAtMs,
           note: detail,
+          ...workLabels(claim.identity),
         };
         // A new event id for the same sheet row: the sink upserts on the row key, so this
         // overwrites the claim's `unknown` row, while the outbox would drop a repeat of the
@@ -1174,6 +1176,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         // unknown to us, which is the whole meaning of `recovered`.
         occurredAtMs: atMs,
         detail,
+        ...workLabels(item.identity),
       };
       enqueue('offers', `recovery:${item.objId}`, atMs, announcement);
 
@@ -1199,6 +1202,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         ...(item.languageDirection === null ? {} : { languageDirection: item.languageDirection }),
         ...(item.effortWords === null ? {} : { effortWords: item.effortWords }),
         ...(item.deadlineMs === null ? {} : { deadlineMs: item.deadlineMs }),
+        ...workLabels(item.identity),
       };
       enqueue('alerts', `recovery:${item.objId}`, atMs, alert);
 
@@ -1224,6 +1228,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
           // every recovery row beats a timestamp that silently changes what it denotes.
           claimedAtMs: atMs,
           note: detail,
+          ...workLabels(item.identity),
         };
         enqueue('tracking', `row:${trackingRowKey(item.objId, 'recovery')}`, atMs, row);
       }

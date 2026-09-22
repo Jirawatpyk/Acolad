@@ -304,6 +304,13 @@ export interface HttpClientOptions {
    * absent it, an attempt is bounded only by Node's socket defaults (~300s).
    */
   readonly timeoutMs?: number;
+  /**
+   * A POST's own deadline, when it needs a longer one than a read. The claim does: accepting
+   * an offer creates a purchase order, and 4 of the first 20 real claims ran past the 2 s read
+   * deadline and were recorded `unknown` though the portal had given us the work
+   * (2026-09-22). Defaults to `timeoutMs`.
+   */
+  readonly postTimeoutMs?: number;
   /** Injected by tests so intervals are asserted without waiting; real callers omit it. */
   readonly sleep?: (ms: number) => Promise<void>;
   /** Jitter source, injectable for the same reason. Defaults to `Math.random`. */
@@ -453,6 +460,7 @@ export function createHttpClient(options: HttpClientOptions): StrakerPacedHttpCl
   const doFetch = options.fetchImpl ?? fetch;
   const retryPolicy = resolveRetryPolicy(options.retry);
   const timeoutMs = resolveTimeout(options.timeoutMs);
+  const postTimeoutMs = resolveTimeout(options.postTimeoutMs) ?? timeoutMs;
   const pacingPolicy = resolvePacing(options.pacing);
   const sleep = options.sleep ?? defaultSleep;
   const random = options.random ?? Math.random;
@@ -494,7 +502,7 @@ export function createHttpClient(options: HttpClientOptions): StrakerPacedHttpCl
 
     // Each attempt gets its OWN deadline, not a share of one spanning the retry sequence:
     // a single signal for the loop would abort the last attempt before it could answer.
-    const deadline = startDeadline(path, timeoutMs);
+    const deadline = startDeadline(path, init.method === 'POST' ? postTimeoutMs : timeoutMs);
 
     let response: Response;
     try {

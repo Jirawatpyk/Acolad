@@ -74,3 +74,19 @@ export function workIdentity(
     workKey: workKey(jobRef, sourceLang, targetLang, service),
   };
 }
+
+/**
+ * The fields a card or a sheet row shows, present only where known. Absent rather than null
+ * so `exactOptionalPropertyTypes` payloads can spread it and a card renders "unknown".
+ */
+export function workLabels(identity: WorkIdentity | undefined): {
+  title?: string;
+  jobRef?: string;
+  service?: string;
+} {
+  return {
+    ...(identity?.title == null ? {} : { title: identity.title }),
+    ...(identity?.jobRef == null ? {} : { jobRef: identity.jobRef }),
+    ...(identity?.service == null ? {} : { service: identity.service }),
+  };
+}

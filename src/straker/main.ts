@@ -268,6 +268,15 @@ export interface StrakerPortal {
  */
 const REQUEST_TIMEOUT_MS = 2_000;
 
+/**
+ * The claim's (and sign-in's) deadline. Accepting an offer creates a purchase order on the
+ * portal and takes longer than a read: at 2 s, 4 of the first 20 real claims timed out and
+ * were recorded `unknown` though they had been won (2026-09-22). Waiting longer costs nothing
+ * on the race — the request has already reached the portal — and a claim is still never
+ * retried; a reply that never comes is settled by reconciliation from the purchase order.
+ */
+const CLAIM_TIMEOUT_MS = 10_000;
+
 /** Seams the tests use to drive the portal without a network. Production passes none. */
 export interface StrakerPortalDeps {
   readonly fetchImpl?: typeof fetch;
@@ -291,6 +300,7 @@ export function createStrakerPortal(
     // happened once in this feature with the retrying read door; the wiring is asserted in
     // `tests/integration/straker/botWiring.test.ts` so it cannot happen a third time.
     timeoutMs: REQUEST_TIMEOUT_MS,
+    postTimeoutMs: CLAIM_TIMEOUT_MS,
     // FR-019 / SC-003. Opt-in, exactly as the deadline and the retry door are, and for the
     // same reason: the live capture probe builds its client with `{ baseUrl }` alone and
     // must keep behaving as it does. Which makes this line the whole of the bot's pacing —

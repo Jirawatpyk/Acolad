@@ -865,6 +865,26 @@ describe('createHttpClient — every request carries a deadline (Constitution VI
     expect(error).toMatchObject({ path: OFFERS_PATH, timeoutMs: DEADLINE_MS });
   });
 
+  it('gives a POST its own, longer deadline — the claim creates a purchase order and is slower (2026-09-22)', async () => {
+    // 4 of 20 real claims ran past the 2 s read deadline and were recorded `unknown`, though
+    // the portal had given us the work. Reads keep the short deadline.
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(goesQuiet);
+    const client = createHttpClient({
+      baseUrl: 'https://portal.test',
+      fetchImpl,
+      timeoutMs: DEADLINE_MS,
+      postTimeoutMs: DEADLINE_MS * 3,
+    });
+
+    const post: unknown = await client
+      .postJson('/api/x/accept', undefined)
+      .catch((e: unknown) => e);
+    const read: unknown = await client.getJson(OFFERS_PATH).catch((e: unknown) => e);
+
+    expect(post).toMatchObject({ timeoutMs: DEADLINE_MS * 3 });
+    expect(read).toMatchObject({ timeoutMs: DEADLINE_MS });
+  });
+
   it('sends no signal at all when no deadline is configured, so the capture probe is unchanged', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse([]));
     const client = createHttpClient({ baseUrl: 'https://portal.test', fetchImpl });
