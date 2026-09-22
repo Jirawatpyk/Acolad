@@ -1376,6 +1376,24 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     // The portal now lists only job-1, and says so completely: job-2 is gone.
     f.setAssigned([assignedWork('job-1')]);
     f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    const early = await f.reconciler.runIfDue();
+
+    // Not yet (2026-09-22). This work carries no work key, so a purchase order or assigned
+    // job for it would never match by id either — absence from both lists cannot tell
+    // "gone" from "moved on under a new id". It is held until its deadline is a day past,
+    // the same rule keyed work has, and said so on the pass.
+    expect(early).toMatchObject({ ran: true, ok: true, released: [] });
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['job-1', 'job-2']);
+    expect(
+      f.logs.some(
+        (l) =>
+          l.level === 'warn' &&
+          l.fields['outcome'] === 'held_work_absent_keyless' &&
+          l.fields['objId'] === 'job-2',
+      ),
+    ).toBe(true);
+
+    f.setNow(DEADLINE_MS + 24 * 3_600_000 + RECONCILE_INTERVAL_MS);
     const outcome = await f.reconciler.runIfDue();
 
     expect(outcome).toMatchObject({ ran: true, ok: true, released: ['job-2'] });
@@ -1412,9 +1430,11 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     ).toBe(false);
   });
 
-  it('releases it once it has been absent for a full interval', async () => {
-    // The other edge of the grace: it delays a release, it does not prevent one. Work held
-    // for a whole interval and still unlisted really has gone.
+  it('releases it once its deadline is a day past, not after one interval', async () => {
+    // The other edge of the grace: it delays a release, it does not prevent one. This used
+    // to release after a single interval; a keyless claim (an offer without job_ref or
+    // service is still claimed) can never be matched by its purchase order or assigned job,
+    // so one interval handed its ceiling back while the team still owed it.
     const f = fixture();
     f.store.hold({
       objId: 'long-gone',
@@ -1426,10 +1446,33 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     f.setAssigned([]);
     f.setNow(NOW_MS);
 
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true, released: [] });
+
+    // One minute short of the grace: still held.
+    f.setNow(DEADLINE_MS + 24 * 3_600_000 - 60_000);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true, released: [] });
+
+    f.setNow(DEADLINE_MS + 24 * 3_600_000 + RECONCILE_INTERVAL_MS);
     const outcome = await f.reconciler.runIfDue();
 
     expect(outcome).toMatchObject({ ran: true, ok: true, released: ['long-gone'] });
     expect(f.store.heldWork()).toEqual([]);
+  });
+
+  it('keeps keyless absent work with no deadline held, since no grace can end', async () => {
+    const f = fixture();
+    f.store.hold({
+      objId: 'no-deadline',
+      effortWords: 100,
+      kind: 'translation',
+      deadlineMs: null,
+      heldSinceMs: NOW_MS - RECONCILE_INTERVAL_MS,
+    });
+    f.setAssigned([]);
+    f.setNow(NOW_MS + 30 * 24 * 3_600_000);
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true, released: [] });
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['no-deadline']);
   });
 
   it('gives the ceiling back when the absent work is released, not just the row', async () => {
@@ -1451,9 +1494,28 @@ describe('finished work gives its budget back (T056b, FR-016d)', () => {
     f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
     await f.reconciler.runIfDue();
 
+    // Absent but keyless, and its deadline not yet a day gone: still counted.
+    expect(
+      f.ledger.checkCapacity(
+        { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
+        NOW_MS + RECONCILE_INTERVAL_MS,
+      ).fits,
+    ).toBe(false);
+
+    const later = DEADLINE_MS + 24 * 3_600_000 + RECONCILE_INTERVAL_MS;
+    f.setNow(later);
+    await f.reconciler.runIfDue();
+
+    // A later-deadline offer, so the check is about the released row and not about an
+    // overdue deadline.
     const freed = f.ledger.checkCapacity(
-      { objId: 'job-2', effortWords: 100, deadlineMs: DEADLINE_MS, kind: 'translation' },
-      NOW_MS + RECONCILE_INTERVAL_MS,
+      {
+        objId: 'job-2',
+        effortWords: 100,
+        deadlineMs: DEADLINE_MS + 2 * 24 * 3_600_000,
+        kind: 'translation',
+      },
+      later,
     );
     expect(freed.fits).toBe(true);
   });

@@ -64,8 +64,9 @@
  * A pass therefore reads both lists and ties them to held work by the key they share
  * (`workKey.ts`), not by id. Held work is released only on positive evidence (its assigned
  * job delivered, its order closed) or on absence from both complete lists; keyed work that
- * matches nothing is kept until its deadline is a day gone, because that absence more likely
- * means the key stopped matching than that the work vanished. See {@link releaseFinished}.
+ * matches nothing — and keyless work, which can never be matched — is kept until its deadline
+ * is a day gone, because that absence more likely means the key stopped matching (or never
+ * existed) than that the work vanished. See {@link releaseFinished}.
  */
 
 import { formatLanguageDirection, isMonolingualDirection } from './eligibility.js';
@@ -520,8 +521,8 @@ function kindOf(
 export const PO_ADOPTION_FLAG = 'po_adoption_done';
 
 /**
- * How long keyed work that matches no purchase order and no assigned job stays held past its
- * deadline. A mismatch between the offer's `service` and the order's `po_type` would make the
+ * How long work that matches no purchase order and no assigned job — keyed or keyless — stays
+ * held past its deadline. A mismatch between the offer's `service` and the order's `po_type` would make the
  * key find nothing; releasing on absence then would bring the original bug straight back.
  */
 const UNMATCHED_KEYED_GRACE_MS = 24 * 3_600_000;
@@ -940,6 +941,9 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    *   "not listed yet", not "gone", so work held for less than one reconcile interval is
    *   never released on absence. See the loop below for why the cost of the other answer is
    *   an irreversible over-claim rather than a delay.
+   * - *(2026-09-22)* Absent work, keyed or keyless, is not released before its deadline is a
+   *   day past: the purchase order and assigned job carry ids of their own, so absence under
+   *   our id — or under no key at all — cannot tell "gone" from "moved on".
    *
    * Failures are per item and never fail the pass. The cost of a missed release is an
    * offer the bot passes over; the cost of failing the pass would be the recoveries that
@@ -1030,13 +1034,20 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       // Absent from both. The grace, and the race it closes: a claim writes `held_work` the
       // moment the portal answers, and the portal takes a while to list the work anywhere.
       if (atMs - row.heldSinceMs < intervalMs) continue;
-      if (key !== null) {
-        // Keyed work that matches nothing is a mismatch to look at, not proof the work is
-        // gone — releasing it would be the original bug again. Held until its deadline is a
-        // day past, and said so on every pass.
-        const graceEndsMs =
-          row.deadlineMs === null ? null : row.deadlineMs + UNMATCHED_KEYED_GRACE_MS;
-        if (graceEndsMs === null || atMs < graceEndsMs) {
+      // Absence is not proof the work is gone, keyed or not, so nothing absent is released
+      // before its deadline is a day past (and work with no deadline is never released on
+      // absence — no grace can end).
+      //
+      // - Keyed work that matches nothing is a mismatch to look at — releasing it would be
+      //   the original bug again.
+      // - Keyless work (2026-09-22) is worse off, not better: an offer without job_ref or
+      //   service is still claimed, and its purchase order and assigned job each carry an id
+      //   of their own, so nothing can EVER match it. It used to be released one interval
+      //   after the claim — the ceiling handed back while the team still owed the work.
+      const graceEndsMs =
+        row.deadlineMs === null ? null : row.deadlineMs + UNMATCHED_KEYED_GRACE_MS;
+      if (graceEndsMs === null || atMs < graceEndsMs) {
+        if (key !== null) {
           deps.logger.warn(
             {
               module: 'reconcile',
@@ -1048,12 +1059,27 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
             'held work matches no purchase order and no assigned job — kept held; check whether ' +
               "the offer's service and the portal's po_type still agree",
           );
-          continue;
+        } else {
+          deps.logger.warn(
+            {
+              module: 'reconcile',
+              action: 'release',
+              outcome: 'held_work_absent_keyless',
+              objId: row.objId,
+              deadlineMs: row.deadlineMs,
+            },
+            'held work has no work key and is absent from both lists — kept held until its ' +
+              'deadline is a day past, because its purchase order or job could not be matched anyway',
+          );
         }
-        give(row.objId, 'matched no purchase order or assigned job a day past its deadline');
         continue;
       }
-      give(row.objId, 'absent from a complete assigned list');
+      give(
+        row.objId,
+        key !== null
+          ? 'matched no purchase order or assigned job a day past its deadline'
+          : 'absent from both complete lists a day past its deadline',
+      );
     }
     return released;
   }
