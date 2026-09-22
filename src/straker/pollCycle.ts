@@ -470,6 +470,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       // Then the observational half, which is recoverable: a lost sighting costs a lifetime
       // measurement, not a commitment.
       const diverged: string[] = [];
+      let observationsUnrecorded = false;
       try {
         deps.store.transaction(() => {
           for (const offer of sightings.appeared) deps.store.recordSighting(offer);
@@ -512,6 +513,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
           }
         });
       } catch (err) {
+        observationsUnrecorded = true;
         deps.logger.error(
           { module: 'pollCycle', action: 'persist_observations', outcome: 'failed' },
           err instanceof Error ? err.message : String(err),
@@ -535,12 +537,15 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
         },
         'poll cycle',
       );
-      // The verdict, and it drives the liveness signal. A lost claim record is the one
-      // failure in this cycle that the store cannot report on its own — the record is the
-      // thing that failed — so the heartbeat has to carry it. The observational half is
-      // deliberately NOT counted here: a lost sighting costs a lifetime measurement rather
-      // than a commitment, and paging someone for that is how a dead-man switch stops being
-      // read.
+      // The verdict, and it drives the liveness signal. A lost record is the one failure in
+      // this cycle that the store cannot report on its own — the record is the thing that
+      // failed — so the heartbeat has to carry it.
+      //
+      // The observational half counts too (2026-09-22). It used not to, on the argument that
+      // a lost sighting costs a measurement rather than a commitment — true of the row, and
+      // beside the point: SQLite refusing a write is nearly always the disk or the file, and
+      // the next write down that path is a won claim. A store that took no writes at all left
+      // the heartbeat green. Still non-throwing: the loop carries on and keeps racing.
       if (unrecordedClaims > 0) {
         deps.logger.error(
           {
@@ -552,7 +557,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
           'the portal committed work this cycle that could not be recorded — the ledger and the record are now behind the portal until reconciliation runs',
         );
       }
-      return unrecordedClaims === 0;
+      return unrecordedClaims === 0 && !observationsUnrecorded;
     },
   };
 }

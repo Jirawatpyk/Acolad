@@ -438,15 +438,38 @@ describe('a cycle that lost a claim record does not report success (S1)', () => 
     await expect(h.cycle.runOnce()).resolves.toBe(false);
   });
 
-  it('still returns true when only the observational half failed, which is recoverable', async () => {
-    // A lost sighting costs a lifetime measurement, not a commitment. Failing the heartbeat
-    // for that would page someone about a measurement while the bot keeps winning work —
-    // and a dead-man switch that cries wolf is one nobody reads.
+  it('returns false when the observational half could not be written either', async () => {
+    // This test asserted `true` until 2026-09-22, on the argument that a lost sighting costs
+    // a measurement rather than a commitment. The measurement is not what the write failing
+    // says, though: SQLite refusing a write is almost always the disk or the file (full,
+    // locked, corrupt), and the next thing that write path carries is a won claim. The audit
+    // found a store that took no writes left the heartbeat green. It stays non-throwing — the
+    // loop carries on — but the liveness signal now says what happened.
     const h = harness({
       offers: [raw('a')],
       extract: () => [{ ...eligible('a'), eligible: false }],
       recordEventFails: () => true,
     });
+
+    await expect(h.cycle.runOnce()).resolves.toBe(false);
+    expect(
+      h.logs.some(
+        (l) =>
+          l.level === 'error' &&
+          l.fields['action'] === 'persist_observations' &&
+          l.fields['outcome'] === 'failed',
+      ),
+    ).toBe(true);
+  });
+
+  it('returns false when a sighting write fails, with nothing to claim at all', async () => {
+    const h = harness({ offers: [raw('a')], sightingFails: true });
+
+    await expect(h.cycle.runOnce()).resolves.toBe(false);
+  });
+
+  it('returns true on a quiet cycle whose writes all land', async () => {
+    const h = harness({ offers: [raw('a')] });
 
     await expect(h.cycle.runOnce()).resolves.toBe(true);
   });
