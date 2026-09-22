@@ -45,6 +45,29 @@ export function optionalText(value: unknown): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
+/**
+ * One key part, spelled one way: Unicode NFKC (full-width letters and dashes fold to ASCII),
+ * format characters removed (zero-width spaces and joiners, BOMs — `\p{Cf}`), trimmed,
+ * lower-cased. Null when nothing is left.
+ *
+ * A key that differs by an invisible character is a match silently missed, and a missed match
+ * is held work the restart guard cannot see and reconciliation cannot settle (2026-09-22).
+ */
+function keyPart(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const folded = value.normalize('NFKC').replace(/\p{Cf}/gu, '').trim().toLowerCase();
+  return folded === '' ? null : folded;
+}
+
+/**
+ * A language code as a key part: {@link keyPart}, and `_` read as `-` (`MS_MY` is `ms-my`).
+ * Languages only — a service such as `dtp_prep` keeps its underscore, since the offer and the
+ * purchase order are both observed to spell it that way and a rewrite could only split them.
+ */
+function languagePart(value: unknown): string {
+  return keyPart(value)?.replace(/_/g, '-') ?? '';
+}
+
 /** The shared key, or null when it cannot be made honestly. */
 export function workKey(
   jobRef: unknown,
@@ -52,11 +75,11 @@ export function workKey(
   targetLang: unknown,
   service: unknown,
 ): string | null {
-  const ref = optionalText(jobRef)?.toLowerCase() ?? null;
-  const kind = optionalText(service)?.toLowerCase() ?? null;
+  const ref = keyPart(jobRef);
+  const kind = keyPart(service);
   if (ref === null || kind === null) return null;
-  const source = optionalText(sourceLang)?.toLowerCase() ?? '';
-  const target = optionalText(targetLang)?.toLowerCase() ?? '';
+  const source = languagePart(sourceLang);
+  const target = languagePart(targetLang);
   return `${ref}|${target === source ? '' : target}|${kind}`;
 }
 
