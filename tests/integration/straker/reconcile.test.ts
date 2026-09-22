@@ -606,8 +606,13 @@ describe('T047 the recovery reaches the tracking record (FR-014, FR-011a)', () =
       getHeader: async () => header,
       setHeader: async (values) => void (header = [...values]),
       getKeyColumn: async () => ['_row_key', ...rows.map((r) => r[r.length - 1] ?? '')],
+      // Sheet row 1 is the header, so data row n is rows[n - 2].
+      getKeyAt: async (rowNum) => {
+        const r = rows[rowNum - 2];
+        return r === undefined ? '' : (r[r.length - 1] ?? '');
+      },
       appendRow: async (values) => void rows.push([...values]),
-      writeRow: async (rowNum, values) => void (rows[rowNum - 1] = [...values]),
+      writeRow: async (rowNum, values) => void (rows[rowNum - 2] = [...values]),
     };
   }
 
