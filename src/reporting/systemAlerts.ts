@@ -181,7 +181,8 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
   // the cycle when a Bangkok year within CURATION_HORIZON_DAYS (60) of today — but NOT the current
   // year, which is holiday_calendar_stale's page — has no curated list. warn only: nothing is broken
   // yet, so it posts to Chat and never fails the heartbeat. hasRecovered:false (the fix is a deploy,
-  // not an event worth a card); the cycle silently resolves it once the year is curated.
+  // not an event worth a card). It is never resolved: the row stays active after the year is curated,
+  // which is harmless (nothing counts active alerts) — curating the year is the whole fix.
   holiday_calendar_expiring: {
     severity: 'warn',
     title: 'Holiday calendar runs out soon — next year not curated',
