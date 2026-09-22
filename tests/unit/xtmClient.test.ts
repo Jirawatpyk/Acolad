@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { PlaywrightXtmClient, type XtmOps } from '../../src/portal/xtmClient.js';
+import {
+  PlaywrightXtmClient,
+  markUnsettledEmpty,
+  type XtmOps,
+} from '../../src/portal/xtmClient.js';
 import {
   SessionExpiredError,
   SessionYieldError,
@@ -268,5 +272,48 @@ describe('fetchJobSnapshot fail-loud on unrecognised logout (F10)', () => {
 
     await client.fetchJobSnapshot('p');
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('markUnsettledEmpty (false-empty guard, 38-min missed-job class)', () => {
+  const job = {
+    xtmTaskId: null,
+    projectName: 'P',
+    fileName: 'a.docx',
+    sourceLang: null,
+    targetLang: 'Malay (Malaysia)',
+    dueDate: null,
+    dueRaw: null,
+    words: 1,
+    fileWwc: null,
+    step: null,
+    role: null,
+    acceptAvailable: true,
+  };
+
+  it('an UNSETTLED read with 0 rows is marked unsettledEmpty and NOT confirmed empty', () => {
+    const out = markUnsettledEmpty(snapshot('c1'), false);
+    expect(out.unsettledEmpty).toBe(true);
+    expect(out.emptyListConfirmed).toBe(false);
+  });
+
+  it('a SETTLED 0-row read is left as-is (genuinely empty)', () => {
+    const out = markUnsettledEmpty(snapshot('c1'), true);
+    expect(out.unsettledEmpty).toBeUndefined();
+    expect(out.emptyListConfirmed).toBe(true);
+  });
+
+  it('an unsettled read that DID see rows is trusted (rows prove the data arrived)', () => {
+    const withRows: XtmJobSnapshot = { ...snapshot('c1'), jobs: [job], emptyListConfirmed: false };
+    expect(markUnsettledEmpty(withRows, false).unsettledEmpty).toBeUndefined();
+  });
+
+  it('an unsettled read with only malformed rows is trusted too (it is a layout problem, not a load race)', () => {
+    const malformed: XtmJobSnapshot = {
+      ...snapshot('c1'),
+      malformed: [{}],
+      emptyListConfirmed: false,
+    };
+    expect(markUnsettledEmpty(malformed, false).unsettledEmpty).toBeUndefined();
   });
 });

@@ -37,6 +37,14 @@ export interface XtmJobSnapshot {
   capturedAt: string;
   pollCycleId: string;
   emptyListConfirmed: boolean;
+  /**
+   * True when the read saw ZERO rows but the grid's data XHR never settled (networkidle timed out)
+   * before it -- so "empty" is unproven: an unloaded XTM grid is indistinguishable from an empty one
+   * (the 38-minute missed-job bug). The cycle must NOT treat such a read as absence: it skips every
+   * diff-driven transition (missing counters, Missing/Closed/Removed, accept). Absent/false = the
+   * read is trustworthy (settled, or rows were actually seen).
+   */
+  unsettledEmpty?: boolean;
 }
 
 export interface JobSnapshot {

@@ -18,6 +18,8 @@ import {
   resolveHolidaysForSpan,
   getThaiHolidays,
   holidaysForEffectiveDay,
+  yearsNeedingCuration,
+  CURATION_HORIZON_DAYS,
 } from '../schedule/thaiHolidays.js';
 import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { deadlineMsOf, makeEffectiveDayOf } from '../schedule/deadlineDay.js';
@@ -95,6 +97,13 @@ export interface XtmCycleSummary {
    * every other path (gate disabled, current year curated).
    */
   holidayCalendarStale: boolean;
+  /**
+   * True when this cycle's snapshot was an UNSETTLED empty read (`snapshot.unsettledEmpty`): the
+   * grid may simply not have loaded, so the cycle ran NO diff -- no missing counters, no
+   * Missing/Closed/Removed, no accept, no Sheet/Chat, no baseline. Only the holiday-calendar checks
+   * (data-driven, snapshot-independent) still ran. The loop tracks the streak of these.
+   */
+  transitionsSkipped: boolean;
   /**
    * One entry per job the schedule gate blocked this cycle, carrying the binding reject
    * reason + the fields needed to debug it (I1). The cycle stays logger-free (like
@@ -201,6 +210,23 @@ export class XtmPollCycle {
       })();
     }
 
+    const summary = emptySummary(snapshot.jobs.length, baseline);
+    const detectedMs = Date.parse(snapshot.capturedAt);
+
+    // False-empty guard (38-minute missed-job class): a 0-row read taken before the grid's data
+    // XHR settled proves nothing -- an unloaded grid looks exactly like an empty one. Diffing it would
+    // count every present job as absent (two such reads -> Missing, and for a held job the Closed
+    // read -> Removed, freeing its capacity). So run NO diff-driven work this cycle: nothing
+    // persisted, nothing enqueued, baseline untouched. The holiday-calendar checks still run -- they
+    // depend only on the clock, and holiday_calendar_stale drives a heartbeat page that must not go
+    // quiet just because the grid is slow. The loop owns the streak/alert for repeated skips.
+    if (snapshot.unsettledEmpty === true && snapshot.jobs.length === 0) {
+      summary.transitionsSkipped = true;
+      if (this.cfg.ACCEPT_SCHEDULE_ENABLED)
+        this.checkHolidayCalendar(snapshot, detectedMs, summary);
+      return summary;
+    }
+
     const result = diffXtm(snapshot, prev, { baseline });
 
     // Eligibility for every next state (config-driven, R8).
@@ -208,26 +234,6 @@ export class XtmPollCycle {
       s.eligible = isEligibleTarget(s.targetLang, this.cfg.ACCEPT_LANGUAGES);
     }
 
-    const summary: XtmCycleSummary = {
-      jobs: snapshot.jobs.length,
-      baseline,
-      accepted: 0,
-      failed: 0,
-      missing: 0,
-      skipped: 0,
-      eligibleDisabled: 0,
-      closed: 0,
-      removed: 0,
-      acceptLatencies: [],
-      reconEligible: [],
-      scheduleBlocked: 0,
-      holidayCalendarStale: false,
-      scheduleRejects: [],
-      acceptedDueDays: [],
-      malformedLastSeen: [],
-    };
-    const detectedMs = Date.parse(snapshot.capturedAt);
-    const currentYear = bangkokYear(detectedMs);
     // Effective-deadline-day mapper (the "cutoff" fix): the capacity cap buckets a held/would-
     // accept job by the WORKING DAY its work lands on, not the raw deadline calendar date — a
     // deadline before the 09:00 work-start belongs to the previous working day (feasibility
@@ -540,27 +546,9 @@ export class XtmPollCycle {
           }
         }
       }
-      // Holiday-calendar staleness (C3, F1/F2): DATA-driven — raise iff the CURRENT Bangkok
-      // year has no curated holiday list, INDEPENDENT of any job's presence. This persists
-      // the alert until the year is curated (no flapping with job presence) and never
-      // conflates it with a per-job capacity/feasibility block. A far deadline into an
-      // uncurated NEXT year still fail-closes per-job via `scheduleVerdict`'s `resolveHolidaysForSpan` span-curation check above — it
-      // just no longer raises this SYSTEM alert. Guarded behind ENABLED — a disabled feature
-      // never resolves holidays or pages. (currentYear is hoisted to the top of run().)
-      if (!getThaiHolidays(currentYear).curated) {
-        // C1: a total auto-accept outage — surface it to the loop so the heartbeat fails
-        // and Healthchecks pages on-call (not just a Chat card).
-        summary.holidayCalendarStale = true;
-        raiseAlert(
-          this.db,
-          this.outbox,
-          'holiday_calendar_stale',
-          snapshot.capturedAt,
-          `the current year (${currentYear}) has no curated holiday list in src/schedule/thaiHolidaysData.ts`,
-        );
-      } else {
-        resolveAlert(this.db, this.outbox, 'holiday_calendar_stale', snapshot.capturedAt, '—');
-      }
+      // Holiday-calendar checks (stale page + expiring warn). Guarded behind ENABLED — a
+      // disabled feature never resolves holidays or pages.
+      this.checkHolidayCalendar(snapshot, detectedMs, summary);
     }
 
     // FR-014: an accepted job that left Active is Closed (found in the Closed tab)
@@ -807,6 +795,54 @@ export class XtmPollCycle {
   }
 
   /**
+   * Holiday-calendar checks (schedule gate ON only — the caller guards). Both are DATA-driven: they
+   * depend on the clock, never on which jobs are present, so they persist until the data is fixed
+   * (no flapping with job presence) and run even on a skipped (unsettled-empty) cycle.
+   *
+   *  - `holiday_calendar_stale` (C3, F1/F2 — critical, PAGES via summary.holidayCalendarStale): the
+   *    CURRENT Bangkok year is uncurated = a total auto-accept outage. Resolves once curated. A far
+   *    deadline into an uncurated NEXT year still fail-closes per job via `scheduleVerdict`'s
+   *    `resolveHolidaysForSpan` span check; it does not raise this system alert.
+   *  - `holiday_calendar_expiring` (warn, Chat only): a LATER year within CURATION_HORIZON_DAYS is
+   *    uncurated — the advance notice before the page above fires on 1 January. Once per missing
+   *    year (the dedup key carries the year); never resolved — the fix is a deploy, after which the
+   *    year is no longer returned, so it cannot re-fire.
+   */
+  private checkHolidayCalendar(
+    snapshot: XtmJobSnapshot,
+    detectedMs: number,
+    summary: XtmCycleSummary,
+  ): void {
+    const currentYear = bangkokYear(detectedMs);
+    if (!getThaiHolidays(currentYear).curated) {
+      // C1: a total auto-accept outage — surface it to the loop so the heartbeat fails
+      // and Healthchecks pages on-call (not just a Chat card).
+      summary.holidayCalendarStale = true;
+      raiseAlert(
+        this.db,
+        this.outbox,
+        'holiday_calendar_stale',
+        snapshot.capturedAt,
+        `the current year (${currentYear}) has no curated holiday list in src/schedule/thaiHolidaysData.ts`,
+      );
+    } else {
+      resolveAlert(this.db, this.outbox, 'holiday_calendar_stale', snapshot.capturedAt, '—');
+    }
+    for (const year of yearsNeedingCuration(detectedMs, CURATION_HORIZON_DAYS)) {
+      if (year === currentYear) continue; // the stale page above owns the current year
+      raiseAlert(
+        this.db,
+        this.outbox,
+        'holiday_calendar_expiring',
+        snapshot.capturedAt,
+        `${year} has no curated holiday list in src/schedule/thaiHolidaysData.ts and starts within ${CURATION_HORIZON_DAYS} days`,
+        {},
+        `holiday_calendar_expiring:${year}`,
+      );
+    }
+  }
+
+  /**
    * Clear-then-decide-then-apply for ONE present, re-decidable job — the single place BOTH the event
    * pass and the robustness pass run `decideAccept`, so the two can never drift (Finding #1/#7). It
    *   1. wipes any stale persisted reject reason FIRST (the schedule gate re-sets it below if the job
@@ -1007,4 +1043,27 @@ export class XtmPollCycle {
     }
     return renderXtmNewJob(s, at, note, xtmUrl);
   }
+}
+
+/** A zeroed cycle summary — every path (normal and skipped) starts from the same shape. */
+function emptySummary(jobs: number, baseline: boolean): XtmCycleSummary {
+  return {
+    jobs,
+    baseline,
+    accepted: 0,
+    failed: 0,
+    missing: 0,
+    skipped: 0,
+    eligibleDisabled: 0,
+    closed: 0,
+    removed: 0,
+    acceptLatencies: [],
+    reconEligible: [],
+    scheduleBlocked: 0,
+    holidayCalendarStale: false,
+    transitionsSkipped: false,
+    scheduleRejects: [],
+    acceptedDueDays: [],
+    malformedLastSeen: [],
+  };
 }

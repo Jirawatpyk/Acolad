@@ -354,3 +354,69 @@ describe('raiseAlert — holiday_calendar_stale', () => {
     expect(raiseAlert(db, outbox, 'holiday_calendar_stale', later, 'year 2100')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// holiday_calendar_expiring (early warning) + grid_unsettled_streak + keyed resolve
+// ---------------------------------------------------------------------------
+
+const activeFor = (dedupKey: string): number =>
+  (
+    db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key=? AND resolved_at IS NULL",
+      )
+      .get(dedupKey) as { n: number }
+  ).n;
+
+describe('raiseAlert — holiday_calendar_expiring', () => {
+  it('is a WARN (Chat only, never a page) that does not send a recovered card', () => {
+    const t = TRIGGERS['holiday_calendar_expiring'];
+    expect(t.severity).toBe('warn');
+    expect(t.hasRecovered).toBe(false);
+  });
+
+  it('names the fix and dedups once per missing year', () => {
+    const raise = (year: string): boolean =>
+      raiseAlert(
+        db,
+        outbox,
+        'holiday_calendar_expiring',
+        NOW,
+        year,
+        {},
+        `holiday_calendar_expiring:${year}`,
+      );
+    expect(raise('2028')).toBe(true);
+    const json = cardJson(firstPayload());
+    expect(json).toContain('thaiHolidaysData.ts');
+    expect(json).not.toContain('🔴'); // warn, not critical
+    expect(raise('2028')).toBe(false); // same year → deduped
+    expect(raise('2029')).toBe(true); // a different year alerts on its own
+  });
+});
+
+describe('raiseAlert — grid_unsettled_streak', () => {
+  it('is a WARN that recovers', () => {
+    const t = TRIGGERS['grid_unsettled_streak'];
+    expect(t.severity).toBe('warn');
+    expect(t.hasRecovered).toBe(true);
+  });
+});
+
+describe('resolveAlert — explicit dedupKey', () => {
+  it('resolves an alert raised under a custom dedupKey and enqueues the recovered card', () => {
+    const key = 'grid_unsettled_streak:2026-06-10T10:00:00.000Z';
+    raiseAlert(db, outbox, 'grid_unsettled_streak', NOW, '5 reads', {}, key);
+    expect(activeFor(key)).toBe(1);
+    // Without the key the kind-named lookup finds nothing (the old behaviour) …
+    expect(resolveAlert(db, outbox, 'grid_unsettled_streak', NOW, '1 min')).toBe(false);
+    expect(activeFor(key)).toBe(1);
+    // … with it the alert resolves and a recovered card is queued.
+    expect(resolveAlert(db, outbox, 'grid_unsettled_streak', NOW, '1 min', key)).toBe(true);
+    expect(activeFor(key)).toBe(0);
+    const recovered = db
+      .prepare("SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_recovered'")
+      .get() as { n: number };
+    expect(recovered.n).toBe(1);
+  });
+});

@@ -75,3 +75,37 @@ export function resolveHolidaysForSpan(nowMs: number, dueAtMs: number | null): T
   }
   return { holidays, curated };
 }
+
+/** How far ahead the bot warns that the holiday calendar is about to run out (days). Long enough
+ *  to curate a year before 1 January stops auto-accept (`holiday_calendar_stale` fail-closes the
+ *  CURRENT year), short enough that the warning is not noise for most of the year. */
+export const CURATION_HORIZON_DAYS = 60;
+
+const DAY_MS = 86_400_000;
+/** Bounds the year loop — no caller needs to look further ahead than a few years. */
+const MAX_HORIZON_DAYS = 3_660;
+
+/**
+ * Every Bangkok year from `nowMs`'s year through the year of `nowMs + horizonDays` (inclusive,
+ * intermediate years included) that has NO curated holiday list — sorted ascending, `[]` when
+ * all are curated. The cycle uses the years AFTER the current one as an early warning
+ * (`holiday_calendar_expiring`); the current year keeps its own page (`holiday_calendar_stale`).
+ *
+ * Throws RangeError on a non-finite `nowMs` or a negative/non-finite horizon: silently returning
+ * `[]` there would switch the warning off without anyone noticing (fail loud).
+ */
+export function yearsNeedingCuration(
+  nowMs: number,
+  horizonDays: number,
+  isCurated: (year: number) => boolean = (y) => getThaiHolidays(y).curated,
+): number[] {
+  if (!Number.isFinite(nowMs)) throw new RangeError(`nowMs must be finite (got ${nowMs})`);
+  if (!Number.isFinite(horizonDays) || horizonDays < 0 || horizonDays > MAX_HORIZON_DAYS) {
+    throw new RangeError(`horizonDays must be within 0..${MAX_HORIZON_DAYS} (got ${horizonDays})`);
+  }
+  const from = bangkokYear(nowMs);
+  const to = bangkokYear(nowMs + horizonDays * DAY_MS);
+  const out: number[] = [];
+  for (let y = from; y <= to; y++) if (!isCurated(y)) out.push(y);
+  return out;
+}
