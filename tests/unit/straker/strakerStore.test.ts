@@ -18,6 +18,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1383,5 +1384,35 @@ describe('work identity on held work and claim events', () => {
         }
       }
     }
+  });
+});
+
+describe('checkpoint — the write-ahead log is folded back and truncated (2026-09-22)', () => {
+  // SQLite's automatic checkpoint folds pages back into the database but never shrinks the
+  // -wal file, and a reader holding a snapshot can stop it altogether: a bot that writes a
+  // sighting every ten seconds for weeks grows the file without bound. TRUNCATE resets it.
+  it('leaves a non-empty -wal after writes, and a zero-byte one after the checkpoint', () => {
+    const { store, db, path } = freshStore();
+    for (let i = 0; i < 20; i += 1) {
+      store.recordEvent({
+        objId: `offer-${i}`,
+        eventType: 'claim',
+        outcome: 'lost',
+        effortWords: 4,
+        deadlineMs: NOW_MS,
+        occurredAtMs: NOW_MS + i,
+      });
+    }
+    const wal = `${path}-wal`;
+    expect(existsSync(wal)).toBe(true);
+    expect(statSync(wal).size).toBeGreaterThan(0);
+
+    const result = store.checkpoint();
+
+    expect(result.busy).toBe(0);
+    expect(statSync(wal).size).toBe(0);
+    // Nothing lost: the rows are in the database file now.
+    expect(store.claimedObjIds().size).toBe(20);
+    db.close();
   });
 });

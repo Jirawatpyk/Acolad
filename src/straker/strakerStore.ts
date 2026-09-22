@@ -660,6 +660,26 @@ export class StrakerStore {
     return this.db.transaction(fn)();
   }
 
+  /**
+   * Fold the write-ahead log back into the database and truncate it to zero bytes
+   * (2026-09-22).
+   *
+   * SQLite's automatic checkpoint moves pages back but never shrinks the `-wal` file, and a
+   * reader holding a snapshot can hold it back altogether; a bot writing every ten seconds
+   * for weeks grows it without bound. The loop calls this at most hourly and on close.
+   * `busy` non-zero means a reader blocked a complete checkpoint — harmless, the next one
+   * catches up. Throws only what SQLite throws; the caller decides it must not fail a cycle.
+   */
+  checkpoint(): { readonly busy: number; readonly log: number; readonly checkpointed: number } {
+    const rows = this.db.pragma('wal_checkpoint(TRUNCATE)') as {
+      busy: number;
+      log: number;
+      checkpointed: number;
+    }[];
+    const row = rows[0];
+    return { busy: row?.busy ?? 0, log: row?.log ?? 0, checkpointed: row?.checkpointed ?? 0 };
+  }
+
   // --- sightings (data-model §2) -------------------------------------------
 
   /** Record or refresh the current sighting of an offer. A re-appearance arrives with the
