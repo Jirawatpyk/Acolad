@@ -401,7 +401,7 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   สถานะของ assigned job เป็นตัวตัดสินเมื่อมีแล้ว. **ก่อนหน้านี้อ่านแค่ assigned-jobs** → ทุกงานที่
   รับได้ถูกปล่อยโควต้าภายใน 1 รอบ (ค้างที่ PO) แล้วโผล่เป็น "Found by reconciliation" ซ้ำ.
   งานที่มีคีย์แต่หาคู่ไม่เจอ **ไม่ถูกปล่อยจนกว่า DL จะผ่านไป 1 วัน** และ log warn
-  `held_work_unmatched` ทุกรอบ — ถ้าเห็น ให้เช็กว่า `service` ของ offer ยังตรงกับ `po_type` ไหม.
+  `held_work_unmatched` ทุกรอบ + alert ⚠️ ครั้งเดียวต่อ offer — ถ้าเห็น ให้เช็กว่า `service` ของ offer ยังตรงกับ `po_type` ไหม.
   PO เก่าที่ค้างก่อนมีคีย์ถูก "adopt" เงียบ ๆ ครั้งเดียว (`straker_meta.po_adoption_done`)
 - **claim รอคำตอบได้ 10 วินาที** (`CLAIM_TIMEOUT_MS`; การอ่านยัง 2 วินาที) — `/accept` สร้าง PO
   จึงช้า. claim ที่ยังได้ `unknown` (ไม่มีคำตอบ) จะถูก**ยืนยันเป็น Won** เมื่อ PO ที่คีย์ตรงกันโผล่ใน
@@ -425,7 +425,9 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   action:claim outcome:claiming_paused pausedForMs`) — หายเองทันทีที่ reconcile สำเร็จ.
   **งาน claim ที่ไม่มีคีย์** เมื่อ PO/assigned job ของมันโผล่ (id ใหม่ + มีคีย์) → hold ถูก**ย้าย**ไปแถวใหม่
   ในทรานแซกชันเดียวกัน (DL ห่าง ≤ 60 วิ + คำเท่ากัน, จับคู่ 1:1) log info `module:reconcile
-  action:transfer from to` — ไม่นับซ้ำสองแถว (แต่การ์ด/แถว "recovered" ของแถวใหม่ยังออกตามปกติ). workKey ถูก normalise (NFKC, ตัด zero-width, `_`→`-` เฉพาะรหัสภาษา) —
+  action:transfer announced:false from to` — ไม่นับซ้ำสองแถว และ**เงียบ** (2026-09-22): ไม่มีการ์ด
+  "Work Recovered" / alert `work_recovered` / แถวชีต recovery ของแถวใหม่ (claim เดิมมีการ์ด Won + แถวแล้ว)
+  — แต่ recovery event + hold ยังเกิดตามปกติ. workKey ถูก normalise (NFKC, ตัด zero-width, `_`→`-` เฉพาะรหัสภาษา) —
   **ค่า key เก่าใน DB ไม่ได้ถูกเขียนใหม่** — ถ้า key เก่ามี `_`/ตัวพิมพ์เต็มความกว้าง/อักขระล่องหน
   จะไม่ตรงกับ key ใหม่ (ผลตก "ฝั่งถือไว้นานขึ้น" ใน reconcile แต่ guard กันกดซ้ำจะมองไม่เห็น) —
   เช็กด้วย `SELECT work_key FROM held_work WHERE released_at_ms IS NULL`
@@ -439,6 +441,30 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   พอร์ทัลย้ายโดเมน 8 ชม. บอทถอยไปรอ 1 ชม. ทั้งที่รหัสผ่านไม่ผิด. log `backing_off` / alert
   `sign_in_refused` = รหัสผ่านโดนปฏิเสธจริงเท่านั้น
 - **เขียน SQLite ไม่ได้ (แม้แค่ส่วน sighting/skip) = heartbeat fail** (2026-09-22) — เดิมเขียว
+- **alert ⚠️ ใหม่ 3 ตัว (warn, ห้อง ops, ครั้งเดียวต่อ offer — event id `<condition>:<objId>`)** (2026-09-22;
+  เดิมเป็นแค่ log warn ทุกรอบ ซึ่งยังมีอยู่):
+  `held_work_unmatched` = งานที่ถือมีคีย์แต่ไม่ตรง PO/assigned job ไหนเลย (ถือไว้ถึง DL+24 ชม.) → เช็กว่า
+  `service` ของ offer ยังเท่ากับ `po_type` ของพอร์ทัลไหม แล้วเปิดดูงานบนพอร์ทัล ·
+  `held_work_absent_keyless` = งานไม่มีคีย์ที่หายจากทั้งสองรายการ (ถือไว้ถึง DL+24 ชม.) → เช็กบนพอร์ทัลว่างาน
+  ยังอยู่ไหม (ถ้าถูกยกเลิก เพดานจะต่ำกว่าจริงจนกว่า hold หมดอายุ) · `adopted_without_effort` = PO ที่ adopt
+  ได้ 0 คำ/หาจำนวนคำไม่เจอ → เพดานวัน DL นั้นนับขาด เช็กจำนวนคำของงาน (reconcile จะปรับขึ้นเองเมื่อ assigned
+  job บอกคำ). enqueue alert ล้ม = log error `module:reconcile action:alert outcome:failed` ไม่ทำให้รอบล้ม
+- **poll ต่ำสุด 10 วินาที** (2026-09-22): `STRAKER_POLL_INTERVAL_MS` < 10000 = config ปฏิเสธ ไม่ start
+  (เดิมยอม 1000). ช้ากว่าได้ เร็วกว่าต้องแก้ spec ก่อน
+- **การ์ด Chat escape `& < >` ในข้อความแถว** (ทั้ง XTM และ Straker — `reporting/cardText.escapeCardText`):
+  ชื่อไฟล์/งานจากพอร์ทัลจะไม่ถูกตีความเป็น HTML อีก (header กับ cardId ไม่ escape). ใน JSON ที่ส่งจะเห็น
+  `&gt;` เช่น `en-us&gt;ms-my` — Chat แสดงเป็น `>` ปกติ **ไม่ใช่ bug**
+- **POST ไม่ตาม redirect** (`redirect:'manual'`): claim ที่ได้ 3xx = `failed` + alert + followUp
+  `re_authenticate` (ไม่ retry); sign-in ได้ 3xx = `transport_failed` (ไม่นับเป็นรหัสผ่านผิด ไม่ backoff)
+- **ชีต: upsert อ่าน `_row_key` ของแถวซ้ำก่อนเขียนทับ** — ถ้าแถวเลื่อน (มีคนแทรก/sort) จะ scan ใหม่ 1 ครั้ง
+  ถ้ายังไม่ตรง → ไม่เขียน ปล่อย outbox retry. ลดโอกาสเขียนทับแถวคนอื่น แต่**ปิดไม่สนิท** (Sheets ไม่มี
+  compare-and-set) — อย่า sort/แทรกแถวในแท็บ `Straker_Tracking` ถ้าเลี่ยงได้
+- **WAL checkpoint (TRUNCATE) ทุกชั่วโมง + ตอน close** — log `module:main action:wal_checkpoint`;
+  ล้ม = log error เฉย ๆ ไม่ทำให้ cycle fail. `straker.db-wal` ควรกลับเป็น 0 ไบต์อย่างน้อยชั่วโมงละครั้ง
+- **ประวัติ skip reason** (2026-09-22): ตาราง `offer_skip_history` เก็บทุกครั้งที่เหตุผล skip ของ offer
+  **เปลี่ยน** (เหตุผลเดิมซ้ำทุก 10 วิ = แถวเดียว). `offer_events` ยังเก็บแค่เหตุผลล่าสุด; win rate/รายงาน
+  ไม่เปลี่ยน. ดูประวัติ: `SELECT skip_reason, datetime(occurred_at_ms/1000,'unixepoch','+7 hours')
+  FROM offer_skip_history WHERE obj_id = '<offer id>' ORDER BY rowid` (หรือ `StrakerStore.skipHistoryOf`)
 - **log ใหม่สำหรับไล่ปัญหา:** ทุกการกด claim มี 1 บรรทัด `module:pollCycle action:claim
   outcome:won|lost|failed|unknown objId workKey status? latencyMs` (won/lost = info, ที่เหลือ = warn).
   บรรทัด `module:reconcile action:pass` มี `orders settled adopted effortUpgraded` เพิ่ม.
