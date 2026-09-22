@@ -165,7 +165,23 @@ function itemLabel(work: HeldWork): string {
   if (id === undefined || (id.title === null && id.jobRef === null && id.service === null)) {
     return `Offer ${work.objId}`;
   }
-  return `${dash(id.title)} · ${dash(id.jobRef)} · ${dash(id.service)}`;
+  const target = targetOf(id.workKey);
+  const ref = target === null ? dash(id.jobRef) : `${dash(id.jobRef)} (${target})`;
+  return `${dash(id.title)} · ${ref} · ${dash(id.service)}`;
+}
+
+/**
+ * The target language, read back out of the work key (`job_ref|target|service`, `workKey.ts`)
+ * rather than stored a second time. One job reference fans out into one row per target, so
+ * without it the report lists identical-looking lines. Null for DTP work, whose key carries
+ * an empty target, and for work with no key at all.
+ */
+function targetOf(workKey: string | null): string | null {
+  if (workKey === null) return null;
+  const parts = workKey.split('|');
+  if (parts.length < 3) return null;
+  const target = parts[parts.length - 2] ?? '';
+  return target === '' ? null : target;
 }
 
 /** Bangkok `DD/MM/YYYY HH:mm` through the XTM bot's formatter, or a dash. */

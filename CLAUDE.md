@@ -330,7 +330,7 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
 - **รายงาน 09:00 ของ Straker เอง** (2026-09-22, owner decision, FR-018 amended) — ส่งเข้าห้อง offers
   ของ Straker วันทำการ ≥ 09:00 (วันทำงาน `ACCEPT_WORKDAYS` + วันหยุดชุดเดียวกับ XTM): `📋 Straker Daily Report`
   = Due today แยก translation / DTP เทียบเพดานแต่ละตัว · ⚠️ Overdue · งานที่ถือ 5 อันที่ DL ใกล้สุด
-  (`file · job ref · service`) · win rate 14 วัน. **ไม่มีงานถือ + win rate ไม่มีอะไร (winnable 0,
+  (`file · job ref (ภาษาปลายทาง) · service` — DTP ไม่มีวงเล็บ) · win rate 14 วัน. **ไม่มีงานถือ + win rate ไม่มีอะไร (winnable 0,
   turned away 0) = ไม่ส่ง** → log `module:dailyReport action:daily_report outcome:skipped`.
   ตัดสินวันละครั้งจำใน `straker_meta` key `daily_report:<วันที่>` (ทั้งส่งและข้าม) → restart ไม่ส่งซ้ำ;
   พัง = log `outcome:error` แล้ว**ลองใหม่รอบหน้า** (ไม่ทำ cycle fail). outbox dedup `daily:<วันที่>`

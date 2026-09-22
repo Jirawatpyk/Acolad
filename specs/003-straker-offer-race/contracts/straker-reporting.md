@@ -98,7 +98,7 @@ Sent by the Straker bot itself on the `offers` channel, once per working day at 
 | `Due today · translation` | Σ held words whose **effective deadline day** is today, `(cap <STRAKER_MAX_WORDS_PER_DAY>/day)` |
 | `Due today · DTP` | The same for monolingual/DTP work against `STRAKER_DTP_MAX_WORDS_PER_DAY` — never added to translation |
 | `⚠️ Overdue` | Only when held work is past its deadline instant: `<n> job(s) · <words> words` |
-| In progress (≤ 5) | Nearest deadlines first, labelled `file · job ref · service` (the offer id when the work carries no identity); value `DD/MM/YYYY HH:mm · <words>w` (`· DTP` for DTP). Overdue items carry ⚠️. `(+N more)` beyond five; `No jobs in progress` when nothing is held |
+| In progress (≤ 5) | Nearest deadlines first, labelled `file · job ref (target) · service` — target from the work key, omitted for DTP (the offer id when the work carries no identity); value `DD/MM/YYYY HH:mm · <words>w` (`· DTP` for DTP). Overdue items carry ⚠️. `(+N more)` beyond five; `No jobs in progress` when nothing is held |
 | `Straker win rate` | Last 14 days, with counts, turn-aways, weak-signal and lower-bound caveats (`winRateRow.ts`) |
 
 **Nothing to say ⇒ no card**: nothing held **and** the 14-day win rate has zero winnable and zero turned away. The skip is logged `{module:'dailyReport', action:'daily_report', outcome:'skipped'}`.

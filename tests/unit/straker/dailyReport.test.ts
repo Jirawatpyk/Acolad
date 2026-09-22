@@ -48,8 +48,8 @@ function held(over: Partial<HeldWork> & Pick<HeldWork, 'objId'>): HeldWork {
   };
 }
 
-function identity(title: string, jobRef: string, service: string): WorkIdentity {
-  return { title, jobRef, service, workKey: `${jobRef}|ms-my|${service}` };
+function identity(title: string, jobRef: string, service: string, target = 'ms-my'): WorkIdentity {
+  return { title, jobRef, service, workKey: `${jobRef.toLowerCase()}|${target}|${service}` };
 }
 
 const claim = (objId: string, outcome: ClaimEvent['outcome'], atMs = NOW - HOUR): ClaimEvent => ({
@@ -154,9 +154,34 @@ describe('buildStrakerDailyReport — what the 09:00 card says', () => {
       }),
     );
 
-    expect(rowOf(report?.rows ?? [], 'NBA - NTRY Hangtag.xlsx · AJ-310 · translation')?.value).toBe(
-      '22/09/2026 17:00 · 1234w',
+    expect(
+      rowOf(report?.rows ?? [], 'NBA - NTRY Hangtag.xlsx · AJ-310 (ms-my) · translation')?.value,
+    ).toBe('22/09/2026 17:00 · 1234w');
+  });
+
+  it('tells apart two rows of one job by their target language, and leaves DTP unbracketed', () => {
+    // One job reference fans out into one purchase order per target language, and on
+    // 2026-09-22 the live report showed three identical `… · aj-324 · translation` rows. The
+    // target is the middle segment of the work key; DTP work has none (`workKey.ts`).
+    const file = 'REQ34215_WilsonChina.xlsx';
+    const report = buildStrakerDailyReport(
+      input({
+        held: [
+          held({ objId: 'th', identity: identity(file, 'AJ-324', 'translation', 'th') }),
+          held({ objId: 'vi', identity: identity(file, 'AJ-324', 'translation', 'vi') }),
+          held({
+            objId: 'dtp',
+            kind: 'monolingual',
+            identity: identity('Layout.indd', 'AJ-330', 'dtp', ''),
+          }),
+        ],
+      }),
     );
+    const labels = (report?.rows ?? []).map((r) => r.label);
+
+    expect(labels).toContain(`${file} · AJ-324 (th) · translation`);
+    expect(labels).toContain(`${file} · AJ-324 (vi) · translation`);
+    expect(labels).toContain('Layout.indd · AJ-330 · dtp');
   });
 
   it('marks DTP items and falls back to the offer id for work held without an identity', () => {
@@ -180,11 +205,11 @@ describe('buildStrakerDailyReport — what the 09:00 card says', () => {
     const listed = rows.filter((r) => r.label.includes('.docx')).map((r) => r.label);
 
     expect(listed).toEqual([
-      'f6.docx · AJ-6 · translation',
-      'f5.docx · AJ-5 · translation',
-      'f4.docx · AJ-4 · translation',
-      'f3.docx · AJ-3 · translation',
-      'f2.docx · AJ-2 · translation',
+      'f6.docx · AJ-6 (ms-my) · translation',
+      'f5.docx · AJ-5 (ms-my) · translation',
+      'f4.docx · AJ-4 (ms-my) · translation',
+      'f3.docx · AJ-3 (ms-my) · translation',
+      'f2.docx · AJ-2 (ms-my) · translation',
     ]);
     expect(rows.some((r) => r.value === '(+2 more)')).toBe(true);
   });
