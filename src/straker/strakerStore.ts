@@ -1154,5 +1154,8 @@ function toEvent(r: EventRow): OfferEvent {
         'as one that produced nothing',
     );
   }
-  return { ...common, eventType: r.event_type, outcome: r.outcome, ...work };
+  // The identity travels with the claim and the recovery so a reader can tell that a
+  // recovery recorded under a purchase-order id is the same work as the offer's claim —
+  // which is how the win rate stops counting one job twice (A3, 2026-09-22).
+  return { ...common, eventType: r.event_type, outcome: r.outcome, ...work, ...withIdentity(r) };
 }
