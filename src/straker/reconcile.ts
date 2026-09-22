@@ -101,6 +101,14 @@ import { workIdentity, workLabels, type WorkIdentity } from './workKey.js';
  */
 export const RECONCILE_INTERVAL_MS = 15 * 60_000;
 
+/**
+ * How soon a failed pass is retried while none has yet succeeded since start (2026-09-22).
+ * The poll cycle claims nothing until one has, so waiting fifteen minutes to retry would
+ * stall claiming for fifteen minutes on one bad read. Four extra reads a minute's worth of
+ * budget at most, and only until the first success.
+ */
+export const RECONCILE_STARTUP_RETRY_MS = 60_000;
+
 /** FR-016c's "three consecutive failures". */
 export const RECONCILE_FAILURE_ALERT_THRESHOLD = 3;
 
@@ -559,6 +567,12 @@ const SAME_DEADLINE_WINDOW_MS = 60_000;
 /** The one-time adoption's second try: keyless claims due within half a day either side. */
 const ADOPTION_FALLBACK_WINDOW_MS = 12 * 3_600_000;
 
+/** Keyless held rows from recorded claims, and which of them a pass has already moved. */
+interface KeylessPool {
+  readonly rows: readonly HeldWork[];
+  readonly taken: Set<string>;
+}
+
 /** What proved an unknown claim was won, as a settlement records it. */
 interface SettlementEvidence {
   /** For the note: `its purchase order (pending)`, `its assigned job (in_progress)`. */
@@ -601,6 +615,7 @@ export type ReconcileStore = Pick<
   | 'legacyClaimEffortNear'
   | 'metaFlagSetAt'
   | 'setMetaFlag'
+  | 'claimedObjIds'
 >;
 export type ReconcileLedger = Pick<StrakerLedger, 'hold' | 'release'>;
 export type ReconcileOutbox = Pick<StrakerOutbox, 'enqueue'>;
@@ -615,6 +630,12 @@ export interface ReconcileDeps {
   readonly now?: () => number;
   /** Overridable for tests only. SC-009 is expressed in the default. */
   readonly intervalMs?: number;
+  /**
+   * The cadence while no pass has yet succeeded since this reconciler was created
+   * (2026-09-22). The bot claims nothing until one has, so a failed first pass must not wait
+   * the full {@link RECONCILE_INTERVAL_MS} to be retried. A shed pass is not a success.
+   */
+  readonly startupRetryMs?: number;
   readonly failureAlertThreshold?: number;
 }
 
@@ -688,6 +709,11 @@ export interface StrakerReconciler {
 export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler {
   const now = deps.now ?? Date.now;
   const intervalMs = deps.intervalMs ?? RECONCILE_INTERVAL_MS;
+  const startupRetryMs = deps.startupRetryMs ?? RECONCILE_STARTUP_RETRY_MS;
+  /** Whether any pass has completed successfully since creation — see `startupRetryMs`. */
+  let succeededOnce = false;
+  const currentInterval = (): number =>
+    succeededOnce ? intervalMs : Math.min(intervalMs, startupRetryMs);
   const threshold = deps.failureAlertThreshold ?? RECONCILE_FAILURE_ALERT_THRESHOLD;
 
   let lastAttemptAtMs: number | null = null;
@@ -715,7 +741,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
   let streakStartedAtMs: number | null = null;
 
   return {
-    nextDueAtMs: () => (lastAttemptAtMs === null ? null : lastAttemptAtMs + intervalMs),
+    nextDueAtMs: () => (lastAttemptAtMs === null ? null : lastAttemptAtMs + currentInterval()),
 
     async runIfDue(): Promise<ReconcileOutcome> {
       // A pass overlapping itself cannot corrupt anything — every write below is idempotent
@@ -727,7 +753,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       // Never run before means due: FR-016a's "on start". A failed pass advances this too,
       // which is FR-016c's "retried on its next scheduled pass" — its own cadence governs
       // it, and FR-019b's backoff explicitly does not apply.
-      if (lastAttemptAtMs !== null && atMs - lastAttemptAtMs < intervalMs) {
+      if (lastAttemptAtMs !== null && atMs - lastAttemptAtMs < currentInterval()) {
         return { ran: false, reason: 'not_due' };
       }
       lastAttemptAtMs = atMs;
@@ -777,6 +803,14 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
     const heldFor = (objId: string, key: string | null | undefined): HeldWork | undefined =>
       heldById.get(objId) ?? (key === null || key === undefined ? undefined : heldByKey.get(key));
     const adopting = deps.store.metaFlagSetAt(PO_ADOPTION_FLAG) === null;
+    // Keyless held rows from recorded claims: a won offer without a job reference. Its order
+    // and assigned job carry ids of their own AND a key, so `heldFor` cannot find it, and a
+    // recovery would hold the same work a second time. See `takeKeyless`.
+    const claimed = deps.store.claimedObjIds();
+    const pool: KeylessPool = {
+      rows: heldRows.filter((w) => (w.identity?.workKey ?? null) === null && claimed.has(w.objId)),
+      taken: new Set<string>(),
+    };
 
     const recovered: string[] = [];
     let firstFailure: unknown = null;
@@ -862,7 +896,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         continue;
       }
       attempt(item.objId, 'recover', () => {
-        recover(item, atMs);
+        recover(item, atMs, pool);
         recovered.push(item.objId);
       });
     }
@@ -895,11 +929,11 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         continue;
       }
       if (adopting) {
-        attempt(order.poObjId, 'adopt', () => adopt(order, atMs));
+        attempt(order.poObjId, 'adopt', () => adopt(order, atMs, pool));
         continue;
       }
       attempt(order.poObjId, 'recover', () => {
-        recoverOrder(order, claim, atMs);
+        recoverOrder(order, claim, atMs, pool);
         recovered.push(order.poObjId);
       });
     }
@@ -914,10 +948,18 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
     }
     consecutiveFailures = 0;
     streakStartedAtMs = null;
+    succeededOnce = true;
 
     if (adopting) deps.store.setMetaFlag(PO_ADOPTION_FLAG, atMs);
 
-    const released = releaseFinished(work, orders, heldRows, atMs);
+    // Rows transferred this pass are no longer held; judging them for release would only
+    // log a spurious "absent" warning about work that now sits under its order or job.
+    const released = releaseFinished(
+      work,
+      orders,
+      heldRows.filter((w) => !pool.taken.has(w.objId)),
+      atMs,
+    );
 
     deps.logger.info(
       {
@@ -1225,7 +1267,12 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
   }
 
   /** An open purchase order nobody recorded: recovered like an assigned job would be. */
-  function recoverOrder(order: PurchaseOrder, claim: ClaimOnWorkKey | null, atMs: number): void {
+  function recoverOrder(
+    order: PurchaseOrder,
+    claim: ClaimOnWorkKey | null,
+    atMs: number,
+    pool: KeylessPool,
+  ): void {
     recover(
       {
         objId: order.poObjId,
@@ -1245,6 +1292,58 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         identity: order.identity,
       },
       atMs,
+      pool,
+    );
+  }
+
+  /**
+   * Move a keyless claim's hold onto the row just created for the same work (2026-09-22).
+   *
+   * A won offer without a job reference is held under the offer's id with no key. When its
+   * purchase order or assigned job appears — each with an id of its own, and a key — nothing
+   * can tie the two, so the recovery held the work a second time and both rows then stayed
+   * held until a day past the deadline. The tie is the one `legacyClaimEffortNear` already
+   * uses: equal effort and a deadline within {@link SAME_DEADLINE_WINDOW_MS}. Deterministic —
+   * nearest deadline, then oldest hold, then id — and one-to-one within a pass.
+   *
+   * Called inside the transaction that made the new row, so a failure rolls back both.
+   */
+  function transferKeyless(
+    pool: KeylessPool,
+    toObjId: string,
+    effortWords: number | null,
+    deadlineMs: number | null,
+    atMs: number,
+  ): void {
+    if (effortWords === null || deadlineMs === null) return;
+    const from = pool.rows
+      .filter(
+        (w) =>
+          !pool.taken.has(w.objId) &&
+          w.objId !== toObjId &&
+          w.effortWords === effortWords &&
+          w.deadlineMs !== null &&
+          Math.abs(w.deadlineMs - deadlineMs) <= SAME_DEADLINE_WINDOW_MS,
+      )
+      .sort(
+        (a, b) =>
+          Math.abs((a.deadlineMs ?? 0) - deadlineMs) - Math.abs((b.deadlineMs ?? 0) - deadlineMs) ||
+          a.heldSinceMs - b.heldSinceMs ||
+          (a.objId < b.objId ? -1 : a.objId > b.objId ? 1 : 0),
+      )[0];
+    if (from === undefined) return;
+    deps.ledger.release(from.objId, atMs);
+    pool.taken.add(from.objId);
+    deps.logger.info(
+      {
+        module: 'reconcile',
+        action: 'transfer',
+        outcome: 'ok',
+        from: from.objId,
+        to: toObjId,
+        effortWords,
+      },
+      "moved a keyless claim's hold onto its purchase order / assigned job, so the work is counted once",
     );
   }
 
@@ -1253,7 +1352,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    * claims won before, silently — they were announced when won. Weighed at the largest effort
    * any keyless claim for that deadline had, so the day is not under-counted.
    */
-  function adopt(order: PurchaseOrder, atMs: number): void {
+  function adopt(order: PurchaseOrder, atMs: number, pool: KeylessPool): void {
     // Near the same deadline first; failing that, anything keyless due within the same half
     // day either side — the adoption runs once, and zero is the one answer that under-counts.
     const effort =
@@ -1261,16 +1360,19 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         ? null
         : (deps.store.legacyClaimEffortNear(order.deadlineMs, SAME_DEADLINE_WINDOW_MS) ??
           deps.store.legacyClaimEffortNear(order.deadlineMs, ADOPTION_FALLBACK_WINDOW_MS));
-    deps.ledger.hold(
-      {
-        objId: order.poObjId,
-        effortWords: effort ?? 0,
-        deadlineMs: order.deadlineMs,
-        kind: kindOf(order.languageDirection, order.identity),
-        identity: order.identity,
-      },
-      atMs,
-    );
+    deps.store.transaction(() => {
+      deps.ledger.hold(
+        {
+          objId: order.poObjId,
+          effortWords: effort ?? 0,
+          deadlineMs: order.deadlineMs,
+          kind: kindOf(order.languageDirection, order.identity),
+          identity: order.identity,
+        },
+        atMs,
+      );
+      transferKeyless(pool, order.poObjId, effort, order.deadlineMs, atMs);
+    });
     deps.logger.warn(
       {
         module: 'reconcile',
@@ -1291,7 +1393,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    * **one transaction**, so a destination that cannot be queued takes the whole recovery
    * with it rather than leaving held work nobody was told about (FR-016).
    */
-  function recover(item: AssignedWork, atMs: number): void {
+  function recover(item: AssignedWork, atMs: number, pool: KeylessPool): void {
     deps.store.transaction(() => {
       deps.store.recordEvent({
         objId: item.objId,
@@ -1323,6 +1425,8 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
             atMs,
           )
         : null;
+      // Same transaction as the hold, so the work is never counted twice nor not at all.
+      transferKeyless(pool, item.objId, item.effortWords, item.deadlineMs, atMs);
 
       const detail = describeRecovery(item, hold);
 

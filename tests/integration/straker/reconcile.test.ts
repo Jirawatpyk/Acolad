@@ -168,6 +168,7 @@ function fixture(opts: FixtureOptions = {}): Fixture {
       store.legacyClaimEffortNear(deadlineMs, windowMs),
     metaFlagSetAt: (key: string) => store.metaFlagSetAt(key),
     setMetaFlag: (key: string, atMs: number) => store.setMetaFlag(key, atMs),
+    claimedObjIds: () => store.claimedObjIds(),
   };
 
   const tracingOutbox = {
@@ -2180,5 +2181,155 @@ describe('the pass line counts what the pass did (observability, 2026-09-22)', (
     await f.reconciler.runIfDue();
 
     expect(passLine(f)).toMatchObject({ orders: 1, settled: 0, adopted: 1, effortUpgraded: 0 });
+  });
+});
+
+describe('a keyless win is held once, not twice, when its order or job appears (2026-09-22)', () => {
+  /** A claim the poll cycle won from an offer that carried no job reference: no work key. */
+  function holdKeylessWin(f: Fixture, effortWords = 100): void {
+    f.store.recordEvent({
+      objId: 'offer-k',
+      eventType: 'claim',
+      outcome: 'won',
+      effortWords,
+      deadlineMs: DEADLINE_MS,
+      occurredAtMs: NOW_MS - 60_000,
+    });
+    f.store.hold({
+      objId: 'offer-k',
+      effortWords,
+      kind: 'translation',
+      deadlineMs: DEADLINE_MS,
+      heldSinceMs: NOW_MS - 60_000,
+    });
+  }
+  const sum = (f: Fixture): number => f.store.heldWork().reduce((n, w) => n + w.effortWords, 0);
+
+  it('transfers the hold to the recovered purchase order: one row, the same effort', async () => {
+    const f = fixture();
+    adopted(f);
+    holdKeylessWin(f);
+    f.setPurchaseOrders([purchaseOrder('po-1', { deadlineMs: DEADLINE_MS + 30_000 })]);
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['po-1']);
+    expect(sum(f)).toBe(100);
+    expect(
+      f.logs.some(
+        (l) =>
+          l.fields['action'] === 'transfer' &&
+          l.fields['from'] === 'offer-k' &&
+          l.fields['to'] === 'po-1',
+      ),
+    ).toBe(true);
+  });
+
+  it('transfers on the one-time adoption too', async () => {
+    const f = fixture();
+    holdKeylessWin(f);
+    f.setPurchaseOrders([purchaseOrder('po-1')]);
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['po-1']);
+    expect(sum(f)).toBe(100);
+  });
+
+  it('transfers to a recovered assigned job whose words match', async () => {
+    const f = fixture();
+    adopted(f);
+    holdKeylessWin(f);
+    f.setAssigned([assignedWork('job-1', { identity: IDENTITY })]);
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['job-1']);
+    expect(sum(f)).toBe(100);
+  });
+
+  it('does not transfer when the deadline is more than a minute away', async () => {
+    const f = fixture();
+    adopted(f);
+    holdKeylessWin(f);
+    f.setAssigned([
+      assignedWork('job-1', { identity: IDENTITY, deadlineMs: DEADLINE_MS + 61_000 }),
+    ]);
+
+    await f.reconciler.runIfDue();
+
+    expect(
+      f.store
+        .heldWork()
+        .map((w) => w.objId)
+        .sort(),
+    ).toEqual(['job-1', 'offer-k']);
+  });
+
+  it('transfers one-to-one: two orders cannot both take the same keyless row', async () => {
+    const f = fixture();
+    adopted(f);
+    holdKeylessWin(f);
+    const other = {
+      jobRef: 'aj-2',
+      title: null,
+      service: 'translation',
+      workKey: 'aj-2|ms-my|translation',
+    };
+    f.setAssigned([
+      assignedWork('job-1', { identity: IDENTITY }),
+      assignedWork('job-2', { identity: other }),
+    ]);
+
+    await f.reconciler.runIfDue();
+
+    expect(
+      f.store
+        .heldWork()
+        .map((w) => w.objId)
+        .sort(),
+    ).toEqual(['job-1', 'job-2']);
+    expect(sum(f)).toBe(200);
+  });
+});
+
+describe('until a first pass succeeds, reconciliation retries every minute (2026-09-22)', () => {
+  it('runs again one minute after a failed first pass, then keeps the fifteen-minute cadence', async () => {
+    let down = true;
+    const f = fixture({ poReadFails: () => (down ? new Error('portal down') : null) });
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: false });
+    f.setNow(NOW_MS + 30_000);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: false, reason: 'not_due' });
+    f.setNow(NOW_MS + 60_000);
+    down = false;
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true });
+
+    // Once one has succeeded, a failure is retried on the ordinary cadence again.
+    down = true;
+    f.setNow(NOW_MS + 60_000 + RECONCILE_INTERVAL_MS);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: false });
+    f.setNow(NOW_MS + 2 * 60_000 + RECONCILE_INTERVAL_MS);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: false, reason: 'not_due' });
+  });
+
+  it('does not count a pass shed to protect the budget as the first success', async () => {
+    let shed = true;
+    const f = fixture({
+      readFails: () =>
+        shed
+          ? new StrakerBudgetSuspendedError(
+              '/api/vendors/v/assigned-jobs',
+              'budget_low',
+              5,
+              'suspended',
+            )
+          : null,
+    });
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: false, shed: true });
+    shed = false;
+    f.setNow(NOW_MS + 60_000);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ ran: true, ok: true });
   });
 });
