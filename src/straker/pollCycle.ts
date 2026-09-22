@@ -70,6 +70,12 @@ export interface StrakerPollCycleDeps {
   readonly settings: ClaimDecisionSettings;
   readonly extractOffers: OfferExtractor;
   readonly now?: () => number;
+  /**
+   * Whether claims may be dispatched yet. The composition root answers "has a reconciliation
+   * pass succeeded since start" (2026-09-22); until then `claim` decisions are withheld —
+   * not recorded, not skipped, simply left for a later cycle. Absent means always.
+   */
+  readonly claimsPermitted?: () => boolean;
 }
 
 /** What one claim attempt produced, carried from `act` to `persist` without touching disk. */
@@ -326,8 +332,17 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       // see `StrakerStore.clearBar` for why no observable signal is safe to clear it on.
       let stopClaiming: ClaimFollowUp | null =
         deps.store.barredSinceMs() === null ? null : 'stop_claiming';
+      // Read once per cycle. Withheld decisions are not `halted` (no skip row, no reason) and
+      // not attempted (not added to `attemptedThisProcess`), so a later cycle can still claim
+      // them if they are still listed once reconciliation has succeeded.
+      const permitted = deps.claimsPermitted?.() ?? true;
+      let withheld = 0;
       for (const decision of decisions) {
         if (decision.action !== 'claim') continue;
+        if (!permitted) {
+          withheld += 1;
+          continue;
+        }
         if (stopClaiming !== null) {
           halted.push(decision);
           continue;
@@ -379,6 +394,14 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
         }
         if (attempt.followUp !== 'none') stopClaiming = attempt.followUp;
         if (attempt.followUp === 're_authenticate') session = null;
+      }
+      if (withheld > 0) {
+        deps.logger.warn(
+          { module: 'pollCycle', action: 'claim', outcome: 'held_until_reconciled', withheld },
+          'claiming is paused until reconciliation succeeds — no claim is sent before the held ' +
+            'list has been checked against the portal since start (a restart must not re-claim ' +
+            'work it already won); `reconcile_failing` alerts if the pass keeps failing',
+        );
       }
       if (stopClaiming !== null) {
         // Once for the cycle, not once per offer — which is the whole point of halting.

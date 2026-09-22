@@ -523,6 +523,22 @@ export function assembleStrakerBot(
     now,
   });
 
+  /**
+   * Whether one reconciliation pass has completed successfully since this process started.
+   * No claim is dispatched until it has (2026-09-22): the restart guard reads held work, and
+   * held work after a crash is only as good as the first pass. A shed pass (budget suspended)
+   * or a failed one does not count — `ok` is false on both. A reconciler that keeps failing
+   * raises `reconcile_failing` after three passes, which is what names this pause.
+   */
+  let reconciledOk = false;
+  const gatedReconciler = {
+    async runIfDue() {
+      const outcome = await reconciler.runIfDue();
+      if (outcome.ran && outcome.ok) reconciledOk = true;
+      return outcome;
+    },
+  };
+
   const cycle = createStrakerPollCycle({
     portal,
     // Resumed from the store, not started empty. The tracker's sighting count is what keys
@@ -569,10 +585,19 @@ export function assembleStrakerBot(
       },
     }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
+    claimsPermitted: () => reconciledOk,
   });
 
   return {
-    cycle: withDelivery({ cycle, dispatcher, reconciler, outbox, logger, now }),
+    cycle: withDelivery({
+      cycle,
+      dispatcher,
+      reconciler: gatedReconciler,
+      reconciledOk: () => reconciledOk,
+      outbox,
+      logger,
+      now,
+    }),
     store,
     outbox,
     quarantinedCopyPath: opened.recoveredFromCorruption ? opened.corruptCopyPath : null,
@@ -604,26 +629,27 @@ function withDelivery(deps: {
     flush(nowMs: number): Promise<{ sent: number; failed: number; dead: number; dropped: number }>;
   };
   readonly reconciler: { runIfDue(): Promise<unknown> };
+  /** Whether a reconciliation pass has completed successfully since the process started. */
+  readonly reconciledOk: () => boolean;
   /** Read only, and only for the dead backlog — the dispatcher owns every write. */
   readonly outbox: Pick<StrakerOutbox, 'countByStatus'>;
   readonly logger: Logger;
   readonly now: () => number;
 }): StrakerCycle {
-  // Whether the start-up reconciliation has been attempted. Until it has, it goes FIRST.
-  let reconciledOnStart = false;
   return {
     async runOnce(): Promise<boolean> {
-      // On start, reconciliation runs BEFORE the first poll cycle (2026-09-22). A process
-      // killed after its claim reached the portal but before the claim was recorded comes
-      // back with no claim row and no in-memory guard; if the offer is still listed, a cycle
-      // that ran first would send a second /accept for work the team already holds —
+      // Until a pass has succeeded, reconciliation runs BEFORE the poll cycle (2026-09-22). A
+      // process killed after its claim reached the portal but before the claim was recorded
+      // comes back with no claim row and no in-memory guard; if the offer is still listed, a
+      // cycle that ran first would send a second /accept for work the team already holds —
       // FR-019c's retry, by way of a restart. Reconciling first puts that work in the held
-      // list under its work key, and the cycle will not claim held work again.
+      // list under its work key, and the cycle will not claim held work again; and the cycle
+      // claims nothing at all until a pass has succeeded (`claimsPermitted`).
       //
-      // Only the first turn. After that the pass keeps its place behind the cycle, where its
-      // two reads do not add to the latency of the claim that races (FR-003).
-      if (!reconciledOnStart) {
-        reconciledOnStart = true;
+      // Before the cycle so the turn a pass first succeeds is also the turn claiming resumes.
+      // Once one has, the pass keeps its place behind the cycle, where its two reads do not
+      // add to the latency of the claim that races (FR-003). Not due = one clock read.
+      if (!deps.reconciledOk()) {
         await reportAsync(async () => {
           await deps.reconciler.runIfDue();
         });

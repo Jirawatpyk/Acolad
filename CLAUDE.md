@@ -375,7 +375,11 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
 - **ตอน start บอท reconcile ก่อน poll รอบแรก** (2026-09-22) และ poll cycle **ไม่กด offer ที่
   workKey ตรงกับงานที่ถืออยู่แล้ว** (log info `module:pollCycle action:decide outcome:already_held`
   ครั้งเดียวต่อ offer). กันเคส PM2 ฆ่า process หลัง POST `/accept` ถึงพอร์ทัลแต่ยังไม่ได้บันทึก →
-  restart แล้วกดซ้ำ. workKey ถูก normalise (NFKC, ตัด zero-width, `_`→`-` เฉพาะรหัสภาษา) —
+  restart แล้วกดซ้ำ. **หลัง start บอทไม่กด claim เลยจนกว่า reconcile จะสำเร็จ 1 รอบ** (ok:true —
+  รอบที่ถูก shed/ล้มไม่นับ) ระหว่างนั้นยังอ่าน/บันทึก/แจ้งเตือนปกติ, log warn `module:pollCycle
+  action:claim outcome:held_until_reconciled withheld:N` ทุกรอบ, ไม่เขียนเป็น skip — offer ที่ยังเปิด
+  อยู่จะถูกกดในรอบหลัง reconcile สำเร็จ. ถ้า PO endpoint ล่มนาน = ไม่กดงานเลย (heartbeat ยังเขียว)
+  → alert `reconcile_failing` (ล้ม 3 รอบติด ≈ 45 นาที) คือสัญญาณ. workKey ถูก normalise (NFKC, ตัด zero-width, `_`→`-` เฉพาะรหัสภาษา) —
   **ค่า key เก่าใน DB ไม่ได้ถูกเขียนใหม่** — ถ้า key เก่ามี `_`/ตัวพิมพ์เต็มความกว้าง/อักขระล่องหน
   จะไม่ตรงกับ key ใหม่ (ผลตก "ฝั่งถือไว้นานขึ้น" ใน reconcile แต่ guard กันกดซ้ำจะมองไม่เห็น) —
   เช็กด้วย `SELECT work_key FROM held_work WHERE released_at_ms IS NULL`

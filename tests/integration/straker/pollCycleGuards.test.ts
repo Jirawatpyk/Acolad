@@ -208,6 +208,31 @@ describe('every claim attempt leaves one log line (observability, 2026-09-22)', 
   });
 });
 
+describe('no claim before reconciliation has succeeded once (restart, FR-019c)', () => {
+  it('withholds every claim decision, logs once per cycle, and records no skip', async () => {
+    let permitted = false;
+    const h = harness({
+      offers: [raw('a'), raw('b')],
+      extract: () => [eligible('a'), eligible('b')],
+      claimsPermitted: () => permitted,
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual([]);
+    expect(h.events).toEqual([]);
+    const held = h.logs.filter((l) => l.fields['outcome'] === 'held_until_reconciled');
+    expect(held).toHaveLength(1);
+    expect(held[0]?.fields).toMatchObject({ module: 'pollCycle', action: 'claim', withheld: 2 });
+
+    // Not remembered as attempted: once reconciliation succeeds, the next cycle claims them.
+    permitted = true;
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['a', 'b']);
+  });
+});
+
 describe('the record of an irreversible claim survives whatever else fails', () => {
   it('commits each claim separately, so one rejected write cannot lose the others', async () => {
     // The portal has already committed both. Writing them in one transaction means a single

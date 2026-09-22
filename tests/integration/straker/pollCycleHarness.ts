@@ -40,6 +40,8 @@ export interface HarnessOptions {
   /** An advancing clock, for the rules that are about time rather than about sequence —
    *  the sign-in backoff cannot be exercised at all against a frozen one. */
   readonly now?: () => number;
+  /** Whether reconciliation has succeeded yet — claims are withheld until it has. */
+  readonly claimsPermitted?: () => boolean;
 }
 
 export interface Harness {
@@ -225,6 +227,7 @@ export function harness(opts: HarnessOptions): Harness {
     },
     extractOffers: opts.extract ?? (() => []),
     now: opts.now ?? (() => Date.parse('2026-09-16T10:00:00+07:00')),
+    ...(opts.claimsPermitted === undefined ? {} : { claimsPermitted: opts.claimsPermitted }),
   });
 
   return { cycle, trace, claimed, events, holds, queued, logs };

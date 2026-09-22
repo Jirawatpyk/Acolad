@@ -69,6 +69,7 @@ interface FakeStraker {
   offers: Handler;
   claim: ClaimHandler;
   assigned: Handler;
+  orders: Handler;
   readonly calls: Exchange[];
   readonly fetch: typeof fetch;
 }
@@ -129,6 +130,7 @@ function fakeStraker(): FakeStraker {
     offers: (async () => json([])) as Handler,
     claim: (async () => json({})) as ClaimHandler,
     assigned: (async () => json(envelope([]))) as Handler,
+    orders: (async () => json(envelope([]))) as Handler,
   };
 
   const impl: typeof fetch = async (input, init) => {
@@ -154,7 +156,7 @@ function fakeStraker(): FakeStraker {
       return handlers.assigned(exchange);
     }
     // Reconciliation also reads where won work waits for a person (2026-09-22).
-    if (exchange.path === '/api/hitl/vendor/purchase-orders') return json(envelope([]));
+    if (exchange.path === '/api/hitl/vendor/purchase-orders') return handlers.orders(exchange);
     throw new Error(
       `STUB: nothing routes ${exchange.method} ${exchange.path} — the bot asked for something ` +
         'this suite did not expect, which is itself the finding',
@@ -982,6 +984,45 @@ describe('failure mode: a reporting destination is unavailable', () => {
 // ===========================================================================
 // Restart mid-cycle
 // ===========================================================================
+
+describe('failure mode: reconciliation cannot complete on start', () => {
+  /**
+   * The restart guard reads held work, and held work after a crash is only as good as the
+   * first reconciliation. If that pass fails — the purchase-order endpoint down, say — a
+   * claim whose record died with the previous process is invisible, and a still-listed offer
+   * would be claimed a second time. So nothing is claimed until one pass has succeeded.
+   */
+  it('claims nothing until a pass succeeds, then claims on the next cycle', async () => {
+    const offer = offerFixture('aj-265:ms-my');
+    const portal = fakeStraker();
+    portal.offers = async () => json([offer]);
+    let ordersDown = true;
+    portal.orders = async () => (ordersDown ? json({ error: 'down' }, 503) : json(envelope([])));
+    const bot = assemble(portal);
+
+    // The heartbeat stays as it was: reconciliation failing is FR-016c's alert to raise
+    // (three in a row), not the liveness signal's — the bot is still reading and recording.
+    await bot.assembly.cycle.runOnce();
+    clock += 10_000;
+    await bot.assembly.cycle.runOnce();
+
+    // Read and recorded, never claimed — and no skip row, because nothing was decided against it.
+    expect(callsTo(portal, 'offers').length).toBeGreaterThan(0);
+    expect(callsTo(portal, 'claim')).toEqual([]);
+    expect(bot.assembly.store.sightingsOf(offer.obj_id)).toHaveLength(1);
+    expect(bot.assembly.store.eventsOf(offer.obj_id)).toEqual([]);
+
+    // The portal recovers; the next pass is due fifteen minutes after the failed one.
+    ordersDown = false;
+    clock = NOW + 15 * 60_000;
+    await bot.assembly.cycle.runOnce();
+
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
+    expect(bot.assembly.store.eventsOf(offer.obj_id)).toContainEqual(
+      expect.objectContaining({ eventType: 'claim', outcome: 'won' }),
+    );
+  });
+});
 
 describe('failure mode: the process dies between claiming and recording', () => {
   /**
