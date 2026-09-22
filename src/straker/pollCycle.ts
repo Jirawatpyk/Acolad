@@ -23,7 +23,7 @@
 
 import { workLabels } from './workKey.js';
 import type { Logger } from '../monitoring/logger.js';
-import { classifyClaim } from './claimOutcome.js';
+import { classifyClaim, type ClaimResponse } from './claimOutcome.js';
 import { claimOffer, type ClaimFollowUp } from './claim.js';
 import {
   decideClaims,
@@ -336,15 +336,17 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
         // is the case where the durable record does not happen, so it cannot itself depend
         // on anything that might not happen.
         attemptedThisProcess.add(decision.objId);
+        // Wall-clock elapsed, not the injected clock: the injected one is the cycle's notion
+        // of "now" and tests freeze it, while this measures how long the portal took.
+        const startedAt = performance.now();
         const attempt = await claimOffer(deps.portal.client, {
           vendorId,
           offerId: decision.objId,
         });
-        acted.push({
-          decision,
-          outcome: classifyClaim(attempt.response),
-          detail: attempt.detail,
-        });
+        const latencyMs = Math.round(performance.now() - startedAt);
+        const outcome = classifyClaim(attempt.response);
+        acted.push({ decision, outcome, detail: attempt.detail });
+        logClaimAttempt(deps, decision, outcome, attempt.response, latencyMs);
         // Both follow-ups stop the rest of the cycle, for different reasons.
         //
         // A barred account must never be retried around as though it were transient
@@ -593,6 +595,36 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       return unrecordedClaims === 0 && !observationsUnrecorded;
     },
   };
+}
+
+/**
+ * One line per claim attempt (2026-09-22): outcome, offer, work key, the portal's status
+ * where it gave one, and how long it took. Written after the attempt resolves and before
+ * the next one starts — a log call, not a durable write, so FR-003's ordering holds.
+ */
+function logClaimAttempt(
+  deps: StrakerPollCycleDeps,
+  decision: Extract<ClaimDecision, { action: 'claim' }>,
+  outcome: ReturnType<typeof classifyClaim>,
+  response: ClaimResponse,
+  latencyMs: number,
+): void {
+  const status =
+    response.kind === 'rejected' ? /^http_(\d{3})$/.exec(response.signal.trim()) : null;
+  const fields = {
+    module: 'pollCycle',
+    action: 'claim',
+    outcome,
+    objId: decision.objId,
+    workKey: decision.identity?.workKey ?? null,
+    ...(status === null ? {} : { status: Number(status[1]) }),
+    latencyMs,
+  };
+  if (outcome === 'won' || outcome === 'lost') {
+    deps.logger.info(fields, `claim ${outcome}`);
+  } else {
+    deps.logger.warn(fields, `claim ${outcome}`);
+  }
 }
 
 /**

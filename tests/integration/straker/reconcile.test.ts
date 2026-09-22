@@ -2086,3 +2086,67 @@ describe('review fixes — the paths the first cut missed (2026-09-22)', () => {
     ]);
   });
 });
+
+describe('the pass line counts what the pass did (observability, 2026-09-22)', () => {
+  function passLine(f: Fixture): Record<string, unknown> | undefined {
+    return f.logs.find((l) => l.fields['module'] === 'reconcile' && l.fields['action'] === 'pass')
+      ?.fields;
+  }
+
+  it('counts orders read, settlements and effort upgrades', async () => {
+    const f = fixture();
+    adopted(f);
+    // An unknown claim that its purchase order settles.
+    f.store.recordEvent({
+      objId: 'offer-1',
+      eventType: 'claim',
+      outcome: 'unknown',
+      effortWords: 20,
+      deadlineMs: DEADLINE_MS,
+      occurredAtMs: NOW_MS - 60_000,
+      identity: IDENTITY,
+    });
+    // Held work weighed at zero that its assigned job re-weighs.
+    const otherKey = 'aj-2|ms-my|translation';
+    const other = { jobRef: 'aj-2', title: null, service: 'translation', workKey: otherKey };
+    f.store.hold({
+      objId: 'po-2',
+      effortWords: 0,
+      kind: 'translation',
+      deadlineMs: DEADLINE_MS,
+      heldSinceMs: NOW_MS - 60_000,
+      identity: other,
+    });
+    f.setPurchaseOrders([
+      purchaseOrder('po-1'),
+      purchaseOrder('po-2', { status: 'accepted', identity: other }),
+    ]);
+    f.setAssigned([assignedWork('job-2', { effortWords: 500, identity: other })]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(passLine(f)).toMatchObject({
+      outcome: 'ok',
+      orders: 2,
+      settled: 1,
+      adopted: 0,
+      effortUpgraded: 1,
+    });
+    expect(outcome).toMatchObject({
+      ran: true,
+      ok: true,
+      settled: 1,
+      adopted: 0,
+      effortUpgraded: 1,
+    });
+  });
+
+  it('counts adoptions on the one-time adoption pass', async () => {
+    const f = fixture();
+    f.setPurchaseOrders([purchaseOrder('po-1')]);
+
+    await f.reconciler.runIfDue();
+
+    expect(passLine(f)).toMatchObject({ orders: 1, settled: 0, adopted: 1, effortUpgraded: 0 });
+  });
+});

@@ -613,6 +613,12 @@ export type ReconcileOutcome =
        * **positively reported as finished**. Never work the read merely omitted.
        */
       readonly released: readonly string[];
+      /** Unknown claims this pass settled as won from their purchase order or assigned job. */
+      readonly settled: number;
+      /** Purchase orders held by the one-time adoption of pre-identity work. */
+      readonly adopted: number;
+      /** Held rows re-weighed upward at the word count their assigned job reports. */
+      readonly effortUpgraded: number;
       readonly consecutiveFailures: 0;
     }
   | {
@@ -748,9 +754,14 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
 
     const recovered: string[] = [];
     let firstFailure: unknown = null;
+    // What the pass did, for its one summary line (observability, 2026-09-22).
+    const counts = { settled: 0, adopted: 0, effortUpgraded: 0 };
     const attempt = (objId: string, action: string, fn: () => void): void => {
       try {
         fn();
+        if (action === 'settle') counts.settled += 1;
+        else if (action === 'adopt') counts.adopted += 1;
+        else if (action === 'effort_upgrade') counts.effortUpgraded += 1;
       } catch (err) {
         // Rolled back whole — held work nobody was told about is the state FR-016 exists to
         // make impossible — so the next pass meets this row again. Loud, per item.
@@ -888,8 +899,10 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         action: 'pass',
         outcome: 'ok',
         assigned: outstanding.length,
+        orders: orders.length,
         recovered: recovered.length,
         released: released.length,
+        ...counts,
       },
       'reconciled the portal assigned list against our record',
     );
@@ -899,6 +912,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       assigned: outstanding.length,
       recovered,
       released,
+      ...counts,
       consecutiveFailures: 0,
     };
   }

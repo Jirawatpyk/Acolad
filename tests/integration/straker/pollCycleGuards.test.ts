@@ -150,6 +150,64 @@ describe('an offer whose work the team already holds is never claimed again (res
   });
 });
 
+describe('every claim attempt leaves one log line (observability, 2026-09-22)', () => {
+  // The cycle line only counted wins. A lost race, a refusal and a reply that never came
+  // left nothing an operator could grep for per offer — and the latency, which decides the
+  // race, was not recorded at all.
+  it('logs outcome, identity, work key, status and latency for each attempt', async () => {
+    const key = (id: string) => ({
+      jobRef: id,
+      title: null,
+      service: 'translation',
+      workKey: `${id}|ms-my|translation`,
+    });
+    const h = harness({
+      offers: [raw('a'), raw('b'), raw('c'), raw('d')],
+      extract: () => ['a', 'b', 'c', 'd'].map((id) => ({ ...eligible(id), identity: key(id) })),
+      claim: (id) =>
+        id === 'b'
+          ? { status: 409 }
+          : id === 'c'
+            ? 'no_answer'
+            : id === 'd'
+              ? { status: 404 }
+              : 'accepted',
+    });
+
+    await h.cycle.runOnce();
+
+    const lines = h.logs.filter(
+      (l) => l.fields['module'] === 'pollCycle' && l.fields['action'] === 'claim',
+    );
+    expect(lines.map((l) => [l.fields['objId'], l.fields['outcome']])).toEqual([
+      ['a', 'won'],
+      ['b', 'lost'],
+      ['c', 'unknown'],
+      ['d', 'failed'],
+    ]);
+    for (const l of lines) {
+      expect(l.fields['workKey']).toBe(`${String(l.fields['objId'])}|ms-my|translation`);
+      expect(typeof l.fields['latencyMs']).toBe('number');
+      expect(l.fields['latencyMs']).toBeGreaterThanOrEqual(0);
+    }
+    expect(lines[1]?.fields['status']).toBe(409);
+    expect(lines[3]?.fields['status']).toBe(404);
+    expect(lines[0]?.fields).not.toHaveProperty('status');
+    expect(lines[2]?.fields).not.toHaveProperty('status');
+    // Failures are warnings, a win or a lost race is information.
+    expect(lines.map((l) => l.level)).toEqual(['info', 'info', 'warn', 'warn']);
+  });
+
+  it('logs a null work key rather than leaving the field out', async () => {
+    const h = harness({ offers: [raw('a')], extract: () => [eligible('a')] });
+
+    await h.cycle.runOnce();
+
+    const line = h.logs.find((l) => l.fields['action'] === 'claim');
+    expect(line?.fields['workKey']).toBeNull();
+  });
+});
+
 describe('the record of an irreversible claim survives whatever else fails', () => {
   it('commits each claim separately, so one rejected write cannot lose the others', async () => {
     // The portal has already committed both. Writing them in one transaction means a single
