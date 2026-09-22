@@ -782,11 +782,19 @@ export function createHttpClient(options: HttpClientOptions): StrakerPacedHttpCl
   const getInit: RequestInit = { method: 'GET' };
   // `undefined` means "no body": the claim is sent exactly as the portal's web app sends it —
   // no payload and no JSON content type (2026-09-18). Every other POST carries its JSON.
+  //
+  // `redirect: 'manual'` on every POST (2026-09-22). Followed, fetch turns a 301/302/303 on a
+  // POST into a GET of the new location — a login page, most likely — and the claim or the
+  // sign-in reads that page back as its answer. Node's fetch hands the 3xx itself back under
+  // 'manual' (`ok` false), so it becomes a StrakerHttpError like any refusal: determinate
+  // (`isIndeterminateStatus` is false for 3xx) and, being a POST, never retried. GETs keep
+  // following redirects — a moved read is harmless and still fails loud if it is not JSON.
   const postInit = (body: unknown): RequestInit =>
     body === undefined
-      ? { method: 'POST' }
+      ? { method: 'POST', redirect: 'manual' }
       : {
           method: 'POST',
+          redirect: 'manual',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
         };

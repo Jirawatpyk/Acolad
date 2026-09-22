@@ -68,6 +68,14 @@ describe('the confirmed lost-race signal list (RP-4)', () => {
     expect(classifyClaim(rejected('http_409'))).toBe('lost');
   });
 
+  it('classifies a 429 as a fault that alerts — never as a lost race', () => {
+    // A rate-limit refusal means the claim was never considered, not that another vendor
+    // took the offer. Reading it as `lost` would silence the alert on the one refusal that
+    // says the bot is crowding its allowance (SC-003).
+    expect(classifyClaim(rejected('http_429'))).toBe('failed');
+    expect(alertsOn(classifyClaim(rejected('http_429')))).toBe(true);
+  });
+
   it('still classifies every other rejection as a fault', () => {
     expect(classifyClaim(rejected('http_404'))).toBe('failed');
     expect(classifyClaim(rejected('http_400'))).toBe('failed');

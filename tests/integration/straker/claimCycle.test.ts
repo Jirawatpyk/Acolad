@@ -581,6 +581,41 @@ describe('claim.ts — a barred account is not an expired session (contract §4a
     }
   });
 
+  it('reads a claim answered 429 as a failure that alerts, not a lost race — and sends it once', async () => {
+    const fetchImpl = alwaysFailing(429);
+    const { client, waits } = harness(fetchImpl);
+
+    const attempt = await claimOffer(client, TARGET);
+
+    expect(attempt.response).toEqual({ kind: 'rejected', signal: 'http_429' });
+    expect(classifyClaim(attempt.response)).toBe('failed');
+    expect(alertsOn(classifyClaim(attempt.response))).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+  });
+
+  it('reads a redirected claim as a failure and a lost session — one request, never followed', async () => {
+    // A 3xx on the accept POST is most likely a bounce to a login page. Followed, fetch would
+    // turn it into a GET of that page and hand back HTML; with `redirect: 'manual'` on POSTs
+    // it is a determinate refusal instead. The claim is still `failed` (and alerts) — a
+    // redirect is not the portal saying "taken" — and it is never retried.
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(() =>
+        Promise.resolve(new Response(null, { status: 302, headers: { location: '/login' } })),
+      );
+    const { client, waits } = harness(fetchImpl);
+
+    const attempt = await claimOffer(client, TARGET);
+
+    expect(classifyClaim(attempt.response)).toBe('failed');
+    expect(alertsOn(classifyClaim(attempt.response))).toBe(true);
+    expect(attempt.followUp).toBe('re_authenticate');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(methodsUsed(fetchImpl)).toEqual(['POST']);
+    expect(waits).toEqual([]);
+  });
+
   it('never re-authenticates its way into a second claim', async () => {
     // The follow-up is advice to the ORCHESTRATOR, not an action this module takes. A module
     // that signed in and claimed again would satisfy every "is it a 401" assertion above

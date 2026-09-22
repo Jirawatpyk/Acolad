@@ -880,6 +880,9 @@ describe('a refused sign-in backs off instead of hammering the portal (T075)', (
   it.each([
     ['a 5xx', () => new StrakerHttpError(503, '/api/vendor/auth/login', 'unavailable')],
     ['a 405', () => new StrakerHttpError(405, '/api/vendor/auth/login', '<html>')],
+    // A POST is no longer followed through a redirect (2026-09-22), so a login that bounces
+    // arrives as a 3xx — which says nothing about the password either.
+    ['a 302 redirect', () => new StrakerHttpError(302, '/api/vendor/auth/login', '')],
     ['an HTML body', () => new SyntaxError('Unexpected token < in JSON at position 0')],
   ])('treats %s at sign-in as a transport failure, named as such', async (_label, fail) => {
     const clock = ticking();
