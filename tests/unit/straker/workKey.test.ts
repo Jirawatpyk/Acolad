@@ -66,9 +66,7 @@ describe('workKey normalisation (2026-09-22)', () => {
   });
 
   it('strips format characters and folds width in the job ref and service, keeping underscores', () => {
-    expect(workKey(' AJ-310​', 'en-us', 'ms-my', 'DTP_Prep‍')).toBe(
-      'aj-310|ms-my|dtp_prep',
-    );
+    expect(workKey(' AJ-310​', 'en-us', 'ms-my', 'DTP_Prep‍')).toBe('aj-310|ms-my|dtp_prep');
     expect(workKey('ＡＪ-310', 'en-us', 'ms-my', 'translation')).toBe('aj-310|ms-my|translation');
   });
 
