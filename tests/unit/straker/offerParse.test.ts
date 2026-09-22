@@ -133,6 +133,12 @@ describe('parseOffer — the golden cases, read off disk', () => {
       // 2026-09-15T23:20:00 read as UTC. Asserted as an absolute instant with an
       // explicit Z, so this line stays true whatever zone the test host runs in.
       deadlineMs: Date.parse('2026-09-15T23:20:00Z'),
+      identity: {
+        jobRef: 'aj-265',
+        title: 'REQ34204, Supreme_STRAKER.xlsx',
+        service: 'translation',
+        workKey: 'aj-265|ms-my|translation',
+      },
     });
   });
 
@@ -146,6 +152,13 @@ describe('parseOffer — the golden cases, read off disk', () => {
       monolingual: false,
       effortWords: 2,
       deadlineMs: Date.parse('2026-09-15T23:20:00Z'),
+      // Same job_ref as the Malay half; the target language is what keeps the keys apart.
+      identity: {
+        jobRef: 'aj-265',
+        title: 'REQ34204, Supreme_STRAKER.xlsx',
+        service: 'translation',
+        workKey: 'aj-265|th|translation',
+      },
     });
   });
 
@@ -160,7 +173,23 @@ describe('parseOffer — the golden cases, read off disk', () => {
       monolingual: false,
       effortWords: 4,
       deadlineMs: Date.parse('2026-09-16T04:00:00Z'),
+      identity: {
+        jobRef: 'aj-267',
+        title: 'NBA - MISC Sept 14.xlsx',
+        service: 'translation',
+        workKey: 'aj-267|zh-tw|translation',
+      },
     });
+  });
+
+  it('never refuses an offer for a missing job reference, title or service', () => {
+    // They name the work for people and tie its stages together; none of them is a reason
+    // to claim or not. A payload without them still parses, with a null identity.
+    let offer = captured(AJ_267_ZH);
+    for (const field of ['job_ref', 'title', 'service']) offer = withField(offer, field, undefined);
+    const parsed = parseOffer(offer, options());
+    expect(parsed.eligible).toBe(true);
+    expect(parsed.identity).toEqual({ jobRef: null, title: null, service: null, workKey: null });
   });
 
   it('parses every committed payload, including any the probe adds later', () => {

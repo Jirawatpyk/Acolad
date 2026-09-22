@@ -88,6 +88,7 @@
  *    Straker's to answer, so both fail loud.
  */
 
+import { workIdentity } from './workKey.js';
 import type { Logger } from '../monitoring/logger.js';
 import type { OfferForDecision } from './claimDecision.js';
 import {
@@ -241,6 +242,15 @@ export function parseOffer(entry: unknown, options: OfferParseOptions): OfferFor
       record['due_at'],
       options.deadlineZone ?? STRAKER_DEADLINE_ZONE,
       objId,
+    ),
+    // Read, never required: they name the work for people and tie its stages together
+    // (`workKey.ts`), and none of them is a reason to claim or not.
+    identity: workIdentity(
+      record['job_ref'],
+      sourceLang,
+      monolingual ? null : record['target_lang'],
+      record['service'],
+      record['title'],
     ),
   };
 }
