@@ -2114,3 +2114,145 @@ describe('XtmPollCycle regression: EMAIL vs EMAIL_1 project collision (incident 
     },
   );
 });
+
+// --- Early warning: the holiday calendar runs out within CURATION_HORIZON_DAYS ---------------
+describe('XtmPollCycle holiday_calendar_expiring (warn before holiday_calendar_stale pages)', () => {
+  const activeKey = (key: string): number =>
+    (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key=? AND resolved_at IS NULL",
+        )
+        .get(key) as { n: number }
+    ).n;
+  const anyExpiring = (): number =>
+    (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM system_events WHERE event_type='system_alert' AND dedup_key LIKE 'holiday_calendar_expiring%'",
+        )
+        .get() as { n: number }
+    ).n;
+
+  it('raises ONE warn for the uncurated next year once it is within 60 days, without paging', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const cycle = new XtmPollCycle(db, schedCfg(), new StubAcceptor());
+    // 2027-11-15 +60 days = 2028-01-14 -> 2028 is uncurated.
+    const s1 = await cycle.run(snapAt([], '2027-11-15T10:00:00+07:00', 'c1'));
+    expect(activeKey('holiday_calendar_expiring:2028')).toBe(1);
+    expect(s1.holidayCalendarStale).toBe(false); // warn only: the heartbeat stays green
+    await cycle.run(snapAt([], '2027-11-15T10:01:00+07:00', 'c2'));
+    expect(anyExpiring()).toBe(1); // deduped across cycles: once per missing year
+  });
+
+  it('stays silent while the horizon is still inside a curated year', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    // 2027-10-15 +60 days = 2027-12-14 -> still 2027 (curated).
+    await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
+      snapAt([], '2027-10-15T10:00:00+07:00'),
+    );
+    expect(anyExpiring()).toBe(0);
+  });
+
+  it('leaves the CURRENT uncurated year to holiday_calendar_stale (no duplicate warn)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const s = await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
+      snapAt([], '2099-06-22T10:00:00+07:00'),
+    );
+    expect(s.holidayCalendarStale).toBe(true);
+    expect(anyExpiring()).toBe(0);
+  });
+
+  it('does nothing with the schedule gate off (kill-switch never resolves holidays)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    await new XtmPollCycle(db, cfg({ ACCEPT_SCHEDULE_ENABLED: false }), new StubAcceptor()).run(
+      snapAt([], '2027-11-15T10:00:00+07:00'),
+    );
+    expect(anyExpiring()).toBe(0);
+  });
+});
+
+// --- False-empty guard: an UNSETTLED grid that reads 0 rows proves nothing ----------------------
+describe('XtmPollCycle unsettled-empty snapshot (38-min missed-job class)', () => {
+  const unsettled = (cycle: string, capturedAt = NOW): XtmJobSnapshot => ({
+    jobs: [],
+    malformed: [],
+    capturedAt,
+    pollCycleId: cycle,
+    emptyListConfirmed: false,
+    unsettledEmpty: true,
+  });
+
+  it('does NOT advance missing counters or transition a present job (two unsettled empties in a row)', async () => {
+    fresh();
+    const cycle = new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), new StubAcceptor());
+    await cycle.run(snap([xraw()], 'c1')); // seen
+    const before = only();
+    const s2 = await cycle.run(unsettled('c2'));
+    const s3 = await cycle.run(unsettled('c3'));
+    const after = only();
+    expect(after.status).toBe('visible');
+    expect(after.consecutiveMisses).toBe(0);
+    expect(after.lifecycleStatus).toBe(before.lifecycleStatus);
+    expect(s2.transitionsSkipped).toBe(true);
+    expect(s3.transitionsSkipped).toBe(true);
+    expect(s3.missing).toBe(0);
+    // The skipped cycles are not "remembered" either: ONE settled empty is only a flicker.
+    await cycle.run(snap([], 'c4'));
+    expect(only().lifecycleStatus).not.toBe('missing');
+  });
+
+  it('keeps a HELD (accepted) job held: no Closed read, no Removed', async () => {
+    fresh();
+    let closedReads = 0;
+    const reader = {
+      async readClosedKeys(): Promise<Set<string>> {
+        closedReads++;
+        return new Set<string>();
+      },
+    };
+    const cycle = new XtmPollCycle(db, cfg(), new StubAcceptor(), reader);
+    await cycle.run(snap([xraw()], 'c1')); // accepted
+    expect(only().lifecycleStatus).toBe('accepted');
+    await cycle.run(unsettled('c2'));
+    await cycle.run(unsettled('c3'));
+    await cycle.run(unsettled('c4'));
+    expect(only().lifecycleStatus).toBe('accepted');
+    expect(only().acceptStatus).toBe('accepted');
+    expect(closedReads).toBe(0);
+  });
+
+  it('enqueues nothing (no Sheet row, no Chat) and does not complete a pending baseline', async () => {
+    fresh();
+    const cycle = new XtmPollCycle(db, cfg(), new StubAcceptor());
+    const s = await cycle.run(unsettled('c1'));
+    expect(s.baseline).toBe(true);
+    expect(new MetaStore(db).baselineDone).toBe(false); // cold start waits for a trusted read
+    const n = db.prepare('SELECT COUNT(*) AS n FROM outbox').get() as { n: number };
+    expect(n.n).toBe(0);
+  });
+
+  it('still raises holiday_calendar_stale on an unsettled cycle (the heartbeat page must not go quiet)', async () => {
+    fresh();
+    new MetaStore(db).markBaselineDone();
+    const s = await new XtmPollCycle(db, schedCfg(), new StubAcceptor()).run(
+      unsettled('c1', '2099-06-22T10:00:00+07:00'),
+    );
+    expect(s.transitionsSkipped).toBe(true);
+    expect(s.holidayCalendarStale).toBe(true);
+  });
+
+  it('a SETTLED empty read keeps normal behaviour (two in a row -> missing)', async () => {
+    fresh();
+    const cycle = new XtmPollCycle(db, cfg({ ACCEPT_ENABLED: false }), new StubAcceptor());
+    await cycle.run(snap([xraw()], 'c1'));
+    const s2 = await cycle.run(snap([], 'c2'));
+    await cycle.run(snap([], 'c3'));
+    expect(s2.transitionsSkipped).toBe(false);
+    expect(only().lifecycleStatus).toBe('missing');
+  });
+});

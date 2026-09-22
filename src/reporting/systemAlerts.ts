@@ -28,6 +28,8 @@ export type TriggerKind =
   | 'xtm_yielding'
   | 'yield_stuck'
   | 'holiday_calendar_stale'
+  | 'holiday_calendar_expiring'
+  | 'grid_unsettled_streak'
   | 'daily_cap_reached'
   | 'held_job_no_deadline'
   | 'held_job_no_effort';
@@ -175,6 +177,35 @@ const TRIGGERS: Record<TriggerKind, TriggerSpec> = {
       'Add the current year to src/schedule/thaiHolidaysData.ts (HOLIDAYS + CURATED_YEARS) then npm run deploy',
     hasRecovered: true,
   },
+  // Early warning (dedupKey `holiday_calendar_expiring:<year>` — once per missing year) raised by
+  // the cycle when a Bangkok year within CURATION_HORIZON_DAYS (60) of today — but NOT the current
+  // year, which is holiday_calendar_stale's page — has no curated list. warn only: nothing is broken
+  // yet, so it posts to Chat and never fails the heartbeat. hasRecovered:false (the fix is a deploy,
+  // not an event worth a card); the cycle silently resolves it once the year is curated.
+  holiday_calendar_expiring: {
+    severity: 'warn',
+    title: 'Holiday calendar runs out soon — next year not curated',
+    impact:
+      'On 1 January auto-accept stops (every Malay job rejected) unless next year is curated first',
+    action:
+      'Add next year to src/schedule/thaiHolidaysData.ts (HOLIDAYS + CURATED_YEARS; public + in-lieu days) then npm run deploy',
+    hasRecovered: false,
+  },
+  // Raised (dedupKey `grid_unsettled_streak:<first unsettled capturedAt>`) by the loop when the
+  // Active grid's data XHR failed to settle AND the read saw 0 rows on N consecutive cycles. Each
+  // such cycle is skipped (no Missing/Removed, no accept) instead of trusting a possibly-unloaded
+  // grid, so a long streak = detection is blind while the heartbeat stays green. warn, not a page:
+  // one slow load is normal; the streak threshold is what makes it worth a human look. Recovers
+  // (with a card) on the first read that settles or sees rows.
+  grid_unsettled_streak: {
+    severity: 'warn',
+    title: 'Job list not loading — reads skipped',
+    impact:
+      'New jobs may be missed: the Active grid kept loading empty, so these cycles were not trusted',
+    action:
+      'Open XTM Tasks → Active in a browser; if it loads slowly or never settles, check the portal / network (see log settleGrid)',
+    hasRecovered: true,
+  },
   // Raised at most once per Bangkok day (dedupKey `daily_cap_reached:<date>`) when the
   // daily word budget is genuinely exhausted — so ops knows "auto-accept paused for the
   // day on budget" (vs "no jobs today"). hasRecovered:false (like accept_failed): it never
@@ -299,18 +330,23 @@ export function raiseAlert(
   })();
 }
 
-/** Resolve an active alert and enqueue a SYSTEM_RECOVERED if the trigger supports it. */
+/**
+ * Resolve an active alert and enqueue a SYSTEM_RECOVERED if the trigger supports it. Pass
+ * `dedupKey` when the alert was raised under a custom key (raiseAlert's `dedupKey`) — the default
+ * lookup is by the kind name, which would never find it.
+ */
 export function resolveAlert(
   db: DB,
   outbox: Outbox,
   kind: TriggerKind,
   occurredAt: string,
   downDuration: string,
+  dedupKey?: string,
 ): boolean {
   const spec = TRIGGERS[kind];
   const system = new SystemEventStore(db);
   return db.transaction(() => {
-    const resolvedId = system.resolve(kind, occurredAt);
+    const resolvedId = system.resolve(dedupKey ?? kind, occurredAt);
     if (!resolvedId) return false;
     if (!spec.hasRecovered) return false;
     const card = buildCard({
