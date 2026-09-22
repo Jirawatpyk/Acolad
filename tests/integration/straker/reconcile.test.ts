@@ -1978,6 +1978,30 @@ describe('review fixes — the paths the first cut missed (2026-09-22)', () => {
     expect(f.store.heldWork()[0]?.effortWords).toBe(20);
   });
 
+  it('prefers the claim due at the same moment over a larger one due hours away', async () => {
+    // The half-day window is a fallback. When a keyless claim matches the deadline itself,
+    // it is the better evidence for this order's size than a bigger job due later that day.
+    const f = fixture();
+    for (const [objId, words, offsetMs] of [
+      ['same', 20, 30_000],
+      ['later', 500, 6 * 3_600_000],
+    ] as const) {
+      f.store.recordEvent({
+        objId,
+        eventType: 'claim',
+        outcome: 'won',
+        effortWords: words,
+        deadlineMs: DEADLINE_MS + offsetMs,
+        occurredAtMs: NOW_MS - 3_600_000,
+      });
+    }
+    f.setPurchaseOrders([purchaseOrder('po-1')]);
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork()[0]?.effortWords).toBe(20);
+  });
+
   it('weighs a recovered order at a keyless claim for its deadline rather than at zero', async () => {
     // A won offer that carried no job reference has no key; its order must still not be
     // counted at nothing.
