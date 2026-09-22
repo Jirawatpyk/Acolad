@@ -86,3 +86,29 @@ Produced on working days only, as the XTM bot's already is.
 Because the two records live in separate files, the summary reads both — and when one is unreadable it **says so** rather than presenting a partial total as a whole one.
 
 Producing the summary must never participate in a claim decision: it reads, at reporting time only, and never on the race path.
+
+> **Amended 2026-09-22 (owner decision).** The daily view is now split across the two rooms — see §5a and §5b. The full two-portal view with retries and uptime remains `npm run report:combined`.
+
+### 5a. Straker's own 09:00 report — Straker's announcement channel
+
+Sent by the Straker bot itself on the `offers` channel, once per working day at or after 09:00 Bangkok (the work calendar Straker's config reads — `ACCEPT_WORKDAYS`, shared with XTM — and the curated Thai holidays; fail-open on an uncurated year, as the XTM report is). Card heading: `📋 Straker Daily Report — DD/MM/YYYY`.
+
+| Row | Content |
+|---|---|
+| `Due today · translation` | Σ held words whose **effective deadline day** is today, `(cap <STRAKER_MAX_WORDS_PER_DAY>/day)` |
+| `Due today · DTP` | The same for monolingual/DTP work against `STRAKER_DTP_MAX_WORDS_PER_DAY` — never added to translation |
+| `⚠️ Overdue` | Only when held work is past its deadline instant: `<n> job(s) · <words> words` |
+| In progress (≤ 5) | Nearest deadlines first, labelled `file · job ref · service` (the offer id when the work carries no identity); value `DD/MM/YYYY HH:mm · <words>w` (`· DTP` for DTP). Overdue items carry ⚠️. `(+N more)` beyond five; `No jobs in progress` when nothing is held |
+| `Straker win rate` | Last 14 days, with counts, turn-aways, weak-signal and lower-bound caveats (`winRateRow.ts`) |
+
+**Nothing to say ⇒ no card**: nothing held **and** the 14-day win rate has zero winnable and zero turned away. The skip is logged `{module:'dailyReport', action:'daily_report', outcome:'skipped'}`.
+
+**Once per day, across restarts**: the day is marked decided in `straker_meta` (`daily_report:<YYYY-MM-DD>`) whether sent or skipped, in the same transaction as the queue row; the queue row's event id is `daily:<YYYY-MM-DD>`, deduplicated on `(event_id, channel)`. A fault is logged (`outcome:'error'`), leaves the day undecided, and never fails the cycle.
+
+**The win rate counts each piece of work once**: a recovery recorded under a purchase-order or assigned-job id is folded into the won/unknown claim it settles (by work key, or for legacy claims by equal effort + deadline within 60 s + claim first), one recovery per claim.
+
+### 5b. The XTM 09:00 report — one combined line
+
+The XTM card carries its own rows plus exactly two companion rows: `XTM` (`<n> <noun> committed`) and `Both portals` (`<total> <noun> committed (XTM a · Straker b)`). No Straker row, no win rate. When a record is unreadable or the units differ the combined line becomes a ⚠️ row saying why.
+
+The XTM card is sent only when **XTM holds work** or **a companion row is a warning**. Work held on Straker alone does not send it — Straker's own report covers that.
