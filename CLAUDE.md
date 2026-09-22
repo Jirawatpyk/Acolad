@@ -236,6 +236,30 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   re-read ว่าง = grid race → ตัดเป็น failed (ไม่ใช่ missing); probe ไม่เจอ target → log loud
 - เฝ้า latency V16/V16b: `npm run report:latency` + heartbeat เขียว
 
+## XTM reliability guards (PR C — fix/xtm-reliability-audit)
+
+- **grid ว่างที่ยังโหลดไม่เสร็จ = ไม่เชื่อ** (คลาสเดียวกับบั๊กพลาดงาน 38 นาที — ดู
+  [[xtm-grid-loads-via-late-xhr]]): ถ้า `settleGrid` (networkidle) หมดเวลา **และ** อ่านได้ 0 แถว →
+  snapshot ถูกติด `unsettledEmpty` → รอบนั้น **ข้าม diff ทั้งหมด** (ไม่นับ missing, ไม่ Missing/
+  Closed/Removed, ไม่กดรับ, ไม่เขียน Sheet/Chat, ไม่ปิด baseline) แต่ **heartbeat ยังเขียว** (โหลดช้า
+  ครั้งเดียวไม่ควร page). log ทุกครั้ง: warn `module:xtmPollLoop action:grid_unsettled outcome:skipped`
+  (+ `streak`, `since`). ติดกัน **≥ 5 รอบ** → alert warn `grid_unsettled_streak` ครั้งเดียวต่อ streak
+  (dedup `grid_unsettled_streak:<capturedAt แรก>`, นับเก็บใน meta — restart ไม่ลืม) → รอบแรกที่เชื่อได้
+  log `outcome:recovered` + การ์ด ✅. **ทำอะไร:** เปิด XTM Tasks→Active ในเบราว์เซอร์ดูว่าโหลดช้า/ค้าง
+  ไหม + ดู log `module:xtmClient action:settleGrid outcome:timeout`. ถ้า XTM เปลี่ยนให้มี background
+  polling จน networkidle ไม่มีวัน settle → เปลี่ยนไปใช้ `waitForResponse` ของ XHR grid (**ห้าม**ถอด
+  การรอออก). ⚠️ ยังไม่ได้กันฝั่ง **Closed read** (`readClosedKeys` ที่ settle ไม่ทัน → set ว่าง →
+  งานที่ถือถูกจัดเป็น Removed) — ยังเสี่ยงอยู่ แต่เกิดได้เฉพาะหลังงานหายจาก Active 2 รอบที่ settle แล้ว
+- **browser recycle มี log แล้ว**: info `module:browser action:recycle outcome:ok` (reason/ageMs)
+  ทุก `BROWSER_RECYCLE_HOURS`; ถ้าเปิดตัวใหม่ล้มกลางทาง → Chromium ที่เพิ่ง launch ถูกปิด, ตัวเก่ายังใช้ต่อ,
+  log error `outcome:error` แล้ว throw (รอบนั้นล้ม — รอบถัดไปลอง recycle ใหม่เอง)
+- **ปฏิทินวันหยุดใกล้หมด**: alert warn `holiday_calendar_expiring:<ปี>` (Chat, **ไม่ page**) เมื่อปีของ
+  (วันนี้ + 60 วัน Bangkok) ยังไม่ curated — ครั้งเดียวต่อปี, ต่างจาก `holiday_calendar_stale` ที่ page
+  เมื่อ*ปีปัจจุบัน*ไม่ curated. **ทำอะไร:** เพิ่มปีถัดไปใน `src/schedule/thaiHolidaysData.ts`
+  (`HOLIDAYS` + `CURATED_YEARS`; นักขัตฤกษ์ + ชดเชย ไม่ใส่วันหยุดพิเศษ ครม.) แล้ว `npm run deploy`.
+  มี **canary test** ใน `tests/unit/thaiHolidays.test.ts` (`CANARY: ...`) ที่อ่านนาฬิกาจริง — CI แดง
+  ~60 วันก่อนสิ้นปีที่ curated สุดท้าย = **ไม่ใช่ flaky** แปลว่าถึงเวลา curate ปีหน้า
+
 ## accept-scheduling gate (live — PR #7/#8; capacity re-keyed to deadline-day + held-derived workload report — PR #14)
 
 `src/schedule/` กรองการ **"กดรับ"** เพิ่มอีกชั้นหลัง `decideAccept()` (detect+notify ยัง
