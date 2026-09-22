@@ -209,7 +209,8 @@ describe('offers sender — Straker own announcement channel (contract §2, FR-0
 
     const card = readCard(chat.posted[0]);
     expect(rowValue(card, 'Offer')).toBe('OFFER-1');
-    expect(rowValue(card, 'Language')).toBe('en-GB > ms-MY');
+    // On the wire as an entity: row text is escaped (2026-09-22) and Chat shows `>`.
+    expect(rowValue(card, 'Language')).toBe('en-GB &gt; ms-MY');
     expect(rowValue(card, 'Words')).toBe('1200');
     expect(rowValue(card, 'Deadline')).toBe('16/09/2026 17:00');
   });

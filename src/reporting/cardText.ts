@@ -18,6 +18,20 @@ export const wordsValue = (words: number | null | undefined): string | null =>
   words !== null && words !== undefined ? String(words) : null;
 
 /**
+ * Escape text so Google Chat shows it rather than reading it as markup.
+ *
+ * `decoratedText.text` accepts a small HTML subset (`<b>`, `<a href>`, `<font>`…), and much
+ * of what reaches a card row is portal text — file names, job titles, error details — that
+ * this bot does not control. Unescaped, a title such as `<a href=…>` renders as a live link
+ * in the operations channel, and a stray `<` can swallow the rest of the row.
+ *
+ * `&` first, so the entities this introduces are not themselves escaped again. Applied to
+ * row text only: the header and the card id are plain text to Chat.
+ */
+export const escapeCardText = (s: string): string =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/**
  * Sanitize an arbitrary string to a safe Google Chat cardId:
  *   - non-alnum characters → '-'
  *   - consecutive dashes collapsed to single '-'
