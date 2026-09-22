@@ -1299,7 +1299,7 @@ describe('XtmPollLoop — an empty daily report is not sent', () => {
    * working day. A notification that never varies trains people not to open it.
    *
    * `STRAKER_STATE_DIR` is pinned in every test here rather than left to the environment. The
-   * loop does not pass one, so `combinedReportRows` falls back to the real `state/straker` —
+   * loop does not pass one, so `combinedTotalRows` falls back to the real `state/straker` —
    * which exists on the dev host and does not on CI, and the difference decides whether the
    * companion section carries a warning. Left unpinned these tests would pass locally and mean
    * the opposite on CI.
@@ -1366,6 +1366,52 @@ describe('XtmPollLoop — an empty daily report is not sent', () => {
     await loopAt10(xtmDir, heartbeat).runOnce();
 
     expect(dailyRows()).toHaveLength(0);
+  });
+
+  it('sends nothing when only Straker holds work — Straker reports that in its own room', async () => {
+    // FR-018 amended 2026-09-22: Straker sends its own 09:00 card. The XTM card keeps one
+    // combined line, and that line alone must not post Straker's work into the XTM room.
+    const xtmDir = freshXtmDir();
+    const strakerDir = await emptyStrakerRecord();
+    const { openStrakerDatabase, StrakerStore } = await import('../../src/straker/strakerStore.js');
+    const opened = openStrakerDatabase(strakerDir, BKK_10_00);
+    new StrakerStore(opened.db).hold({
+      objId: 'straker-offer',
+      effortWords: 1_200,
+      kind: 'translation',
+      deadlineMs: BKK_10_00 + 86_400_000,
+      heldSinceMs: BKK_10_00,
+    });
+    opened.db.close();
+    process.env['STRAKER_STATE_DIR'] = strakerDir;
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    await loopAt10(xtmDir, heartbeat).runOnce();
+
+    expect(dailyRows()).toHaveLength(0);
+  });
+
+  it('shows one combined line and no Straker rows when the XTM card does go out', async () => {
+    const xtmDir = freshXtmDir();
+    process.env['STRAKER_STATE_DIR'] = await emptyStrakerRecord();
+    seedAcceptedJob(db, {
+      jobKey: 'J-X2',
+      projectName: 'Delta',
+      fileName: 'd.xlf',
+      dueDate: '2026-06-25T15:00:00+07:00',
+      words: 300,
+    });
+    const heartbeat = { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) };
+
+    await loopAt10(xtmDir, heartbeat).runOnce();
+
+    const row = db
+      .prepare("SELECT payload_json FROM outbox WHERE event_id LIKE 'daily:%'")
+      .get() as { payload_json: string };
+    expect(row.payload_json).toContain('Both portals');
+    expect(row.payload_json).toContain('(XTM 300 · Straker 0)');
+    expect(row.payload_json).not.toContain('Straker win rate');
+    expect(row.payload_json).not.toMatch(/"topLabel":"Straker"/);
   });
 
   it('still pings the heartbeat on the day it stays quiet', async () => {

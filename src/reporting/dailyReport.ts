@@ -60,60 +60,34 @@ export function dueDailyReport(
  *
  * Two things count as worth saying:
  *
- * 1. **The team holds work.** Then the report is doing what it exists for.
- * 2. **A companion row says anything other than "0 committed".** The combined two-portal
- *    section (FR-018) degrades
- *    to rows that *state* a gap rather than going quiet — an unreadable record, a total that
- *    cannot be shown because the portals measure in different units. Those rows are what makes
- *    the section trustworthy, and suppressing them would make "no report" mean both "nothing to
- *    do" and "something is broken", which are the two things an operator most needs to tell
- *    apart. A warning is identified structurally, by the row carrying an emoji, rather than by
- *    matching its text.
+ * 1. **XTM holds work.** Then the report is doing what it exists for.
+ * 2. **A companion row is a warning.** The combined two-portal line (FR-018) degrades to a row
+ *    that *states* a gap rather than going quiet — an unreadable record, a total withheld
+ *    because the portals measure in different units, the view unavailable altogether.
+ *    Suppressing those would make "no report" mean both "nothing to do" and "something is
+ *    broken", the two things an operator most needs to tell apart. A warning is recognised by
+ *    the ⚠️ the combined module puts on it, and — as a second net for a row built without one —
+ *    by the words it uses for a gap.
  *
- * **Known limitation, and the reason for it.** Work held by *Straker* alone does not keep the
- * report alive: this function can only see what the caller has, and the caller cannot ask
- * Straker directly. The R11 bulkhead permits exactly one import from `src/runtime/` into
- * `src/straker/` — `xtmPollLoop → combinedReportRows` — and that exception is pinned by name in
- * `tests/integration/straker/isolation.test.ts`, so a second one to ask "do you hold anything?"
- * would fail that guard. The practical cost is small: Straker announces every win individually
- * and immediately on its own channel, so its work is never silent, only unsummarised. Closing
- * it properly means `combinedReportRows` reporting whether either portal committed anything,
- * which is a change to that module rather than to this one.
- *
- * Biased toward sending. An unnecessary card costs a glance; a wrongly suppressed one hides
- * work, so anything that is not plainly nothing goes out.
+ * **Work held on Straker alone does NOT keep this card alive** (FR-018 amended 2026-09-22,
+ * owner decision). Straker now sends its own 09:00 report into its own room; a combined figure
+ * made only of Straker work would post the same work into the XTM room every morning. The
+ * combined line still appears whenever the card goes out for one of the two reasons above.
  */
 export function reportWorthSending(
   held: readonly XtmJobState[],
   companion: readonly CardRow[],
 ): boolean {
   if (held.length > 0) return true;
-  // Suppress only when EVERY companion row is recognisably nothing. The test is an allowlist,
-  // not a denylist, so an unfamiliar row — a retry count, something added later — counts as
-  // content and the report goes out.
-  return !companion.every((row) => SAYS_NOTHING.some((pattern) => pattern.test(row.value ?? '')));
+  return companion.some(isWarning);
 }
 
-/**
- * The companion rows that say nothing happened.
- *
- * Anchored and exact on purpose. A loose `includes('0')` would match "10 words committed", and
- * a loose "is this row interesting" test would have to be updated every time the combined
- * section gains a row — silently, in the direction of suppressing more. This way the failure
- * mode of an unrecognised row is an extra card, never a hidden one.
- */
-const SAYS_NOTHING: readonly RegExp[] = [
-  // "0 words committed" — a portal, or the combined line, holding nothing.
-  /^0 \S+ committed$/,
-  // The win-rate row with no races in it. Added when T076 put that row in the card and this
-  // rule stopped suppressing anything — which is the allowlist behaving as designed: it failed
-  // toward SENDING, and the test pinned against `combinedReportRows`'s real output caught it on
-  // the first run rather than letting the feature quietly switch itself off.
-  //
-  // A rate with actual races in it is NOT matched, and that is deliberate: `12.5% — 1 won of 8`
-  // is a fortnightly figure worth putting in front of someone even on a day with no work.
-  /^n\/a — no genuinely winnable offers in .+ · 0 turned away by our own rules$/,
-];
+/** The words a companion row uses when it is stating a gap rather than a figure. */
+const GAP_WORDING = /unreadable|withheld|unavailable|no combined total/i;
+
+function isWarning(row: CardRow): boolean {
+  return row.emoji !== undefined || GAP_WORDING.test(row.value ?? '');
+}
 
 /**
  * Builds the Google Chat cardsV2 payload for the daily in-progress jobs report.
