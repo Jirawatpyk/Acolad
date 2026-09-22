@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { StrakerHttpError, StrakerTimeoutError } from '../../../src/straker/httpClient.js';
+import type { HeldWork } from '../../../src/straker/strakerStore.js';
 import { eligible, harness, raw, type HarnessOptions } from './pollCycleHarness.js';
 
 /**
@@ -72,6 +73,80 @@ describe('a claim is never attempted twice for the same offer, across cycles (R7
     await h.cycle.runOnce();
 
     expect(h.trace.filter((t) => t === 'read:claimedObjIds')).toHaveLength(1);
+  });
+});
+
+describe('an offer whose work the team already holds is never claimed again (restart, FR-019c)', () => {
+  /**
+   * The restart case R7's two defences cannot see. `claimedObjIds()` answers from recorded
+   * claims and `attemptedThisProcess` dies with the process — so a bot killed after its POST
+   * reached the portal but before the claim was recorded comes back with neither. If the
+   * offer is still listed, it would claim it again. Reconciliation runs first on start and
+   * holds the work it finds under the key the offer shares (workKey.ts); this is the guard
+   * that reads it.
+   */
+  const KEY = 'aj-1|ms-my|translation';
+  const identity = (workKey: string | null) => ({
+    jobRef: 'aj-1',
+    title: null,
+    service: 'translation',
+    workKey,
+  });
+  const heldRow = (objId: string, workKey: string | null): HeldWork => ({
+    objId,
+    effortWords: 4,
+    kind: 'translation',
+    deadlineMs: Date.parse('2026-09-16T17:00:00+07:00'),
+    heldSinceMs: Date.parse('2026-09-16T09:00:00+07:00'),
+    releasedAtMs: null,
+    identity: identity(workKey),
+  });
+
+  it('does not claim an offer whose work key matches held work, and says why', async () => {
+    const h = harness({
+      offers: [raw('offer-1')],
+      extract: () => [{ ...eligible('offer-1'), identity: identity(KEY) }],
+      held: [heldRow('po-1', KEY)],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual([]);
+    expect(h.logs).toContainEqual({
+      level: 'info',
+      fields: expect.objectContaining({
+        module: 'pollCycle',
+        action: 'decide',
+        outcome: 'already_held',
+        objId: 'offer-1',
+        workKey: KEY,
+      }) as unknown,
+    });
+  });
+
+  it('still claims an offer whose key matches nothing held', async () => {
+    const h = harness({
+      offers: [raw('offer-2')],
+      extract: () => [{ ...eligible('offer-2'), identity: identity('aj-2|ms-my|translation') }],
+      held: [heldRow('po-1', KEY)],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-2']);
+  });
+
+  it('never matches two keyless records to each other', async () => {
+    // A null key is "cannot be made honestly", not a value — two of them are not the same work.
+    const h = harness({
+      offers: [raw('offer-3')],
+      extract: () => [{ ...eligible('offer-3'), identity: identity(null) }],
+      held: [heldRow('po-1', null)],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-3']);
   });
 });
 

@@ -594,8 +594,26 @@ function withDelivery(deps: {
   readonly logger: Logger;
   readonly now: () => number;
 }): StrakerCycle {
+  // Whether the start-up reconciliation has been attempted. Until it has, it goes FIRST.
+  let reconciledOnStart = false;
   return {
     async runOnce(): Promise<boolean> {
+      // On start, reconciliation runs BEFORE the first poll cycle (2026-09-22). A process
+      // killed after its claim reached the portal but before the claim was recorded comes
+      // back with no claim row and no in-memory guard; if the offer is still listed, a cycle
+      // that ran first would send a second /accept for work the team already holds —
+      // FR-019c's retry, by way of a restart. Reconciling first puts that work in the held
+      // list under its work key, and the cycle will not claim held work again.
+      //
+      // Only the first turn. After that the pass keeps its place behind the cycle, where its
+      // two reads do not add to the latency of the claim that races (FR-003).
+      if (!reconciledOnStart) {
+        reconciledOnStart = true;
+        await reportAsync(async () => {
+          await deps.reconciler.runIfDue();
+        });
+      }
+
       const ok = await deps.cycle.runOnce();
 
       // `runIfDue` promises never to throw and costs one clock read when it is not due;

@@ -100,6 +100,8 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
    * the store is the authority again and reconciliation is what settles what it missed.
    */
   const attemptedThisProcess = new Set<string>();
+  /** Offers already reported as `already_held`, so the log says it once, not every cycle. */
+  const reportedHeld = new Set<string>();
 
   /**
    * Consecutive refused sign-ins, and when to try again.
@@ -256,16 +258,47 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       // nobody knows whether it landed, so re-deciding it is how "we do not know" becomes
       // "we may have committed twice". One query per cycle, like the held list.
       const alreadyClaimed = deps.store.claimedObjIds();
-      const candidates = offers.filter(
+      // The restart case neither of the two sets above can see: the process died after its
+      // POST reached the portal and before the claim was recorded, so there is no claim row
+      // and the in-memory set went with the process. Reconciliation runs first on start and
+      // holds what it finds under the key the offer shares with its purchase order and
+      // assigned job (workKey.ts) — so held work with this offer's key IS this offer, already
+      // ours, and a second /accept is the retry FR-019c forbids. Not a skip reason on
+      // purpose: nothing was decided, the work is simply not open to us.
+      const heldKeys = new Set(
+        held.map((w) => w.identity?.workKey ?? null).filter((k): k is string => k !== null),
+      );
+      const alreadyHeld = (o: OfferForDecision): boolean => {
+        const key = o.identity?.workKey ?? null;
+        if (key === null || !heldKeys.has(key)) return false;
+        // Once per offer per process: the offer can stay listed for hours, and a line every
+        // ten seconds would bury the one that mattered.
+        if (!reportedHeld.has(o.objId)) {
+          reportedHeld.add(o.objId);
+          deps.logger.info(
+            {
+              module: 'pollCycle',
+              action: 'decide',
+              outcome: 'already_held',
+              objId: o.objId,
+              workKey: key,
+            },
+            'offer still listed for work the team already holds — not claiming it again',
+          );
+        }
+        return true;
+      };
+      const notAttempted = offers.filter(
         (o) => !alreadyClaimed.has(o.objId) && !attemptedThisProcess.has(o.objId),
       );
-      if (candidates.length < offers.length) {
+      const candidates = notAttempted.filter((o) => !alreadyHeld(o));
+      if (notAttempted.length < offers.length) {
         deps.logger.info(
           {
             module: 'pollCycle',
             action: 'skip_reclaim',
             outcome: 'ok',
-            offers: offers.length - candidates.length,
+            offers: offers.length - notAttempted.length,
           },
           'offers still listed that this bot has already attempted — not claiming them again',
         );

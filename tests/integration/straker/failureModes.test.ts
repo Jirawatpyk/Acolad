@@ -1008,15 +1008,20 @@ describe('failure mode: the process dies between claiming and recording', () => 
 
     // Cycle 2: the claim lands on the portal, and the process dies before it is recorded.
     portal.offers = async () => json([seen, lost]);
-    portal.claim = async (_exchange, offerId) => {
+    // The assigned job carries an id of its OWN (2026-09-22) and shares only the work key
+    // with the offer — job ref, target language, service. It used to reuse the offer's id,
+    // which let a same-id lookup stand in for the key and hid the restart re-claim below.
+    const jobId = `job-of-${lost.obj_id}`;
+    portal.claim = async () => {
       assignedOnPortal.push({
-        obj_id: offerId,
+        obj_id: jobId,
         status: 'assigned',
         words: lost['words'],
         due_at: '2026-09-15T16:20:00Z',
         source_lang: lost['source_lang'],
         target_lang: lost['target_lang'],
         external_job_id: lost['job_ref'],
+        service: lost['service'],
       });
       before.assembly.close();
       return json({});
@@ -1024,25 +1029,36 @@ describe('failure mode: the process dies between claiming and recording', () => 
     await before.assembly.cycle.runOnce();
 
     // The state the crash left: the portal holds the work, our record does not.
-    expect(assignedOnPortal.map((w) => w['obj_id'])).toEqual([lost.obj_id]);
+    expect(assignedOnPortal.map((w) => w['obj_id'])).toEqual([jobId]);
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
 
     // --- the restart ---------------------------------------------------------
+    // The offer is STILL LISTED after the restart. This test used to empty the list here,
+    // which hid the worst thing a restart could do: nothing recorded the claim, the in-memory
+    // guard died with the process, and the first cycle — which ran before reconciliation —
+    // sent a second /accept for work the team already held (FR-019c).
     clock = NOW + 60_000;
-    portal.offers = async () => json([]);
+    portal.offers = async () => json([lost]);
     const after = reopen(portal, before.stateDir, { STRAKER_EXCLUDED_LANGUAGE_PAIRS: 'en-us>th' });
 
     await after.assembly.cycle.runOnce();
+    clock += 10_000;
+    await after.assembly.cycle.runOnce();
+
+    // Exactly one claim request, ever: reconciliation runs before the first cycle on start
+    // and holds the work under its key, and the cycle will not claim held work again.
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
 
     // One pass, and the gap is closed: reconciliation is due on the first call by design,
     // which is FR-016a's "on start".
     const recovered = after.assembly.store
-      .eventsOf(lost.obj_id)
+      .eventsOf(jobId)
       .filter((e): e is ClaimEvent => e.eventType === 'claim' || e.eventType === 'recovery');
     expect(recovered.map((e) => e.outcome)).toContain('recovered');
     // Marked recovered rather than claimed, so a recurring gap between the two records is
     // visible instead of smoothed over (FR-016b) — and counted, so the day it lands on
     // stops pretending it has room it does not have.
-    expect(after.assembly.store.heldWork().map((h) => h.objId)).toEqual([lost.obj_id]);
+    expect(after.assembly.store.heldWork().map((h) => h.objId)).toEqual([jobId]);
     expect(after.senders.got.offers.map((o) => o['outcome'])).toContain('recovered');
 
     // And the tracker came back from disk rather than from zero. The appearance `seen`
@@ -1052,6 +1068,6 @@ describe('failure mode: the process dies between claiming and recording', () => 
     // listed it would reopen row 1 and push `last_seen_at_ms` past its own `not_found_at_ms`.
     const rows = after.assembly.store.sightingsOf(seen.obj_id);
     expect(rows.map((r) => r.sighting)).toEqual([1]);
-    expect(rows[0]?.notFoundAtMs).toBe(clock);
+    expect(rows[0]?.notFoundAtMs).toBe(NOW + 60_000);
   });
 });
