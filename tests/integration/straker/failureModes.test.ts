@@ -992,7 +992,7 @@ describe('failure mode: reconciliation cannot complete on start', () => {
    * claim whose record died with the previous process is invisible, and a still-listed offer
    * would be claimed a second time. So nothing is claimed until one pass has succeeded.
    */
-  it('claims nothing until a pass succeeds, then claims on the next cycle', async () => {
+  it('claims nothing until a pass succeeds, retrying it every minute rather than every fifteen', async () => {
     const offer = offerFixture('aj-265:ms-my');
     const portal = fakeStraker();
     portal.offers = async () => json([offer]);
@@ -1000,8 +1000,6 @@ describe('failure mode: reconciliation cannot complete on start', () => {
     portal.orders = async () => (ordersDown ? json({ error: 'down' }, 503) : json(envelope([])));
     const bot = assemble(portal);
 
-    // The heartbeat stays as it was: reconciliation failing is FR-016c's alert to raise
-    // (three in a row), not the liveness signal's — the bot is still reading and recording.
     await bot.assembly.cycle.runOnce();
     clock += 10_000;
     await bot.assembly.cycle.runOnce();
@@ -1012,15 +1010,80 @@ describe('failure mode: reconciliation cannot complete on start', () => {
     expect(bot.assembly.store.sightingsOf(offer.obj_id)).toHaveLength(1);
     expect(bot.assembly.store.eventsOf(offer.obj_id)).toEqual([]);
 
-    // The portal recovers; the next pass is due fifteen minutes after the failed one.
+    // The portal recovers. Until a first pass succeeds the reconciler retries on a one-minute
+    // cadence, so claiming resumes a minute after the failed pass, not fifteen.
     ordersDown = false;
-    clock = NOW + 15 * 60_000;
+    clock = NOW + 60_000;
     await bot.assembly.cycle.runOnce();
 
     expect(callsTo(portal, 'claim')).toHaveLength(1);
     expect(bot.assembly.store.eventsOf(offer.obj_id)).toContainEqual(
       expect.objectContaining({ eventType: 'claim', outcome: 'won' }),
     );
+  });
+
+  it('fails the heartbeat once claiming has been paused for more than ten minutes', async () => {
+    const portal = fakeStraker();
+    portal.offers = async () => json([]);
+    portal.orders = async () => json({ error: 'down' }, 503);
+    const bot = assemble(portal);
+
+    // Reconciliation failing is FR-016c's alert for the first ten minutes: the bot is still
+    // reading and recording, so the liveness signal stays green...
+    await expect(bot.assembly.cycle.runOnce()).resolves.toBe(true);
+    clock = NOW + 9 * 60_000;
+    await expect(bot.assembly.cycle.runOnce()).resolves.toBe(true);
+
+    // ...but a bot that cannot claim at all for longer than that is not doing its job.
+    clock = NOW + 10 * 60_000 + 1;
+    await expect(bot.assembly.cycle.runOnce()).resolves.toBe(false);
+
+    // And it clears the moment a pass succeeds.
+    portal.orders = async () => json(envelope([]));
+    clock = NOW + 12 * 60_000;
+    await expect(bot.assembly.cycle.runOnce()).resolves.toBe(true);
+  });
+});
+
+describe('failure mode: a KEYLESS claim lands and the process dies before recording it', () => {
+  /**
+   * The restart guard matches held work by key, and an offer without a job reference has no
+   * key. Its purchase order does (the portal fills `job_ref` there) and carries no word count,
+   * so the recovered row is weighed at zero. The guard therefore also matches a keyless offer
+   * against recovered held work by deadline (within a minute) and effort, zero counting as
+   * unknown, so the restart cannot claim it a second time.
+   */
+  it('does not claim it again after the restart recovers its purchase order', async () => {
+    const offer = { ...offerFixture('aj-265:ms-my'), job_ref: null };
+    const portal = fakeStraker();
+    const orders: Record<string, unknown>[] = [];
+    portal.orders = async () => json(envelope(orders));
+    portal.offers = async () => json([offer]);
+    const before = assemble(portal);
+    portal.claim = async () => {
+      orders.push({
+        po_obj_id: 'po-keyless-1',
+        status: 'pending',
+        job_ref: 'aj-265',
+        source_language_code: 'en-us',
+        target_language_code: 'ms-my',
+        po_type: 'translation',
+        due_at: '2026-09-15T23:20:00Z',
+      });
+      before.assembly.close();
+      return json({});
+    };
+    await before.assembly.cycle.runOnce();
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
+
+    clock = NOW + 60_000;
+    const after = reopen(portal, before.stateDir);
+    await after.assembly.cycle.runOnce();
+    clock += 10_000;
+    await after.assembly.cycle.runOnce();
+
+    expect(callsTo(portal, 'claim')).toHaveLength(1);
+    expect(after.assembly.store.heldWork().map((h) => h.objId)).toEqual(['po-keyless-1']);
   });
 });
 

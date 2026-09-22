@@ -636,6 +636,8 @@ function withDelivery(deps: {
   readonly logger: Logger;
   readonly now: () => number;
 }): StrakerCycle {
+  /** When this process first turned the loop — the start of the claim pause, if any. */
+  let pausedSinceMs: number | null = null;
   return {
     async runOnce(): Promise<boolean> {
       // Until a pass has succeeded, reconciliation runs BEFORE the poll cycle (2026-09-22). A
@@ -649,6 +651,7 @@ function withDelivery(deps: {
       // Before the cycle so the turn a pass first succeeds is also the turn claiming resumes.
       // Once one has, the pass keeps its place behind the cycle, where its two reads do not
       // add to the latency of the claim that races (FR-003). Not due = one clock read.
+      pausedSinceMs ??= deps.now();
       if (!deps.reconciledOk()) {
         await reportAsync(async () => {
           await deps.reconciler.runIfDue();
@@ -695,10 +698,33 @@ function withDelivery(deps: {
         return false;
       }
 
+      // Claiming paused for too long is a bot not doing its job, and nothing else would say
+      // so: the reads succeed, the cycle returns true, and `reconcile_failing` only fires
+      // after three failed passes. Past ten minutes without a successful pass since start,
+      // the liveness signal goes red (Healthchecks pages after its grace). Clears the moment
+      // a pass succeeds.
+      if (!deps.reconciledOk()) {
+        const pausedForMs = deps.now() - pausedSinceMs;
+        if (pausedForMs > CLAIM_PAUSE_PAGE_AFTER_MS) {
+          deps.logger.error(
+            { module: 'main', action: 'claim', outcome: 'claiming_paused', pausedForMs },
+            'no reconciliation pass has succeeded since start, so claiming has been paused for ' +
+              'over ten minutes — check the purchase-order / assigned-jobs reads',
+          );
+          return false;
+        }
+      }
+
       return ok;
     },
   };
 }
+
+/**
+ * How long claiming may stay paused for want of a successful reconciliation pass before the
+ * liveness signal fails (2026-09-22). Ten minutes: ten one-minute retries of the pass.
+ */
+const CLAIM_PAUSE_PAGE_AFTER_MS = 10 * 60_000;
 
 /** Long-running 24/7 entry point under PM2 (`straker.config.cjs`). */
 async function main(): Promise<void> {
