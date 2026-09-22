@@ -39,6 +39,7 @@ whichever layer produces it.
 | **`Origin` and `Referer` headers are required on every request** | Confirmed the hard way: without them, sign-in is refused outright. Browsers set these automatically, which is why the browser-based recon never saw it. |
 | The vendor identity is read back from the portal after sign-in | Confirmed — the value matched what recon observed. **Never pin it in configuration**: it changes under impersonation or an account switch, and a stale one would poll another vendor's work. |
 | A rejection meaning "expired session" is distinguishable from a server fault | Confirmed in the failure-mode tests: the expiry signal earns exactly one re-sign-in; a server fault earns none. |
+| Only a 401 or 403 **from the sign-in itself** means the credentials were refused (2026-09-22) | Enforced. Those, and only those, feed the escalating sign-in backoff (1 min → 1 h) and the `sign_in_refused` alert. A timeout, a 5xx, a 405 or a body that is not JSON is a transport failure: the cycle fails, the heartbeat goes red on its own schedule, and the next cycle tries again with no backoff (log `action:sign_in outcome:transport_failed`). Counting those as refusals is what kept the bot idle through the eight-hour outage of 2026-09-21. |
 
 ## 2. Reading open offers — CONFIRMED live 2026-09-11
 
@@ -47,6 +48,7 @@ whichever layer produces it.
 | The open list is addressed per vendor and filtered to open items | Confirmed |
 | The reply is a **bare list**, not an envelope with a count | Confirmed. The assigned-work reply *is* an envelope — the two differ, so the shape is checked on every read rather than assumed. If this ever becomes an envelope, the read fails loud instead of quietly reading zero offers. |
 | Every entry carries its own opaque identifier | Enforced — an entry without one is a hard failure, because an offer with no identity cannot be tracked or deduplicated |
+| Each identifier appears once per reply | Not guaranteed, so enforced by the bot (2026-09-22): the first entry per `obj_id` is kept, the repeats dropped with one warning per offer (`module:offersApi outcome:duplicate_obj_id`). An offer listed twice must never be claimed twice. |
 | Everything the eligibility and scheduling decisions need is present in the **list** reply | **Confirmed 2026-09-15** against three captured payloads: the language direction, the word count and the deadline all arrive in the list reply, so no detail fetch is needed before claiming (FR-002). Verified on two independent jobs only — the parser fails loud on any field it has not seen rather than absorbing it. |
 | An empty list genuinely means "no open offers" | True **only for a successful read**. This is why a failed read must never reach the tracker. |
 
@@ -97,6 +99,13 @@ A won claim does **not** go straight to the assigned list. The portal issues a p
 | `revoked` | none | Withdrawn |
 
 **The three stages share only `job_ref` + target language + service**; across 27 orders that triple never repeated. `src/straker/workKey.ts` makes it the key (target missing, empty or equal to the source is one value, for DTP). Matching on `obj_id` alone is what released every won claim within one reconcile pass and then recorded it again as "found by reconciliation".
+
+**Rules that follow from it (2026-09-22):**
+
+- The key is normalised before comparison: Unicode NFKC, format characters (`\p{Cf}`, e.g. zero-width space) removed, trimmed, lower-cased; in language codes `_` reads as `-` (`MS_MY` = `ms-my`). The job reference and service keep their underscores (`dtp_prep`).
+- Both lists are paginated reads that must be **whole**: shorter than the `total` the portal claims, still incomplete at the page cap, or the same `obj_id` / `po_obj_id` twice across the collected pages (a replayed page) — each fails the read, and a failed read releases nothing.
+- Held work absent from both complete lists is released only once its deadline is **a day past**, keyed or keyless (a keyless claim can never be matched by its order or job, so absence says nothing). Work with no deadline is never released on absence.
+- **On start, one reconciliation pass runs before the first poll cycle**, and the poll cycle never claims an offer whose key matches held work — so a claim whose POST landed but whose record died with the process cannot be sent twice after a restart (FR-019c).
 
 ## 6. Deliberately not used
 
