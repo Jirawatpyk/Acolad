@@ -9,7 +9,7 @@ named person, a date, a finding. "Someone looked at it" is not a record.
 | RP-1 | Account password rotated | ⬜ **owner** |
 | RP-2 | Portal terms on automated claiming read, conclusion written down | ⬜ **owner** |
 | RP-3 | Seven-day XTM baseline captured (SC-005a) | ✅ **done 2026-09-16** |
-| RP-4 | Lost-race signal confirmed against one real offer, under supervision | ⬜ **owner — gates four guesses** |
+| RP-4 | Lost-race signal confirmed against one real offer, under supervision | ✅ **closed 2026-09-22** — see §RP-4 |
 | RP-5 | Capture probe stopped before the bot starts | ✅ **done 2026-09-16** |
 
 ---
@@ -72,7 +72,28 @@ baseline.
 
 ---
 
-## RP-4 — confirm the lost-race signal on one real offer ⬜
+## RP-4 — confirm the lost-race signal on one real offer ✅ closed 2026-09-22
+
+**Closed on evidence from the live bot and the portal's own web app.** Every guess it gated is
+settled:
+
+| Evidence | Source |
+|---|---|
+| Claims land: **17 won** through `POST /job-offers/{id}/accept` between 19/09 01:46 and 22/09 16:52 | `offer_events` (claim, `won`), `state/straker/straker.db` |
+| A won claim's reply: 2xx, body not relied on (an empty 2xx counts as won — PR #44) | `httpClient.ts` POST handling, live wins above |
+| Lost race = **HTTP 409 only** — the web app shows "Offer no longer available" for 409 and a generic error for anything else (PR #42) | portal front-end, `CONFIRMED_LOST_RACE_SIGNALS = ['http_409']` |
+| The route: `/accept` (the guessed `/claim` 404'd on the first real claim, 18/09 12:22) | PR #42 |
+| Won work's life after the claim: purchase order (`pending`) → assigned job, three ids tied by `workKey` (PR #45) | portal `/api/hitl/vendor/purchase-orders`, `/assigned-jobs` |
+| Deadline zone UTC; effort = `words` as the portal itself displays it | sections below |
+
+**Not yet seen live:** an actual 409. The classification rests on the web app's handling rather
+than on an observed reply; the first real `lost` in the log (`module:pollCycle action:claim
+outcome:lost`) is the last confirmation, and needs no code change. The 4 claims recorded
+`unknown` (reply timed out at the old 2 s deadline, before PR #45's 10 s claim deadline) were won
+— the win rate counts them through their recoveries (PR #47).
+
+*The original gate text follows for the record.*
+
 
 **The most consequential of the five.** It is the gate on four things the claim path has
 never been able to verify, because no claim has ever been made against this portal:
@@ -125,8 +146,8 @@ present. Then, from `state/straker/straker.db` and `logs/jobcatch-straker.*.log`
   **That single edit is the whole change** — the list is a constant precisely so this is one
   line, and its test asserts the list is empty until then.
 
-Until this is done the bot is safe but loud: a lost race — the commonest non-win outcome —
-pages someone every time.
+~~Until this is done the bot is safe but loud: a lost race — the commonest non-win outcome —
+pages someone every time.~~ Done: a 409 is `lost` and pages no one (2026-09-18).
 
 > Confirmed by: ______________  Date: ____________
 > Outcome observed: ⬜ won ⬜ lost · Signal: ______________ · Zone: ⬜ Bangkok ⬜ NZ
