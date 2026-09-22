@@ -368,6 +368,7 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
               // The key reconciliation recognises this work by once it becomes a purchase
               // order and then an assigned job, each under an id of its own (workKey.ts).
               ...(decision.identity === undefined ? {} : { identity: decision.identity }),
+              languageDirection: decision.languageDirection,
             });
             // Only work the team actually holds goes on the ledger. A lost race and a fault
             // consume no capacity — counting them would shrink tomorrow's budget for work

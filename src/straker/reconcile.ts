@@ -526,6 +526,20 @@ export const PO_ADOPTION_FLAG = 'po_adoption_done';
  */
 const UNMATCHED_KEYED_GRACE_MS = 24 * 3_600_000;
 
+/** Two endpoints spelling one deadline need not agree to the millisecond. */
+const SAME_DEADLINE_WINDOW_MS = 60_000;
+
+/** The one-time adoption's second try: keyless claims due within half a day either side. */
+const ADOPTION_FALLBACK_WINDOW_MS = 12 * 3_600_000;
+
+/** What proved an unknown claim was won, as a settlement records it. */
+interface SettlementEvidence {
+  /** For the note: `its purchase order (pending)`, `its assigned job (in_progress)`. */
+  readonly what: string;
+  readonly deadlineMs: number | null;
+  readonly languageDirection: string | null;
+}
+
 function describe(value: unknown): string {
   if (typeof value === 'string') return JSON.stringify(value);
   if (value === undefined) return 'nothing';
@@ -557,7 +571,7 @@ export type ReconcileStore = Pick<
   | 'sightingsOf'
   | 'backfillHeldIdentity'
   | 'claimEventByWorkKey'
-  | 'legacyClaimEffortByDeadline'
+  | 'legacyClaimEffortNear'
   | 'metaFlagSetAt'
   | 'setMetaFlag'
 >;
@@ -744,6 +758,10 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       }
     };
 
+    // Keys this pass has already accounted for — settled or recovered — so a second record of
+    // the same work in the other list is not counted again before the next pass re-reads.
+    const handledKeys = new Set<string>();
+
     for (const item of outstanding) {
       const key = item.identity?.workKey ?? null;
       const row = heldFor(item.objId, key);
@@ -756,6 +774,53 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
             () => void deps.store.backfillHeldIdentity(row.objId, identity),
           );
         }
+        // Work held from a purchase order was weighed at what it could be — often zero, since
+        // an order carries no word count. The assigned job says; the larger figure wins, so
+        // the day never reads emptier than it is.
+        if (item.effortWords !== null && item.effortWords > row.effortWords) {
+          const effortWords = item.effortWords;
+          attempt(row.objId, 'effort_upgrade', () => {
+            deps.ledger.hold(
+              {
+                objId: row.objId,
+                effortWords,
+                deadlineMs: row.deadlineMs ?? item.deadlineMs,
+                kind: row.kind,
+                ...(row.identity === undefined ? {} : { identity: row.identity }),
+              },
+              atMs,
+            );
+            deps.logger.info(
+              {
+                module: 'reconcile',
+                action: 'effort_upgrade',
+                outcome: 'ok',
+                objId: row.objId,
+                from: row.effortWords,
+                to: effortWords,
+              },
+              'held work re-weighed at the word count its assigned job reports',
+            );
+          });
+        }
+        continue;
+      }
+      if (key !== null) handledKeys.add(key);
+      // A claim whose reply never came, whose order the team accepted before this pass: the
+      // assigned job is the proof. Settled as the win it was, not recovered as a lost record.
+      const claim = key === null ? null : deps.store.claimEventByWorkKey(key);
+      if (claim !== null && claim.outcome === 'unknown') {
+        attempt(claim.objId, 'settle', () =>
+          settleUnknown(
+            claim,
+            {
+              what: `its assigned job (${item.status})`,
+              deadlineMs: item.deadlineMs,
+              languageDirection: item.languageDirection,
+            },
+            atMs,
+          ),
+        );
         continue;
       }
       attempt(item.objId, 'recover', () => {
@@ -764,19 +829,31 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       });
     }
 
-    // Orders whose assigned job exists are spoken for by it; the rest are won work that is
-    // still waiting for a person — or a claim whose reply never came.
+    // Orders whose assigned job is under way are spoken for by it. A `pending` order never
+    // is: it has no assigned job yet by definition, so a same-key job already seen is an
+    // earlier round of the same reference, not this one.
     const assignedKeys = new Set(
       work.map((w) => w.identity?.workKey ?? null).filter((k): k is string => k !== null),
     );
     for (const order of orders) {
       if (!isOpenOrder(order.status)) continue;
       const key = order.identity.workKey;
-      if (key !== null && assignedKeys.has(key)) continue;
+      if (order.status !== 'pending' && key !== null && assignedKeys.has(key)) continue;
+      if (key !== null && handledKeys.has(key)) continue;
       if (heldFor(order.poObjId, key) !== undefined) continue;
       const claim = key === null ? null : deps.store.claimEventByWorkKey(key);
       if (claim !== null && claim.outcome === 'unknown') {
-        attempt(claim.objId, 'settle', () => settleUnknown(claim, order, atMs));
+        attempt(claim.objId, 'settle', () =>
+          settleUnknown(
+            claim,
+            {
+              what: `its purchase order (${order.status})`,
+              deadlineMs: order.deadlineMs,
+              languageDirection: order.languageDirection,
+            },
+            atMs,
+          ),
+        );
         continue;
       }
       if (adopting) {
@@ -895,51 +972,61 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       }
     };
 
-    // Each stage indexed by id and by key. Where one key appears twice, the entry that still
-    // holds work wins, so a stale finished twin cannot release live work.
-    const index = <T>(
+    // Each stage indexed by id and by key, keeping every entry: one key can come round twice.
+    const byIdAndKey = <T>(
       items: readonly T[],
       idOf: (t: T) => string,
       keyOf: (t: T) => string | null | undefined,
-      holds: (t: T) => boolean,
-    ): ((objId: string, key: string | null) => T | undefined) => {
-      const byId = new Map(items.map((t) => [idOf(t), t] as const));
-      const byKey = new Map<string, T>();
+    ): ((objId: string, key: string | null) => T[]) => {
+      const byId = new Map<string, T[]>();
+      const byKey = new Map<string, T[]>();
+      const push = (map: Map<string, T[]>, k: string, t: T): void => {
+        map.set(k, [...(map.get(k) ?? []), t]);
+      };
       for (const t of items) {
+        push(byId, idOf(t), t);
         const key = keyOf(t);
-        if (key === null || key === undefined) continue;
-        const seen = byKey.get(key);
-        if (seen === undefined || !holds(seen)) byKey.set(key, t);
+        if (key !== null && key !== undefined) push(byKey, key, t);
       }
-      return (objId, key) => byId.get(objId) ?? (key === null ? undefined : byKey.get(key));
+      return (objId, key) => [
+        ...new Set([...(byId.get(objId) ?? []), ...(key === null ? [] : (byKey.get(key) ?? []))]),
+      ];
     };
-    const assignedFor = index(
+    const jobsFor = byIdAndKey(
       work,
       (w) => w.objId,
       (w) => w.identity?.workKey,
-      (w) => !isFinished(w.status),
     );
-    const orderFor = index(
+    const ordersFor = byIdAndKey(
       orders,
       (o) => o.poObjId,
       (o) => o.identity.workKey,
-      (o) => isOpenOrder(o.status),
     );
 
     for (const row of heldRows) {
       const key = row.identity?.workKey ?? null;
-      // The assigned job, when there is one, is the authority on whether the work is done.
-      const job = assignedFor(row.objId, key);
-      if (job !== undefined) {
-        if (isFinished(job.status)) give(row.objId, 'reported finished');
+      const jobs = jobsFor(row.objId, key);
+      const orderList = ordersFor(row.objId, key);
+      // Still owed while any stage says so: an assigned job under way, a `pending` order (a
+      // round not yet assigned — never spoken for by an earlier round's finished job), or an
+      // open order with no assigned job at all. One key can come round twice.
+      const owed =
+        jobs.some((j) => !isFinished(j.status)) ||
+        orderList.some((o) => o.status === 'pending') ||
+        (jobs.length === 0 && orderList.some((o) => isOpenOrder(o.status)));
+      if (owed) continue;
+      const done = jobs.find((j) => isFinished(j.status));
+      if (done !== undefined) {
+        give(row.objId, 'reported finished');
         continue;
       }
-      // Otherwise the purchase order: waiting for a person means still owed.
-      const order = orderFor(row.objId, key);
-      if (order !== undefined) {
-        if (!isOpenOrder(order.status)) give(row.objId, `purchase order ${order.status}`);
+      const closed = orderList.find((o) => !isOpenOrder(o.status));
+      if (closed !== undefined) {
+        give(row.objId, `purchase order ${closed.status}`);
         continue;
       }
+      // A job in a status never seen matched, and is neither under way nor finished: keep.
+      if (jobs.length > 0) continue;
       // Absent from both. The grace, and the race it closes: a claim writes `held_work` the
       // moment the portal answers, and the portal takes a while to list the work anywhere.
       if (atMs - row.heldSinceMs < intervalMs) continue;
@@ -1008,9 +1095,11 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    * us the work. Recorded as the win it was — the claim's own outcome, row and card — rather
    * than as a recovery, which would say the claim path lost the record.
    */
-  function settleUnknown(claim: ClaimOnWorkKey, order: PurchaseOrder, atMs: number): void {
+  function settleUnknown(claim: ClaimOnWorkKey, evidence: SettlementEvidence, atMs: number): void {
     deps.store.transaction(() => {
-      const deadlineMs = claim.deadlineMs ?? order.deadlineMs;
+      const deadlineMs = claim.deadlineMs ?? evidence.deadlineMs;
+      // The claim's own direction first: a DTP order carries no language codes at all.
+      const languageDirection = claim.languageDirection ?? evidence.languageDirection;
       deps.store.recordEvent({
         objId: claim.objId,
         eventType: 'claim',
@@ -1025,18 +1114,18 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
           objId: claim.objId,
           effortWords: claim.effortWords ?? 0,
           deadlineMs,
-          kind: kindOf(order.languageDirection, claim.identity),
+          kind: kindOf(languageDirection, claim.identity),
           identity: claim.identity,
         },
         atMs,
       );
       const detail =
-        `the claim's reply never came, so it was recorded as unknown; its purchase order ` +
-        `(${order.status}) shows the portal gave us the work`;
+        `the claim's reply never came, so it was recorded as unknown; ${evidence.what} ` +
+        'shows the portal gave us the work';
       const announcement: StrakerOfferAnnouncement = {
         objId: claim.objId,
         outcome: 'won',
-        languageDirection: order.languageDirection,
+        languageDirection,
         effortWords: claim.effortWords,
         deadlineMs,
         occurredAtMs: atMs,
@@ -1044,11 +1133,11 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         ...workLabels(claim.identity),
       };
       enqueue('offers', `claim:${claim.objId}:won`, atMs, announcement);
-      if (order.languageDirection !== null) {
+      if (languageDirection !== null) {
         const row: TrackingRecord = {
           eventType: 'claim',
           objId: claim.objId,
-          languageDirection: order.languageDirection,
+          languageDirection,
           firstSeenAtMs: firstSightingOf(claim.objId) ?? claim.occurredAtMs,
           effortWords: claim.effortWords,
           deadlineMs,
@@ -1077,8 +1166,13 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         // Its status here is the order's; the recovery reads it as the one outstanding state
         // every open order means, so the card does not call a routine `accepted` unknown.
         status: 'pending',
-        // A purchase order carries no word count. A claim on the same key may know it.
-        effortWords: claim?.effortWords ?? null,
+        // A purchase order carries no word count. A claim on the same key may know it; failing
+        // that, a keyless claim won for the same deadline (an offer that carried no key).
+        effortWords:
+          claim?.effortWords ??
+          (order.deadlineMs === null
+            ? null
+            : deps.store.legacyClaimEffortNear(order.deadlineMs, SAME_DEADLINE_WINDOW_MS)),
         deadlineMs: order.deadlineMs,
         languageDirection: order.languageDirection,
         reference: order.identity.jobRef,
@@ -1094,8 +1188,13 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
    * any keyless claim for that deadline had, so the day is not under-counted.
    */
   function adopt(order: PurchaseOrder, atMs: number): void {
+    // Near the same deadline first; failing that, anything keyless due within the same half
+    // day either side — the adoption runs once, and zero is the one answer that under-counts.
     const effort =
-      order.deadlineMs === null ? null : deps.store.legacyClaimEffortByDeadline(order.deadlineMs);
+      order.deadlineMs === null
+        ? null
+        : (deps.store.legacyClaimEffortNear(order.deadlineMs, SAME_DEADLINE_WINDOW_MS) ??
+          deps.store.legacyClaimEffortNear(order.deadlineMs, ADOPTION_FALLBACK_WINDOW_MS));
     deps.ledger.hold(
       {
         objId: order.poObjId,

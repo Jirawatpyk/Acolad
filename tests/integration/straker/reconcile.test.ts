@@ -164,8 +164,8 @@ function fixture(opts: FixtureOptions = {}): Fixture {
       identity: Parameters<StrakerStore['backfillHeldIdentity']>[1],
     ) => store.backfillHeldIdentity(objId, identity),
     claimEventByWorkKey: (key: string) => store.claimEventByWorkKey(key),
-    legacyClaimEffortByDeadline: (deadlineMs: number) =>
-      store.legacyClaimEffortByDeadline(deadlineMs),
+    legacyClaimEffortNear: (deadlineMs: number, windowMs: number) =>
+      store.legacyClaimEffortNear(deadlineMs, windowMs),
     metaFlagSetAt: (key: string) => store.metaFlagSetAt(key),
     setMetaFlag: (key: string, atMs: number) => store.setMetaFlag(key, atMs),
   };
@@ -1865,5 +1865,138 @@ describe('readPurchaseOrders', () => {
     await expect(
       readPurchaseOrders(door([{ items: [{ ...PO, po_obj_id: '' }], total: 1 }]), 'v'),
     ).rejects.toThrow(/po_obj_id/);
+  });
+});
+
+describe('review fixes — the paths the first cut missed (2026-09-22)', () => {
+  function unknownClaim(
+    f: Fixture,
+    over: { languageDirection?: string; identity?: typeof IDENTITY } = {},
+  ): void {
+    f.store.recordEvent({
+      objId: 'offer-1',
+      eventType: 'claim',
+      outcome: 'unknown',
+      effortWords: 20,
+      deadlineMs: DEADLINE_MS,
+      occurredAtMs: NOW_MS - 60_000,
+      identity: over.identity ?? IDENTITY,
+      languageDirection: over.languageDirection ?? 'en-us>ms-my',
+    });
+  }
+
+  it('settles an unknown claim whose purchase order was accepted before the pass — from the assigned job', async () => {
+    // The team accepted the order inside the 15 minutes; the job is already assigned. It was
+    // being recovered as "never announced" while the claim row stayed Unknown.
+    const f = fixture();
+    adopted(f);
+    unknownClaim(f);
+    f.setAssigned([assignedWork('job-9', { effortWords: 20, identity: IDENTITY })]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, recovered: [] });
+    expect(f.store.eventsOf('offer-1')).toContainEqual(
+      expect.objectContaining({ eventType: 'claim', outcome: 'won' }),
+    );
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['offer-1']);
+    expect(f.queued.some((q) => q.eventId.startsWith('recovery:'))).toBe(false);
+  });
+
+  it('settles a DTP claim from its purchase order and still updates its sheet row', async () => {
+    // A DTP order carries no language codes; the claim remembers its own direction.
+    const f = fixture();
+    adopted(f);
+    const dtp = { ...IDENTITY, service: 'dtp_prep', workKey: 'aj-1||dtp_prep' };
+    unknownClaim(f, { identity: dtp, languageDirection: 'ja>ja' });
+    f.setPurchaseOrders([purchaseOrder('po-1', { languageDirection: null, identity: dtp })]);
+
+    await f.reconciler.runIfDue();
+
+    const row = f.queued.find((q) => q.eventId === 'row:offer-1|claim:settled');
+    expect(row?.payload).toMatchObject({ outcome: 'won', languageDirection: 'ja>ja' });
+  });
+
+  it('raises held work counted at zero to the word count its assigned job reports', async () => {
+    // A purchase order has no word count; the assigned job does. Left at zero, the day read
+    // emptier than it was until the work was delivered.
+    const f = fixture();
+    adopted(f);
+    f.setPurchaseOrders([purchaseOrder('po-7')]);
+    await f.reconciler.runIfDue();
+    expect(f.store.heldWork()[0]?.effortWords).toBe(0);
+
+    f.setPurchaseOrders([purchaseOrder('po-7', { status: 'accepted' })]);
+    f.setAssigned([assignedWork('job-9', { effortWords: 52, identity: IDENTITY })]);
+    f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork()).toEqual([
+      expect.objectContaining({ objId: 'po-7', effortWords: 52, heldSinceMs: NOW_MS }),
+    ]);
+  });
+
+  it('keeps a claim held while any stage still owes it, even beside a finished twin on the same key', async () => {
+    // One job reference can come round again. A delivered first round must not release the
+    // second round's pending order.
+    const f = fixture();
+    adopted(f);
+    holdWonClaim(f);
+    f.setAssigned([assignedWork('job-old', { status: 'delivered', identity: IDENTITY })]);
+    f.setPurchaseOrders([purchaseOrder('po-2')]);
+
+    f.setNow(NOW_MS + 2 * RECONCILE_INTERVAL_MS);
+    expect(await f.reconciler.runIfDue()).toMatchObject({ released: [] });
+  });
+
+  it('settles an unknown claim on a pending order even when an older round of the key was assigned', async () => {
+    const f = fixture();
+    adopted(f);
+    unknownClaim(f);
+    f.setAssigned([assignedWork('job-old', { status: 'delivered', identity: IDENTITY })]);
+    f.setPurchaseOrders([purchaseOrder('po-2')]);
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['offer-1']);
+  });
+
+  it('adopts at the legacy effort even when the deadlines differ by seconds', async () => {
+    const f = fixture();
+    f.store.recordEvent({
+      objId: 'old-1',
+      eventType: 'claim',
+      outcome: 'won',
+      effortWords: 20,
+      deadlineMs: DEADLINE_MS + 30_000,
+      occurredAtMs: NOW_MS - 3_600_000,
+    });
+    f.setPurchaseOrders([purchaseOrder('po-1')]);
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork()[0]?.effortWords).toBe(20);
+  });
+
+  it('weighs a recovered order at a keyless claim for its deadline rather than at zero', async () => {
+    // A won offer that carried no job reference has no key; its order must still not be
+    // counted at nothing.
+    const f = fixture();
+    adopted(f);
+    f.store.recordEvent({
+      objId: 'keyless',
+      eventType: 'claim',
+      outcome: 'won',
+      effortWords: 300,
+      deadlineMs: DEADLINE_MS,
+      occurredAtMs: NOW_MS - 60_000,
+    });
+    f.setPurchaseOrders([purchaseOrder('po-9')]);
+
+    await f.reconciler.runIfDue();
+
+    expect(f.store.heldWork()).toEqual([
+      expect.objectContaining({ objId: 'po-9', effortWords: 300 }),
+    ]);
   });
 });

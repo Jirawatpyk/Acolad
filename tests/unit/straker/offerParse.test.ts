@@ -182,6 +182,17 @@ describe('parseOffer — the golden cases, read off disk', () => {
     });
   });
 
+  it('warns when an offer carries no key, because its later stages cannot be recognised', () => {
+    const logger = recordingLogger();
+    parseOffer(withField(captured(AJ_267_ZH), 'job_ref', undefined), options({ logger }));
+    expect(logger.lines).toContainEqual(
+      expect.objectContaining({
+        level: 'warn',
+        fields: expect.objectContaining({ outcome: 'no_work_key' }),
+      }),
+    );
+  });
+
   it('never refuses an offer for a missing job reference, title or service', () => {
     // They name the work for people and tie its stages together; none of them is a reason
     // to claim or not. A payload without them still parses, with a null identity.

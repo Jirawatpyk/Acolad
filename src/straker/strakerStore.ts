@@ -197,6 +197,9 @@ CREATE TABLE IF NOT EXISTS offer_events (
   job_ref TEXT,
   title TEXT,
   service TEXT,
+  -- The claim's own direction, so a claim settled from a purchase order that carries no
+  -- language codes (DTP) can still rewrite its sheet row (2026-09-22).
+  language_direction TEXT,
   PRIMARY KEY (obj_id, event_type),
   -- An outcome belongs to the two event types that produce one, and a skip reason to the
   -- one that produces one. Enforced here so a caller bug fails at the write rather than
@@ -421,7 +424,11 @@ function addMissingColumns(db: StrakerDB): void {
       if (!present.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
     }
   }
+  if (!columnsOf('offer_events').includes('language_direction')) {
+    db.exec('ALTER TABLE offer_events ADD COLUMN language_direction TEXT');
+  }
   db.exec('CREATE INDEX IF NOT EXISTS idx_held_work_key ON held_work (work_key)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_offer_events_key ON offer_events (work_key)');
 }
 
 const IDENTITY_COLUMNS = ['work_key', 'job_ref', 'title', 'service'] as const;
@@ -523,6 +530,8 @@ export interface ClaimEvent extends OfferEventCommon, OfferEventWork {
   readonly outcome: ClaimOutcome;
   /** What names the work across its stages; optional, and never erased once recorded. */
   readonly identity?: WorkIdentity;
+  /** The offer's direction, kept for a settlement that has none to read (DTP orders). */
+  readonly languageDirection?: string;
 }
 
 /** An offer passed over, and the rule that passed it over (FR-010). */
@@ -607,6 +616,7 @@ export interface ClaimOnWorkKey {
   readonly deadlineMs: number | null;
   readonly occurredAtMs: number;
   readonly identity: WorkIdentity;
+  readonly languageDirection: string | null;
 }
 
 interface SightingRow {
@@ -618,6 +628,7 @@ interface SightingRow {
 }
 
 interface EventRow extends IdentityColumns {
+  language_direction: string | null;
   obj_id: string;
   event_type: OfferEventType;
   outcome: ClaimOutcome | null;
@@ -775,8 +786,8 @@ export class StrakerStore {
         .prepare(
           `INSERT INTO offer_events
              (obj_id, event_type, outcome, skip_reason, effort_words, deadline_ms, occurred_at_ms,
-              work_key, job_ref, title, service)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              work_key, job_ref, title, service, language_direction)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (obj_id, event_type) DO UPDATE SET
              outcome = excluded.outcome,
              skip_reason = excluded.skip_reason,
@@ -786,7 +797,8 @@ export class StrakerStore {
              work_key = COALESCE(excluded.work_key, offer_events.work_key),
              job_ref = COALESCE(excluded.job_ref, offer_events.job_ref),
              title = COALESCE(excluded.title, offer_events.title),
-             service = COALESCE(excluded.service, offer_events.service)`,
+             service = COALESCE(excluded.service, offer_events.service),
+             language_direction = COALESCE(excluded.language_direction, offer_events.language_direction)`,
         )
         .run(
           objId,
@@ -801,6 +813,9 @@ export class StrakerStore {
               ? undefined
               : event.identity,
           ),
+          event.eventType === 'claim' || event.eventType === 'recovery'
+            ? (event.languageDirection ?? null)
+            : null,
         );
     })();
   }
@@ -940,23 +955,25 @@ export class StrakerStore {
       deadlineMs: row.deadline_ms,
       occurredAtMs: row.occurred_at_ms,
       identity: identityOf(row) ?? { jobRef: null, title: null, service: null, workKey: key },
+      languageDirection: row.language_direction,
     };
   }
 
   /**
-   * The largest effort any claim without a work key was weighed at for this deadline, or null.
-   * Only for adopting purchase orders once, for claims won before identities were recorded:
-   * a purchase order carries no word count, and the largest is the side that cannot
-   * under-count the day.
+   * The largest effort any claim without a work key was weighed at for a deadline within
+   * `windowMs` of this one, or null. For purchase orders of claims won before identities were
+   * recorded, or won from an offer that carried no key: an order carries no word count, and
+   * the largest is the side that cannot under-count the day. A window, not equality — the two
+   * endpoints are not promised to spell a deadline to the millisecond.
    */
-  legacyClaimEffortByDeadline(deadlineMs: number): number | null {
+  legacyClaimEffortNear(deadlineMs: number, windowMs: number): number | null {
     const row = this.db
       .prepare(
         `SELECT MAX(effort_words) AS effort FROM offer_events
          WHERE event_type = 'claim' AND outcome IN ('won', 'unknown')
-           AND work_key IS NULL AND deadline_ms = ?`,
+           AND work_key IS NULL AND deadline_ms BETWEEN ? AND ?`,
       )
-      .get(deadlineMs) as { effort: number | null } | undefined;
+      .get(deadlineMs - windowMs, deadlineMs + windowMs) as { effort: number | null } | undefined;
     return row?.effort ?? null;
   }
 

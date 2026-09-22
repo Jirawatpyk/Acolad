@@ -1288,6 +1288,7 @@ describe('work identity on held work and claim events', () => {
       deadlineMs: NOW_MS + 86_400_000,
       occurredAtMs: NOW_MS,
       identity: IDENTITY,
+      languageDirection: null, // this claim recorded none
     });
     expect(store.claimEventByWorkKey('aj-999|th|translation')).toBeNull();
   });
