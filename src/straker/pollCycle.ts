@@ -78,6 +78,9 @@ export interface StrakerPollCycleDeps {
   readonly claimsPermitted?: () => boolean;
 }
 
+/** Two spellings of one deadline need not agree to the millisecond (as in `reconcile.ts`). */
+const SAME_DEADLINE_WINDOW_MS = 60_000;
+
 /** What one claim attempt produced, carried from `act` to `persist` without touching disk. */
 interface ActedClaim {
   readonly decision: Extract<ClaimDecision, { action: 'claim' }>;
@@ -267,16 +270,43 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       // The restart case neither of the two sets above can see: the process died after its
       // POST reached the portal and before the claim was recorded, so there is no claim row
       // and the in-memory set went with the process. Reconciliation runs first on start and
-      // holds what it finds under the key the offer shares with its purchase order and
-      // assigned job (workKey.ts) — so held work with this offer's key IS this offer, already
-      // ours, and a second /accept is the retry FR-019c forbids. Not a skip reason on
-      // purpose: nothing was decided, the work is simply not open to us.
+      // holds what it finds — so held work that IS this offer is already ours, and a second
+      // /accept is the retry FR-019c forbids. Not a skip reason on purpose: nothing was
+      // decided, the work is simply not open to us.
+      //
+      // Only held rows that did NOT come from a recorded claim (recovered or adopted ones):
+      // a row from a recorded claim is already covered by `alreadyClaimed`, and its key coming
+      // round again under a new offer is a genuine second round that must be judged on merit.
+      const recoveredHeld = held.filter((w) => !alreadyClaimed.has(w.objId));
       const heldKeys = new Set(
-        held.map((w) => w.identity?.workKey ?? null).filter((k): k is string => k !== null),
+        recoveredHeld
+          .map((w) => w.identity?.workKey ?? null)
+          .filter((k): k is string => k !== null),
       );
-      const alreadyHeld = (o: OfferForDecision): boolean => {
+      const heldMatch = (
+        o: OfferForDecision,
+      ): { match: 'work_key' | 'effort+deadline' | 'deadline'; heldObjId?: string } | null => {
         const key = o.identity?.workKey ?? null;
-        if (key === null || !heldKeys.has(key)) return false;
+        if (key !== null) return heldKeys.has(key) ? { match: 'work_key' } : null;
+        // A keyless offer has nothing to match by key, and its purchase order — which does
+        // carry a key — carries no word count, so the recovered row is often weighed at zero.
+        // Matched instead by a deadline within a minute and an equal effort, zero standing for
+        // "unknown": a false match costs one offer passed over, a missed one a double claim.
+        if (o.deadlineMs === null) return null;
+        const offerDeadline = o.deadlineMs;
+        for (const w of recoveredHeld) {
+          if (w.deadlineMs === null) continue;
+          if (Math.abs(w.deadlineMs - offerDeadline) > SAME_DEADLINE_WINDOW_MS) continue;
+          if (w.effortWords === 0) return { match: 'deadline', heldObjId: w.objId };
+          if (o.effortWords !== null && w.effortWords === o.effortWords) {
+            return { match: 'effort+deadline', heldObjId: w.objId };
+          }
+        }
+        return null;
+      };
+      const alreadyHeld = (o: OfferForDecision): boolean => {
+        const found = heldMatch(o);
+        if (found === null) return false;
         // Once per offer per process: the offer can stay listed for hours, and a line every
         // ten seconds would bury the one that mattered.
         if (!reportedHeld.has(o.objId)) {
@@ -287,7 +317,9 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
               action: 'decide',
               outcome: 'already_held',
               objId: o.objId,
-              workKey: key,
+              workKey: o.identity?.workKey ?? null,
+              match: found.match,
+              ...(found.heldObjId === undefined ? {} : { heldObjId: found.heldObjId }),
             },
             'offer still listed for work the team already holds — not claiming it again',
           );
@@ -309,12 +341,20 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
           'offers still listed that this bot has already attempted — not claiming them again',
         );
       }
-      const decisions = decideClaims(candidates, {
-        nowMs: atMs,
-        settings: deps.settings,
-        ledger: deps.ledger,
-        held,
-      });
+      // Until reconciliation has succeeded since start, nothing is decided at all — not just
+      // not claimed. Deciding anyway would let withheld claims consume capacity inside
+      // `decideClaims` and write false ceiling/deadline skip rows for the offers behind them.
+      // Sightings are still recorded below; a later cycle decides these offers normally.
+      const permitted = deps.claimsPermitted?.() ?? true;
+      const withheld = permitted ? 0 : candidates.length;
+      const decisions = permitted
+        ? decideClaims(candidates, {
+            nowMs: atMs,
+            settings: deps.settings,
+            ledger: deps.ledger,
+            held,
+          })
+        : [];
 
       // --- act -------------------------------------------------------------------
       // Nothing below writes or announces until every claim has resolved (FR-003).
@@ -332,17 +372,8 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
       // see `StrakerStore.clearBar` for why no observable signal is safe to clear it on.
       let stopClaiming: ClaimFollowUp | null =
         deps.store.barredSinceMs() === null ? null : 'stop_claiming';
-      // Read once per cycle. Withheld decisions are not `halted` (no skip row, no reason) and
-      // not attempted (not added to `attemptedThisProcess`), so a later cycle can still claim
-      // them if they are still listed once reconciliation has succeeded.
-      const permitted = deps.claimsPermitted?.() ?? true;
-      let withheld = 0;
       for (const decision of decisions) {
         if (decision.action !== 'claim') continue;
-        if (!permitted) {
-          withheld += 1;
-          continue;
-        }
         if (stopClaiming !== null) {
           halted.push(decision);
           continue;

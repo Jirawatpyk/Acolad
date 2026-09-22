@@ -136,12 +136,106 @@ describe('an offer whose work the team already holds is never claimed again (res
     expect(h.claimed).toEqual(['offer-2']);
   });
 
-  it('never matches two keyless records to each other', async () => {
+  it('does not block a genuine second round of a key the bot itself claimed and recorded', async () => {
+    // A held row that came from a recorded claim is already guarded by `claimedObjIds`; its
+    // key coming round again under a new offer is new work, and must be judged on its merits.
+    const h = harness({
+      offers: [raw('offer-2nd')],
+      extract: () => [{ ...eligible('offer-2nd'), identity: identity(KEY) }],
+      held: [heldRow('offer-1st', KEY)],
+      alreadyClaimed: ['offer-1st'],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-2nd']);
+  });
+
+  it('matches a keyless offer to recovered held work by deadline and effort', async () => {
+    const h = harness({
+      offers: [raw('offer-k')],
+      extract: () => [{ ...eligible('offer-k'), identity: identity(null) }],
+      held: [{ ...heldRow('po-1', KEY), effortWords: 4 }],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual([]);
+    expect(h.logs).toContainEqual({
+      level: 'info',
+      fields: expect.objectContaining({
+        outcome: 'already_held',
+        objId: 'offer-k',
+        heldObjId: 'po-1',
+        match: 'effort+deadline',
+      }) as unknown,
+    });
+  });
+
+  it('matches a keyless offer to a zero-weighed recovered order by deadline alone', async () => {
+    const h = harness({
+      offers: [raw('offer-k')],
+      extract: () => [{ ...eligible('offer-k'), identity: identity(null) }],
+      held: [{ ...heldRow('po-1', KEY), effortWords: 0 }],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual([]);
+    expect(h.logs.some((l) => l.fields['match'] === 'deadline')).toBe(true);
+  });
+
+  it('does not match a keyless offer whose deadline is more than a minute away', async () => {
+    const h = harness({
+      offers: [raw('offer-k')],
+      extract: () => [{ ...eligible('offer-k'), identity: identity(null) }],
+      held: [
+        {
+          ...heldRow('po-1', KEY),
+          effortWords: 4,
+          deadlineMs: Date.parse('2026-09-16T17:01:01+07:00'),
+        },
+      ],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-k']);
+  });
+
+  it('does not match a keyless offer whose effort differs from a weighed held row', async () => {
+    const h = harness({
+      offers: [raw('offer-k')],
+      extract: () => [{ ...eligible('offer-k'), identity: identity(null) }],
+      held: [{ ...heldRow('po-1', KEY), effortWords: 5 }],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-k']);
+  });
+
+  it('does not match a keyless offer to held work the bot itself claimed', async () => {
+    const h = harness({
+      offers: [raw('offer-k')],
+      extract: () => [{ ...eligible('offer-k'), identity: identity(null) }],
+      held: [{ ...heldRow('offer-old', null), effortWords: 4 }],
+      alreadyClaimed: ['offer-old'],
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.claimed).toEqual(['offer-k']);
+  });
+
+  it('never matches two keyless records to each other by key', async () => {
     // A null key is "cannot be made honestly", not a value — two of them are not the same work.
+    // (A keyless offer can still match by deadline and effort; this one's deadline is hours
+    // away from the held row's, so only a null-equals-null key match could block it.)
     const h = harness({
       offers: [raw('offer-3')],
       extract: () => [{ ...eligible('offer-3'), identity: identity(null) }],
-      held: [heldRow('po-1', null)],
+      held: [{ ...heldRow('po-1', null), deadlineMs: Date.parse('2026-09-17T17:00:00+07:00') }],
     });
 
     await h.cycle.runOnce();
@@ -225,11 +319,34 @@ describe('no claim before reconciliation has succeeded once (restart, FR-019c)',
     expect(held).toHaveLength(1);
     expect(held[0]?.fields).toMatchObject({ module: 'pollCycle', action: 'claim', withheld: 2 });
 
+    // Nothing was decided either: a withheld cycle writes no skip row for any offer.
+    expect(h.queued.filter((q) => q.channel === 'tracking')).toEqual([]);
+
     // Not remembered as attempted: once reconciliation succeeds, the next cycle claims them.
     permitted = true;
     await h.cycle.runOnce();
 
     expect(h.claimed).toEqual(['a', 'b']);
+  });
+});
+
+describe('a withheld cycle decides nothing, so it writes no false skip rows', () => {
+  // Withheld claims used to be decided anyway, consuming capacity in `decideClaims`, so an
+  // offer behind them was skipped for a ceiling or a deadline that nothing had actually used.
+  it('writes no skip row and consults no gate while claims are withheld', async () => {
+    const h = harness({
+      offers: [raw('a'), raw('b')],
+      extract: () => [eligible('a'), { ...eligible('b'), eligible: false }],
+      claimsPermitted: () => false,
+    });
+
+    await h.cycle.runOnce();
+
+    expect(h.events).toEqual([]);
+    expect(h.queued.filter((q) => q.channel === 'tracking')).toEqual([]);
+    expect(h.trace).not.toContain('gate:capacity');
+    // Sightings are still recorded.
+    expect(h.trace).toContain('persist:sighting:a');
   });
 });
 
