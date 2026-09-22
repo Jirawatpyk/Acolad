@@ -162,6 +162,9 @@ const VOCABULARY_CHECKS = {
     channel: STRAKER_OUTBOX_CHANNELS,
     status: STRAKER_OUTBOX_STATUSES,
   },
+  offer_skip_history: {
+    skip_reason: SKIP_REASONS,
+  },
 } as const satisfies Record<string, Record<string, readonly string[]>>;
 
 /**
@@ -254,6 +257,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_straker_outbox_dedup
   ON straker_outbox (event_id, channel);
 CREATE INDEX IF NOT EXISTS idx_straker_outbox_due
   ON straker_outbox (status, next_attempt_at_ms);
+
+-- Every change of an offer's skip reason, append-only (2026-09-22). offer_events keeps one
+-- skip row per offer and overwrites its reason, which answers "why is it skipped now" but
+-- not "why was it skipped at 10:00". A row is added only when the reason differs from the
+-- offer's latest row here, so the same reason every ten seconds stays one row. Additive,
+-- like straker_meta: CREATE TABLE IF NOT EXISTS brings a live database up to date on open.
+CREATE TABLE IF NOT EXISTS offer_skip_history (
+  obj_id TEXT NOT NULL CHECK (obj_id <> ''),
+  skip_reason TEXT NOT NULL CHECK (skip_reason IN (${sqlSet(VOCABULARY_CHECKS.offer_skip_history.skip_reason)})),
+  occurred_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_offer_skip_history_obj
+  ON offer_skip_history (obj_id);
 `;
 }
 
@@ -837,7 +853,43 @@ export class StrakerStore {
             ? (event.languageDirection ?? null)
             : null,
         );
+
+      // The skip history (2026-09-22): in the same transaction as the skip row, and only on
+      // a change of reason — "latest" is insertion order, which a reopen does not reset.
+      if (cols.skipReason !== null) {
+        const latest = this.db
+          .prepare(
+            'SELECT skip_reason FROM offer_skip_history WHERE obj_id = ? ORDER BY rowid DESC LIMIT 1',
+          )
+          .get(objId) as { skip_reason: SkipReason } | undefined;
+        if (latest?.skip_reason !== cols.skipReason) {
+          this.db
+            .prepare(
+              'INSERT INTO offer_skip_history (obj_id, skip_reason, occurred_at_ms) VALUES (?, ?, ?)',
+            )
+            .run(objId, cols.skipReason, event.occurredAtMs);
+        }
+      }
     })();
+  }
+
+  /**
+   * Every change of skip reason one offer went through, oldest first (2026-09-22) — for
+   * operations ("why did the bot pass this over at 10:00?"). `eventsOf` still gives only the
+   * latest reason; win rate and reports read `offer_events` and are unaffected.
+   */
+  skipHistoryOf(
+    objId: string,
+  ): { readonly skipReason: SkipReason; readonly occurredAtMs: number }[] {
+    const rows = this.db
+      .prepare(
+        'SELECT skip_reason, occurred_at_ms FROM offer_skip_history WHERE obj_id = ? ORDER BY rowid',
+      )
+      .all(requireIdentity(objId, 'a skip-history lookup')) as {
+      skip_reason: SkipReason;
+      occurred_at_ms: number;
+    }[];
+    return rows.map((r) => ({ skipReason: r.skip_reason, occurredAtMs: r.occurred_at_ms }));
   }
 
   /** Every event recorded about one offer. */
