@@ -31,7 +31,7 @@ import {
   type ClaimDecisionSettings,
   type OfferForDecision,
 } from './claimDecision.js';
-import { isSessionExpired, StrakerHttpError } from './httpClient.js';
+import { isCredentialRefusal, isSessionExpired, StrakerHttpError } from './httpClient.js';
 import type { StrakerLedger } from './ledger.js';
 import type { SightingTracker, StrakerCycle, StrakerPortal } from './main.js';
 import {
@@ -117,6 +117,9 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
    *
    * The backoff never outlives the problem: one success clears it, so a password fixed at
    * 09:00 does not leave the bot idle until a timer elapses.
+   *
+   * **Counts refusals only — 401/403 from the sign-in** (`isCredentialRefusal`). Everything
+   * else is a transport failure and fails the cycle without touching this counter.
    */
   let refusedSignIns = 0;
   let signInBlockedUntilMs = 0;
@@ -136,6 +139,23 @@ export function createStrakerPollCycle(deps: StrakerPollCycleDeps): StrakerCycle
     try {
       return await deps.portal.signIn();
     } catch (err) {
+      // Only the portal saying no to these credentials counts. A timeout, a 5xx, a 405 or an
+      // HTML page is the transport failing, and escalating the backoff on it is what kept the
+      // bot idle for eight hours on 2026-09-21 while the portal moved domains. That failure
+      // fails the cycle like any other failed read and the next cycle tries again.
+      if (!isCredentialRefusal(err)) {
+        deps.logger.error(
+          {
+            module: 'pollCycle',
+            action: 'sign_in',
+            outcome: 'transport_failed',
+            errName: err instanceof Error ? err.name : typeof err,
+            ...(err instanceof StrakerHttpError ? { status: err.status } : {}),
+          },
+          `sign-in did not get an answer about the credentials (${err instanceof Error ? err.message : String(err)}) — not counted as a refusal, no backoff`,
+        );
+        throw err;
+      }
       refusedSignIns += 1;
       const waitMs = Math.min(
         SIGN_IN_BACKOFF_MAX_MS,

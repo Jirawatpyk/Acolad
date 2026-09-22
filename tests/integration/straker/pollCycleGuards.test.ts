@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { StrakerHttpError } from '../../../src/straker/httpClient.js';
+import { StrakerHttpError, StrakerTimeoutError } from '../../../src/straker/httpClient.js';
 import { eligible, harness, raw, type HarnessOptions } from './pollCycleHarness.js';
 
 /**
@@ -543,6 +543,84 @@ describe('a refused sign-in backs off instead of hammering the portal (T075)', (
     }
 
     expect(h.claimed).toEqual(['a']);
+  });
+
+  /**
+   * 2026-09-21: the portal answered HTML and 405 for eight hours during its domain move, and
+   * every one of those was counted as a refused password — so the bot escalated to its
+   * hour-long backoff and kept waiting it out after the portal came back. Only a 401 or 403
+   * from the sign-in is the portal saying no to these credentials; anything else is the
+   * transport, and the next cycle simply tries again.
+   */
+  it('does not back off on sign-in timeouts: the cycle after recovery polls at once', async () => {
+    const clock = ticking();
+    let failures = 5;
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      signInFails: () =>
+        failures-- > 0 ? new StrakerTimeoutError('/api/vendor/auth/login', 10_000, null) : null,
+      now: clock.now,
+    });
+
+    for (let i = 0; i < 5; i += 1) {
+      await expect(h.cycle.runOnce()).resolves.toBe(false);
+      clock.tick();
+    }
+    // Five cycles, five attempts: a timeout is not a refusal, so nothing was held back.
+    expect(h.trace.filter((t) => t === 'signIn')).toHaveLength(5);
+
+    // Fifty seconds in — inside the one-minute first step a refusal would have set.
+    await expect(h.cycle.runOnce()).resolves.toBe(true);
+    expect(h.trace.filter((t) => t === 'fetch')).toHaveLength(1);
+    expect(h.claimed).toEqual(['a']);
+    // And nothing claimed it was a password problem.
+    expect(h.queued.filter((q) => q.channel === 'alerts')).toEqual([]);
+    expect(h.logs.some((l) => l.fields['outcome'] === 'backing_off')).toBe(false);
+  });
+
+  it.each([
+    ['a 5xx', () => new StrakerHttpError(503, '/api/vendor/auth/login', 'unavailable')],
+    ['a 405', () => new StrakerHttpError(405, '/api/vendor/auth/login', '<html>')],
+    ['an HTML body', () => new SyntaxError('Unexpected token < in JSON at position 0')],
+  ])('treats %s at sign-in as a transport failure, named as such', async (_label, fail) => {
+    const clock = ticking();
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      signInFails: fail,
+      now: clock.now,
+    });
+
+    for (let i = 0; i < 6; i += 1) {
+      await h.cycle.runOnce();
+      clock.tick();
+    }
+
+    expect(h.trace.filter((t) => t === 'signIn')).toHaveLength(6);
+    expect(h.queued.filter((q) => q.channel === 'alerts')).toEqual([]);
+    const signInLogs = h.logs.filter((l) => l.fields['action'] === 'sign_in');
+    expect(signInLogs.length).toBeGreaterThan(0);
+    expect(signInLogs.every((l) => l.fields['outcome'] === 'transport_failed')).toBe(true);
+  });
+
+  it('still backs off on a 401 at the same cadence', async () => {
+    const clock = ticking();
+    const h = harness({
+      offers: [raw('a')],
+      extract: () => [eligible('a')],
+      signInFails: () => new StrakerHttpError(401, '/api/vendor/auth/login', 'bad'),
+      now: clock.now,
+    });
+
+    for (let i = 0; i < 6; i += 1) {
+      await h.cycle.runOnce();
+      clock.tick();
+    }
+
+    // One attempt, then the one-minute hold covers the next five cycles.
+    expect(h.trace.filter((t) => t === 'signIn')).toHaveLength(1);
+    expect(h.logs.some((l) => l.fields['outcome'] === 'backing_off')).toBe(true);
   });
 });
 
