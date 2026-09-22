@@ -226,6 +226,7 @@ export async function readAssignedWork(
   const zone = options.deadlineZone ?? STRAKER_DEADLINE_ZONE;
 
   const collected: AssignedWork[] = [];
+  const seen = new Set<string>();
   let offset = 0;
 
   for (let page = 0; page < maxPages; page += 1) {
@@ -233,7 +234,11 @@ export async function readAssignedWork(
       `/api/vendors/${vendorId}/assigned-jobs?limit=${pageLimit}&offset=${offset}`,
     );
     const { items, total } = readEnvelope(reply);
-    for (const entry of items) collected.push(toAssignedWork(entry, zone));
+    for (const entry of items) {
+      const work = toAssignedWork(entry, zone);
+      refuseDuplicate(seen, work.objId, 'assigned-jobs', 'obj_id');
+      collected.push(work);
+    }
 
     // Three ways a page is the last one, and none of them may be guessed. A short page is
     // the portal's own end-of-list signal; an empty one stops a loop that would otherwise
@@ -264,6 +269,22 @@ export async function readAssignedWork(
     `Straker assigned-jobs is still incomplete after ${maxPages} pages ` +
       `(${collected.length} read) — refusing to treat a partial list as the whole of it`,
   );
+}
+
+/**
+ * One id twice across the pages of one read — the portal replaying a page, or shifting its
+ * list under the offset while we page. Either way the entries counted toward `total` include
+ * repeats, so a list that *looks* complete is short by exactly that many, and the work on the
+ * page never served would be released or left unrecovered. Refused, like any short list.
+ */
+function refuseDuplicate(seen: Set<string>, id: string, label: string, field: string): void {
+  if (seen.has(id)) {
+    throw new Error(
+      `Straker ${label} listed ${field} ${id} twice in one read (duplicate across pages) — ` +
+        'refusing to treat a list with repeats as the whole of it',
+    );
+  }
+  seen.add(id);
 }
 
 interface AssignedEnvelope {
@@ -455,6 +476,7 @@ export async function readPurchaseOrders(
   const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
   const zone = options.deadlineZone ?? STRAKER_DEADLINE_ZONE;
   const collected: PurchaseOrder[] = [];
+  const seen = new Set<string>();
 
   for (let page = 1; page <= maxPages; page += 1) {
     const reply = await client.getJson<unknown>(
@@ -462,7 +484,11 @@ export async function readPurchaseOrders(
         `&sort_by=created_at&sort_order=desc&page=${page}&page_size=${pageSize}`,
     );
     const { items, total } = readEnvelope(reply, 'purchase-orders');
-    for (const entry of items) collected.push(toPurchaseOrder(entry, zone));
+    for (const entry of items) {
+      const order = toPurchaseOrder(entry, zone);
+      refuseDuplicate(seen, order.poObjId, 'purchase-orders', 'po_obj_id');
+      collected.push(order);
+    }
     if (items.length === 0 || items.length < pageSize || collected.length >= total) {
       if (collected.length < total) {
         throw new Error(

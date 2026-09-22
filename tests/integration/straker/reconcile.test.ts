@@ -1070,6 +1070,21 @@ describe('reading the portal assigned-work list (contract 5)', () => {
     expect(c.paths).toEqual(['/api/vendors/v1/assigned-jobs?limit=100&offset=0']);
   });
 
+  it('refuses a replayed page rather than counting it toward the total (page 2 = page 1)', async () => {
+    // A portal that serves page one twice delivers `total` entries and looks complete — while
+    // the real second page, and the work on it, was never read.
+    const page = { items: [item('a'), item('b')], total: 4, limit: 2, offset: 0 };
+    const c = client([page, { ...page, offset: 2 }]);
+
+    await expect(readAssignedWork(c, 'v1', { pageLimit: 2 })).rejects.toThrow(/duplicate/i);
+  });
+
+  it('refuses a duplicate obj_id inside one page too', async () => {
+    const c = client([{ items: [item('a'), item('a')], total: 2, limit: 100, offset: 0 }]);
+
+    await expect(readAssignedWork(c, 'v1')).rejects.toThrow(/duplicate/i);
+  });
+
   it('refuses a bare array rather than reading an envelope change as no work', async () => {
     // The silent zero, from the other side: `job-offers` returns a bare array and
     // `assigned-jobs` an envelope, and a permissive cast that reads one as the other says
@@ -1133,7 +1148,16 @@ describe('reading the portal assigned-work list (contract 5)', () => {
   });
 
   it('stops rather than looping forever when the portal never finishes the list', async () => {
-    const c = client([{ items: [item('a')], total: 10_000, limit: 1, offset: 0 }]);
+    // Distinct entries per page: a replayed page is refused on its own grounds (duplicates),
+    // and this test is about the page cap.
+    const c = client(
+      ['a', 'b', 'c', 'd'].map((id, offset) => ({
+        items: [item(id)],
+        total: 10_000,
+        limit: 1,
+        offset,
+      })),
+    );
 
     await expect(readAssignedWork(c, 'v1', { pageLimit: 1, maxPages: 3 })).rejects.toThrow(
       /pages|incomplete/i,
@@ -1863,6 +1887,14 @@ describe('readPurchaseOrders', () => {
       },
     };
   }
+
+  it('refuses a replayed page rather than counting it toward the total (page 2 = page 1)', async () => {
+    const other = { ...PO, po_obj_id: 'po-other' };
+    const page = { items: [PO, other], total: 4, page: 1, page_size: 2 };
+    const d = door([page, { ...page, page: 2 }]);
+
+    await expect(readPurchaseOrders(d, 'vendor-1', { pageSize: 2 })).rejects.toThrow(/duplicate/i);
+  });
 
   it('reads the page the portal web app reads, and names each order by its key', async () => {
     const d = door([{ items: [PO], total: 1, page: 1, page_size: 100 }]);

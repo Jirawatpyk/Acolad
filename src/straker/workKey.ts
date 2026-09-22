@@ -55,7 +55,11 @@ export function optionalText(value: unknown): string | null {
  */
 function keyPart(value: unknown): string | null {
   if (typeof value !== 'string') return null;
-  const folded = value.normalize('NFKC').replace(/\p{Cf}/gu, '').trim().toLowerCase();
+  const folded = value
+    .normalize('NFKC')
+    .replace(/\p{Cf}/gu, '')
+    .trim()
+    .toLowerCase();
   return folded === '' ? null : folded;
 }
 
