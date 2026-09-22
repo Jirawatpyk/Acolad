@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 มาเลย์ MS (ดู [[acolad-malay-only-rule]])
 
 **ฟีเจอร์ 003 (live 2026-09-16)** เพิ่มบอท**ตัวที่สอง** `jobcatch-straker` — HTTP
-ล้วน ไม่ใช้ browser — แข่งคว้างานที่พอร์ทัล Straker (`vendr.straker.ai`) ดู
+ล้วน ไม่ใช้ browser — แข่งคว้างานที่พอร์ทัล Straker (`vendr.arbitr.ai` — ย้ายจาก `vendr.straker.ai` 2026-09-22) ดู
 [[straker-bot-live-trial-ceiling]]
 
 > **มีบอทสองตัวรันแยกกันบน PM2 — อย่าคิดว่ามีตัวเดียว**: `acolad-bot` (XTM,
@@ -150,7 +150,7 @@ main/once → bootstrap.createXtmBot() ประกอบทุกชิ้น (
 | `runtime/` | orchestration + entry points | (ดู Entry points ด้านบน) + `rateLimiter.ts`, `scheduler.ts` |
 | `monitoring/` | สุขภาพระบบ | `heartbeat.ts` (Healthchecks), `logger.ts` (pino + redaction) |
 | `shared/` | ใช้ร่วมกัน**สองบอท** (มี coverage gate) | `outboxRetry.ts` (ตารางเวลา retry), `rollingLogger.ts` (rotation/retention/censor), `sqliteOpen.ts` (open→WAL→migrate→quarantine) |
-| `straker/` | **บอทตัวที่สอง ครบวงจรในตัวเอง** (มี coverage gate) | `httpClient.ts` (transport ที่เดียว — DC-4), `pollCycle.ts` (fetch→diff→gate→act→persist→notify — ชื่อ step เดียวกับ XTM จงใจ), `claim.ts`/`claimDecision.ts`/`claimOutcome.ts`, `reconcile.ts` (ทุก 15 นาที — คืนโควต้างานที่เสร็จ), `ledger.ts` (เพดานรายวันทำงาน — เรียก `schedule/windowCapacity` ตัวเดียวกับ XTM), `strakerStore.ts`/`outbox.ts`, `notifier.ts`/`trackingSink.ts`/`dispatcher.ts`, `combinedSummary.ts` (อ่านสองพอร์ทัล read-only), `main.ts` (composition root) |
+| `straker/` | **บอทตัวที่สอง ครบวงจรในตัวเอง** (มี coverage gate) | `httpClient.ts` (transport ที่เดียว — DC-4), `pollCycle.ts` (fetch→diff→gate→act→persist→notify — ชื่อ step เดียวกับ XTM จงใจ), `claim.ts`/`claimDecision.ts`/`claimOutcome.ts`, `reconcile.ts` (ทุก 15 นาที — อ่าน assigned-jobs **และ** purchase-orders, จับคู่ด้วย `workKey.ts`, คืนโควต้างานที่เสร็จ), `ledger.ts` (เพดานรายวันทำงาน — เรียก `schedule/windowCapacity` ตัวเดียวกับ XTM), `strakerStore.ts`/`outbox.ts`, `notifier.ts`/`trackingSink.ts`/`dispatcher.ts`, `combinedSummary.ts` (อ่านสองพอร์ทัล read-only), `main.ts` (composition root) |
 
 **R11 bulkhead — กฎที่ test บังคับ ไม่ใช่สไตล์**: ไฟล์ใน `src/straker/**` **ห้าม
 value-import** `src/state/` หรือ `src/config/` (ข้อยกเว้น type-only ตัวเดียวที่บันทึกไว้:
@@ -302,7 +302,7 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
 
 ## jobcatch-straker (live 2026-09-16 — runbook)
 
-บอทตัวที่สอง **HTTP ล้วน ไม่มี browser**: อ่านรายการงานเปิดที่ `vendr.straker.ai`
+บอทตัวที่สอง **HTTP ล้วน ไม่มี browser**: อ่านรายการงานเปิดที่ `vendr.arbitr.ai`
 ทุก 10 วินาที → ตัดสิน → **ยิง claim แข่งกับเวนเดอร์เจ้าอื่น**. ต่างจาก XTM ตรงที่
 การคว้างาน**ย้อนกลับไม่ได้** ดีไซน์เลยเอียงไปทาง "ไม่คว้า" เสมอเมื่อไม่แน่ใจ.
 
@@ -353,6 +353,23 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   **วิธีเช็กที่ถูก: เปิดหน้ารายละเอียดของงาน** พอร์ทัลเขียนโซนไว้เองตรงนั้น —
   `Due date  17 Sep 2026 15:00 (UTC)` ส่วนหน้ารายการแสดงเวลาเดียวกันเป็น
   `22:00 GMT+7` และ API ส่งเลขชุดแรก (ยืนยันด้วย AJ-295 เมื่อ 2026-09-17)
+- **งานหนึ่งงานมี id สามตัว** (2026-09-22): offer (`/job-offers`) → กดรับแล้วกลายเป็น
+  **purchase order** (`/api/hitl/vendor/purchase-orders`, `pending` = รอคนกด Accept เพื่อ assign
+  คน — ค้างได้หลายชั่วโมง) → แล้วจึงเป็น **assigned job** (`/assigned-jobs`) ด้วย id ใหม่อีกตัว.
+  สามขั้นเชื่อมกันด้วย `workKey = job_ref|target|service` (`workKey.ts`; DTP target ว่าง/ซ้ำ source
+  = ค่าเดียวกัน). reconcile อ่าน**ทั้งสองรายการ** — PO `pending`/`accepted` นับเป็นงานที่ถือ,
+  สถานะของ assigned job เป็นตัวตัดสินเมื่อมีแล้ว. **ก่อนหน้านี้อ่านแค่ assigned-jobs** → ทุกงานที่
+  รับได้ถูกปล่อยโควต้าภายใน 1 รอบ (ค้างที่ PO) แล้วโผล่เป็น "Found by reconciliation" ซ้ำ.
+  งานที่มีคีย์แต่หาคู่ไม่เจอ **ไม่ถูกปล่อยจนกว่า DL จะผ่านไป 1 วัน** และ log warn
+  `held_work_unmatched` ทุกรอบ — ถ้าเห็น ให้เช็กว่า `service` ของ offer ยังตรงกับ `po_type` ไหม.
+  PO เก่าที่ค้างก่อนมีคีย์ถูก "adopt" เงียบ ๆ ครั้งเดียว (`straker_meta.po_adoption_done`)
+- **claim รอคำตอบได้ 10 วินาที** (`CLAIM_TIMEOUT_MS`; การอ่านยัง 2 วินาที) — `/accept` สร้าง PO
+  จึงช้า. claim ที่ยังได้ `unknown` (ไม่มีคำตอบ) จะถูก**ยืนยันเป็น Won** เมื่อ PO ที่คีย์ตรงกันโผล่ใน
+  รอบ reconcile: แถวชีตของ claim นั้นเปลี่ยนเป็น Won + การ์ด ✅ (ไม่ใช่ recovery ใหม่). claim เก่า
+  ก่อน 2026-09-22 ไม่มีคีย์ จึงยังค้างเป็น Unknown ในชีต
+- **ชีต v2** (`Straker_Tracking`): เพิ่มคอลัมน์ **L File name, M Job ref, N Service** ทางขวาของ
+  `_row_key` (K อยู่ที่เดิม) — แผ่น v1 ถูกเติมหัวคอลัมน์ให้เองตอนเขียนครั้งแรก เว้นแต่มีคนใส่หัว
+  อื่นไว้ที่ L–N (ปฏิเสธเสียงดัง ให้ย้ายคอลัมน์ของคนไปขวาของ N). การ์ดแชทมีแถว File / Job ref / Service
 - **claim ไม่เคย retry** ไม่ว่ากรณีใด (R7/FR-019c) — ผลลัพธ์ที่ไม่รู้จะถูกปิดโดย
   reconcile ทุก 15 นาทีแทน ไม่ใช่ยิงซ้ำ
 

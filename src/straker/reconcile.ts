@@ -57,17 +57,15 @@
  * as always; only the spreadsheet row is withheld, and the alert says which job and why.
  * The durable record is `offer_events`; the sheet is the human-readable copy of it.
  *
- * ## What this module deliberately does NOT do
+ * ## Two lists, one piece of work (2026-09-22)
  *
- * **It never releases held work.** Reconciliation is the only thing that reads the portal's
- * assigned list, so it is the only thing that *could* notice work the team no longer holds —
- * and both `StrakerStore.release` and `StrakerLedger.release` were written anticipating this
- * caller ("a repeated reconciliation pass is a no-op"). It is left unbuilt because FR-016a
- * mandates only the additive direction, and the subtractive one is not safe on the same
- * evidence: a partial read would free capacity for work the team genuinely holds, and
- * over-committing an irreversible claim is the one error this feature cannot take back.
- * Until something releases, the ledger's budget never returns — see the report accompanying
- * this task.
+ * A won claim becomes a **purchase order** — waiting, often for hours, for someone to accept
+ * it and name a translator — and only then an **assigned job**, each under an id of its own.
+ * A pass therefore reads both lists and ties them to held work by the key they share
+ * (`workKey.ts`), not by id. Held work is released only on positive evidence (its assigned
+ * job delivered, its order closed) or on absence from both complete lists; keyed work that
+ * matches nothing is kept until its deadline is a day gone, because that absence more likely
+ * means the key stopped matching than that the work vanished. See {@link releaseFinished}.
  */
 
 import { formatLanguageDirection, isMonolingualDirection } from './eligibility.js';
