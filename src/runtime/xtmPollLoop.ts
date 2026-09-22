@@ -14,8 +14,8 @@ import {
 } from '../reporting/dailyReport.js';
 // The Straker side of FR-018's combined view. A one-symbol dependency on purpose: this
 // loop is the live bot's, and the surface it takes on should be as small as the
-// requirement allows. `combinedReportRows` is documented never to throw.
-import { combinedReportRows, effectiveDayMapper } from '../straker/combinedSummary.js';
+// requirement allows. `combinedTotalRows` is documented never to throw.
+import { combinedTotalRows, effectiveDayMapper } from '../straker/combinedSummary.js';
 import { getThaiHolidays, holidaysForEffectiveDay } from '../schedule/thaiHolidays.js';
 import { bangkokYear, bangkokDateString } from '../schedule/bangkokCalendar.js';
 import { makeEffectiveDayOf } from '../schedule/deadlineDay.js';
@@ -39,6 +39,16 @@ const PORTAL_DOWN_THRESHOLD_MS = 10 * 60_000;
 
 /** Consecutive clean reads required after a yield before declaring full resume. */
 const RESUME_STABLE_CYCLES = 2;
+
+/**
+ * Consecutive unsettled-empty reads (cycles skipped by the false-empty guard) before the
+ * `grid_unsettled_streak` warn alert. One slow load is normal and must not page; 5 x ~20s =
+ * ~2 minutes of blind detection is worth a human look. Persisted in meta so a restart mid-streak
+ * neither loses the count nor strands the alert without its recovery.
+ */
+export const GRID_UNSETTLED_ALERT_STREAK = 5;
+const META_UNSETTLED_STREAK = 'grid_unsettled_streak';
+const META_UNSETTLED_SINCE = 'grid_unsettled_since';
 
 /** Collaborators injected for testing (default to production impls). */
 export interface XtmPollLoopDeps {
@@ -243,6 +253,7 @@ export class XtmPollLoop {
       }
       const summary = await this.cycle.run(snapshot);
       this.onCycleSuccess();
+      this.trackGridSettle(summary.transitionsSkipped, snapshot.capturedAt, pollCycleId);
 
       // DIAG (config.DIAG): snapshot the bot's OWN rendered Active grid right after
       // the read, so a "job present but read as 0" can be inspected from the bot's
@@ -385,7 +396,9 @@ export class XtmPollLoop {
           const held = this.store.listByLifecycle('accepted');
           // Bucket "Due today" by the EFFECTIVE deadline day (the working day the work lands on)
           // so the report's headline matches the capacity cap — same mapper the cycle uses.
-          const companion = combinedReportRows({
+          // The XTM figure and ONE combined line (FR-018 amended 2026-09-22): Straker sends
+          // its own 09:00 report into its own room, so no Straker rows or win rate here.
+          const companion = combinedTotalRows({
             xtm: {
               stateDir: this.cfg.STATE_DIR,
               metric: this.cfg.ACCEPT_EFFORT_METRIC,
@@ -429,13 +442,12 @@ export class XtmPollLoop {
               // off the cap is not enforced (accept 24/7), so the headline must not claim a limit.
               this.cfg.ACCEPT_SCHEDULE_ENABLED,
               this.cfg.ACCEPT_EFFORT_METRIC,
-              // FR-018 / US3: the other portal's committed workload and the combined total.
-              // The two bots keep separate ledgers — total isolation, at the accepted cost
-              // that the two daily ceilings can sum past what the one crew can actually do.
-              // Shared visibility is the agreed mitigation, and this report is the only place
-              // a human reliably looks, so it is where the mitigation has to appear.
+              // FR-018 / US3: the combined commitment across both portals. The two bots keep
+              // separate ledgers — total isolation, at the accepted cost that the two daily
+              // ceilings can sum past what the one crew can actually do. Shared visibility of
+              // the SUM is the agreed mitigation; Straker's own detail is in Straker's report.
               //
-              // `combinedReportRows` never throws and degrades to rows that state the gap, so
+              // `combinedTotalRows` never throws and degrades to rows that state the gap, so
               // a Straker record that cannot be read costs the extra section and not the
               // report. That matters here specifically: PR #14 fixed a bug in this report that
               // took the whole poll loop down.
@@ -494,9 +506,10 @@ export class XtmPollLoop {
           `${snapshot.malformed.length} row(s) failed parsing (quarantined)`,
         );
         await this.dispatcher.flush(this.clock.nowIso(), this.clock.nowMs());
-      } else {
+      } else if (!summary.transitionsSkipped) {
         // Clean read → clear any standing layout alert (once). Resolving here, not in
-        // onCycleSuccess, avoids a recovered↔alert flap when a row stays malformed.
+        // onCycleSuccess, avoids a recovered↔alert flap when a row stays malformed. An
+        // unsettled-empty read proves nothing about the layout, so it never resolves it.
         resolveAlert(
           this.db,
           this.outbox,
@@ -562,6 +575,7 @@ export class XtmPollLoop {
           skipped: summary.skipped,
           scheduleBlocked: summary.scheduleBlocked,
           holidayCalendarStale: summary.holidayCalendarStale,
+          transitionsSkipped: summary.transitionsSkipped,
           // §9 audit trail: an array of {day, resultingBucketEffort} entries (effort under the
           // active metric per deadline day — the bucket the accept decisions used this cycle) so a
           // held-read drift that over-fills a bucket leaves a grep-able trail.
@@ -700,6 +714,69 @@ export class XtmPollLoop {
       // webhook-revoked (onPermanent path) failures on non-team channels.
       this.nonTeamFailureThisFlush = true;
     }
+  }
+
+  /**
+   * Streak bookkeeping for the false-empty guard. A skipped cycle (unsettled-empty read) is still a
+   * HEALTHY cycle for the heartbeat -- one slow grid load must not page -- but every one is logged
+   * warn, and GRID_UNSETTLED_ALERT_STREAK in a row raise ONE `grid_unsettled_streak` warn alert
+   * (dedup key carries the streak's first capturedAt, so each streak alerts once). The first trusted
+   * read (settled, or rows seen) logs recovery, resolves the alert and resets the count. An errored
+   * cycle never reaches here, so it neither extends nor clears a streak.
+   */
+  private trackGridSettle(skipped: boolean, capturedAt: string, pollCycleId: string): void {
+    const streak = this.meta.getNumber(META_UNSETTLED_STREAK, 0);
+    if (skipped) {
+      const next = streak + 1;
+      const since = streak === 0 ? capturedAt : (this.meta.get(META_UNSETTLED_SINCE) ?? capturedAt);
+      this.db.transaction(() => {
+        this.meta.set(META_UNSETTLED_STREAK, String(next));
+        this.meta.set(META_UNSETTLED_SINCE, since);
+      })();
+      this.logger.warn(
+        {
+          module: 'xtmPollLoop',
+          action: 'grid_unsettled',
+          outcome: 'skipped',
+          pollCycleId,
+          streak: next,
+          since,
+        },
+        'Active grid read 0 rows but its data never settled — cycle skipped (no Missing/Removed/accept); heartbeat stays ok',
+      );
+      if (next >= GRID_UNSETTLED_ALERT_STREAK) {
+        raiseAlert(
+          this.db,
+          this.outbox,
+          'grid_unsettled_streak',
+          this.clock.nowIso(),
+          `${next} consecutive reads since ${since} loaded 0 rows without the grid settling`,
+          {},
+          `grid_unsettled_streak:${since}`,
+        );
+      }
+      return;
+    }
+    if (streak === 0) return;
+    const since = this.meta.get(META_UNSETTLED_SINCE) ?? capturedAt;
+    const downMs = Date.parse(capturedAt) - Date.parse(since);
+    const down = Number.isFinite(downMs) ? `${Math.round(downMs / 60_000)} min` : `${streak} reads`;
+    this.db.transaction(() => {
+      resolveAlert(
+        this.db,
+        this.outbox,
+        'grid_unsettled_streak',
+        this.clock.nowIso(),
+        down,
+        `grid_unsettled_streak:${since}`,
+      );
+      this.meta.set(META_UNSETTLED_STREAK, '0');
+      this.meta.set(META_UNSETTLED_SINCE, '');
+    })();
+    this.logger.info(
+      { module: 'xtmPollLoop', action: 'grid_unsettled', outcome: 'recovered', streak, since },
+      `Active grid reads trusted again after ${streak} skipped cycle(s)`,
+    );
   }
 
   private onCycleSuccess(): void {

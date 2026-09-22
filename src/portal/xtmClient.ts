@@ -58,6 +58,20 @@ export interface XtmPortalClient {
   dispose(): Promise<void>;
 }
 
+/**
+ * False-empty guard (the 38-minute missed-job class): a read that saw ZERO rows (no jobs, no
+ * malformed) while the grid's data XHR had NOT settled proves nothing -- an unloaded XTM grid is
+ * indistinguishable from an empty one (thead + "0 - 0 of 0" footer + placeholder row). Mark it
+ * `unsettledEmpty` and withdraw `emptyListConfirmed` so the cycle skips every absence-driven
+ * transition this cycle. A read that saw rows is trusted even when unsettled (the rows prove the data
+ * arrived; a partial grid is the accept path's separate waitForGridComplete concern), and malformed
+ * rows are a layout problem that must still surface via layout_changed.
+ */
+export function markUnsettledEmpty(snapshot: XtmJobSnapshot, settled: boolean): XtmJobSnapshot {
+  if (settled || snapshot.jobs.length > 0 || snapshot.malformed.length > 0) return snapshot;
+  return { ...snapshot, emptyListConfirmed: false, unsettledEmpty: true };
+}
+
 /** Page-level ops, injectable so navigation/rate/recovery logic is unit-testable via stubs. */
 export interface XtmOps {
   isLoggedOut(page: Page): Promise<boolean>;
@@ -162,10 +176,13 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     return kind;
   }
 
-  /** Default readActiveOnce: resolve the Active frame, then read it (overridable via ops). */
+  /**
+   * Default readActiveOnce: resolve the Active frame, read it, then withdraw the "empty" verdict of a
+   * 0-row read whose grid never settled (markUnsettledEmpty). Overridable via ops.
+   */
   private async readActiveOnceImpl(page: Page, pollCycleId: string): Promise<XtmJobSnapshot> {
-    const frame = await this.activeFrame(page);
-    return this.readActive(page, frame, pollCycleId);
+    const { frame, settled } = await this.resolveActiveFrame(page);
+    return markUnsettledEmpty(await this.readActive(page, frame, pollCycleId), settled);
   }
 
   async acceptEligibleTasks(targets: AcceptTarget[]): Promise<AcceptResult[]> {
@@ -382,9 +399,11 @@ export class PlaywrightXtmClient implements XtmPortalClient {
    * read that follows may race the data XHR and silently report a false "empty" —
    * exactly the 0-jobs regression this guard exists to prevent. The warn makes that
    * condition diagnosable instead of invisible (networkidle settles reliably for
-   * XTM today, so a timeout signals its network behavior changed).
+   * XTM today, so a timeout signals its network behavior changed). Returns whether it
+   * settled, so the Active read can refuse to call an unsettled 0-row grid "empty"
+   * (markUnsettledEmpty).
    */
-  private async settleGrid(page: Page, context: string): Promise<void> {
+  private async settleGrid(page: Page, context: string): Promise<boolean> {
     const settled = await page
       .waitForLoadState('networkidle', { timeout: 15_000 })
       .then(() => true)
@@ -401,6 +420,7 @@ export class PlaywrightXtmClient implements XtmPortalClient {
         'grid networkidle did not settle — the following read may race the data XHR (false-empty / 0-jobs risk)',
       );
     }
+    return settled;
   }
 
   private async login(page: Page): Promise<void> {
@@ -416,6 +436,11 @@ export class PlaywrightXtmClient implements XtmPortalClient {
 
   /** Resolve the inbox iframe and ensure the Active (IN_PROGRESS) tab is selected. */
   private async activeFrame(page: Page): Promise<Frame> {
+    return (await this.resolveActiveFrame(page)).frame;
+  }
+
+  /** activeFrame + whether the grid's data XHR settled (networkidle) before returning. */
+  private async resolveActiveFrame(page: Page): Promise<{ frame: Frame; settled: boolean }> {
     const handle = await page.waitForSelector(XTM.iframe.el, { timeout: 20_000 });
     const frame = await handle.contentFrame();
     if (!frame) throw new LayoutChangedError('inbox iframe present but has no content frame');
@@ -445,8 +470,8 @@ export class PlaywrightXtmClient implements XtmPortalClient {
     }
     // The grid's row data arrives via a later XHR than the table shell — wait for it
     // to settle before any read, or the read sees 0 rows even when jobs are present.
-    await this.settleGrid(page, 'active');
-    return frame;
+    const settled = await this.settleGrid(page, 'active');
+    return { frame, settled };
   }
 
   private readActive(page: Page, frame: Frame, pollCycleId: string): Promise<XtmJobSnapshot> {

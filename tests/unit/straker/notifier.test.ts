@@ -227,6 +227,44 @@ describe('offers sender — Straker own announcement channel (contract §2, FR-0
     expect(cardText(card).toLowerCase()).toContain('recover');
   });
 
+  it('posts the 09:00 daily report as its own card, named for the portal and the day', async () => {
+    const chat = chatStub();
+
+    const result = await createStrakerOffersSender(chat)({
+      kind: 'daily_report',
+      date: '2026-09-22',
+      rows: [
+        { label: 'Due today · translation', value: '1200 words (cap 3500/day)' },
+        { emoji: '⚠️', label: 'Overdue', value: '1 job(s) · 700 words' },
+        { label: 'Straker win rate', value: '50.0% — 1 won of 2 winnable' },
+      ],
+    });
+
+    expect(result).toEqual({ ok: true });
+    const card = readCard(chat.posted[0]);
+    expect(card.title).toBe('📋 Straker Daily Report — 22/09/2026');
+    expect(card.title).toContain(STRAKER_PORTAL_NAME);
+    expect(rowValue(card, 'Due today · translation')).toBe('1200 words (cap 3500/day)');
+    expect(cardText(card)).toContain('1 won of 2');
+  });
+
+  it('refuses a malformed daily report rather than posting half a card', async () => {
+    const chat = chatStub();
+
+    const result = await createStrakerOffersSender(chat)({ kind: 'daily_report', date: 'x' });
+
+    expect(result.ok).toBe(false);
+    expect(chat.posted).toHaveLength(0);
+  });
+
+  it('still reads an announcement queued before the daily report existed', async () => {
+    // Rows already in the outbox carry no `kind`. The new branch must not swallow them.
+    const chat = chatStub();
+
+    expect(await createStrakerOffersSender(chat)({ ...WIN })).toEqual({ ok: true });
+    expect(readCard(chat.posted[0]).title).toContain('Won');
+  });
+
   it('never announces a loss — a lost race is not news (contract §2, SC-007)', async () => {
     const chat = chatStub();
 

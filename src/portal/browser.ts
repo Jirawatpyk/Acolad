@@ -2,10 +2,26 @@ import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { withTimeout } from '../withTimeout.js';
+import type { Logger } from '../monitoring/logger.js';
 
 const NAV_TIMEOUT_MS = 30_000;
 const ACTION_TIMEOUT_MS = 10_000;
 const CLOSE_TIMEOUT_MS = 8_000;
+
+/** Injectable collaborators (tests pass a stub launcher so no real Chromium starts). */
+export interface BrowserSessionDeps {
+  launch?: () => Promise<Browser>;
+  logger?: Logger;
+}
+
+/**
+ * channel:'chromium' uses the new headless mode (the full Chrome binary, a GUI app) instead of
+ * chrome-headless-shell.exe (a console binary). On Windows 11 the console binary pops a stray
+ * Windows Terminal window that stays open for the browser's lifetime; the full binary launches
+ * silently.
+ */
+const launchChromium = (): Promise<Browser> =>
+  chromium.launch({ headless: true, channel: 'chromium' });
 
 /**
  * Owns the Chromium browser/context lifecycle. Persists session cookies via
@@ -16,12 +32,18 @@ export class BrowserSession {
   private browser: Browser | undefined;
   private context: BrowserContext | undefined;
   private openedAtMs = 0;
+  private readonly launch: () => Promise<Browser>;
+  private readonly logger: Logger | undefined;
 
   constructor(
     private readonly stateDir: string,
     private readonly recycleHours: number,
     private readonly nowMs: () => number,
-  ) {}
+    deps: BrowserSessionDeps = {},
+  ) {
+    this.launch = deps.launch ?? launchChromium;
+    this.logger = deps.logger;
+  }
 
   private get storageStatePath(): string {
     return join(this.stateDir, 'storageState.json');
@@ -53,23 +75,33 @@ export class BrowserSession {
     await this.open();
   }
 
+  /**
+   * Launch a browser + context and only THEN adopt them. All-or-nothing: the fields are assigned
+   * after the whole sequence succeeds, so a failure part-way (e.g. newContext throws twice) leaves
+   * the session exactly as it was -- and the Chromium launched here is closed before rethrowing,
+   * never leaked as an orphan process (the recycle path depends on both).
+   */
   private async open(): Promise<void> {
-    // channel:'chromium' uses the new headless mode (the full Chrome binary, a
-    // GUI app) instead of chrome-headless-shell.exe (a console binary). On
-    // Windows 11 the console binary pops a stray Windows Terminal window that
-    // stays open for the browser's lifetime; the full binary launches silently.
-    this.browser = await chromium.launch({ headless: true, channel: 'chromium' });
-    const storageState = existsSync(this.storageStatePath) ? this.storageStatePath : undefined;
+    const browser = await this.launch();
     try {
-      this.context = await this.browser.newContext(storageState ? { storageState } : {});
-    } catch {
-      // Corrupt/unreadable session file → start without it (FR-002).
-      this.discardSession();
-      this.context = await this.browser.newContext();
+      const storageState = existsSync(this.storageStatePath) ? this.storageStatePath : undefined;
+      let context: BrowserContext;
+      try {
+        context = await browser.newContext(storageState ? { storageState } : {});
+      } catch {
+        // Corrupt/unreadable session file → start without it (FR-002).
+        this.discardSession();
+        context = await browser.newContext();
+      }
+      context.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
+      context.setDefaultTimeout(ACTION_TIMEOUT_MS);
+      this.browser = browser;
+      this.context = context;
+      this.openedAtMs = this.nowMs();
+    } catch (err) {
+      await withTimeout(browser.close(), CLOSE_TIMEOUT_MS);
+      throw err;
     }
-    this.context.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
-    this.context.setDefaultTimeout(ACTION_TIMEOUT_MS);
-    this.openedAtMs = this.nowMs();
   }
 
   async persistSession(): Promise<void> {
@@ -80,16 +112,45 @@ export class BrowserSession {
     if (existsSync(this.storageStatePath)) rmSync(this.storageStatePath, { force: true });
   }
 
+  /** True once the OPEN browser has lived recycleHours. False before the first open: the first
+   *  page() opens lazily, so there is nothing to recycle (and no misleading "recycle" log). */
   shouldRecycle(): boolean {
+    if (!this.context) return false;
     return this.nowMs() - this.openedAtMs >= this.recycleHours * 3_600_000;
   }
 
-  /** Recycle: open a fresh context before disposing the old one (no heartbeat gap). */
-  async recycle(): Promise<void> {
+  /**
+   * Recycle: open a fresh browser before disposing the old one (no heartbeat gap). Logged either
+   * way (it used to be silent). If opening the replacement fails, open() has already closed what it
+   * launched and left the session untouched, so the OLD browser keeps serving; the error is logged
+   * and rethrown (the cycle fails loud, and the next maybeRecycle retries since openedAtMs did not
+   * move).
+   */
+  async recycle(reason = 'scheduled'): Promise<void> {
     const old = { browser: this.browser, context: this.context };
-    await this.open();
+    const ageMs = old.context ? this.nowMs() - this.openedAtMs : null;
+    try {
+      await this.open();
+    } catch (err) {
+      this.logger?.error(
+        { module: 'browser', action: 'recycle', outcome: 'error', reason, ageMs, err },
+        'browser recycle failed — keeping the current browser',
+      );
+      throw err;
+    }
     if (old.context) await withTimeout(old.context.close(), CLOSE_TIMEOUT_MS);
     if (old.browser) await withTimeout(old.browser.close(), CLOSE_TIMEOUT_MS);
+    this.logger?.info(
+      {
+        module: 'browser',
+        action: 'recycle',
+        outcome: 'ok',
+        reason,
+        ageMs,
+        recycleHours: this.recycleHours,
+      },
+      'browser recycled',
+    );
   }
 
   async dispose(): Promise<void> {

@@ -3,6 +3,8 @@ import {
   getThaiHolidays,
   resolveHolidaysForSpan,
   holidaysForEffectiveDay,
+  yearsNeedingCuration,
+  CURATION_HORIZON_DAYS,
 } from '../../src/schedule/thaiHolidays.js';
 
 describe('getThaiHolidays', () => {
@@ -83,5 +85,54 @@ describe('holidaysForEffectiveDay', () => {
     const m = holidaysForEffectiveDay(Date.parse('2026-12-20T12:00:00+07:00'));
     expect(m.get('2027-01-01')).toBeTruthy(); // Y+1 present
     expect(m.get('2027-12-31')).toBeTruthy(); // and the far end of Y+1 (back-walk guard for a 2028 DL)
+  });
+});
+
+describe('yearsNeedingCuration (early warning before the holiday calendar runs out)', () => {
+  it('returns [] when every Bangkok year between now and now+horizon is curated', () => {
+    expect(yearsNeedingCuration(Date.parse('2026-09-22T10:00:00+07:00'), 60)).toEqual([]);
+  });
+
+  it('flags the NEXT year once now+horizon crosses into it (boundary: 31 Dec vs 1 Jan Bangkok)', () => {
+    // 2027-11-01 10:00 +60d = 2027-12-31 10:00 Bangkok → still 2027 (curated) → nothing to do.
+    expect(yearsNeedingCuration(Date.parse('2027-11-01T10:00:00+07:00'), 60)).toEqual([]);
+    // One day later the horizon lands on 2028-01-01 → 2028 (uncurated) must be flagged.
+    expect(yearsNeedingCuration(Date.parse('2027-11-02T10:00:00+07:00'), 60)).toEqual([2028]);
+  });
+
+  it('keys the horizon year in BANGKOK time, not UTC', () => {
+    // 2027-11-01T18:00Z = 2027-11-02 01:00 Bangkok; +60d = 2028-01-01 01:00 Bangkok (but still
+    // 2027-12-31 in UTC). A UTC-keyed year would miss 2028 for those 7 hours.
+    expect(yearsNeedingCuration(Date.parse('2027-11-01T18:00:00Z'), 60)).toEqual([2028]);
+  });
+
+  it('ignores the horizon entirely when it is 0 — only the current year counts', () => {
+    expect(yearsNeedingCuration(Date.parse('2027-12-31T10:00:00+07:00'), 0)).toEqual([]);
+    expect(yearsNeedingCuration(Date.parse('2099-06-01T10:00:00+07:00'), 0)).toEqual([2099]);
+  });
+
+  it('includes the current year (when uncurated) and every intermediate year, sorted', () => {
+    const curated = (y: number): boolean => y === 2031;
+    expect(yearsNeedingCuration(Date.parse('2030-06-01T10:00:00+07:00'), 800, curated)).toEqual([
+      2030, 2032,
+    ]);
+  });
+
+  it('rejects a negative / non-finite horizon (a config bug must not silently disable the warning)', () => {
+    const now = Date.parse('2026-09-22T10:00:00+07:00');
+    expect(() => yearsNeedingCuration(now, -1)).toThrow(RangeError);
+    expect(() => yearsNeedingCuration(now, Number.NaN)).toThrow(RangeError);
+    expect(() => yearsNeedingCuration(Number.NaN, 60)).toThrow(RangeError);
+    expect(() => yearsNeedingCuration(now, 100_000)).toThrow(RangeError); // bounded loop
+  });
+
+  // ⚠️ CANARY — this test reads the REAL clock on purpose. It goes RED in CI about
+  // CURATION_HORIZON_DAYS (60) days before the calendar in src/schedule/thaiHolidaysData.ts runs
+  // out. A red run here is NOT flaky: it means "curate next year's Thai holidays now" —
+  // add the year to HOLIDAYS + CURATED_YEARS (นักขัตฤกษ์ + ชดเชย, NOT วันหยุดพิเศษ ครม.) and
+  // deploy, before the bot's `holiday_calendar_stale` page fires on 1 January.
+  it('CANARY: the curated holiday calendar covers the next CURATION_HORIZON_DAYS days of the real clock — if red, curate next year in thaiHolidaysData.ts', () => {
+    expect(CURATION_HORIZON_DAYS).toBe(60);
+    expect(yearsNeedingCuration(Date.now(), CURATION_HORIZON_DAYS)).toEqual([]);
   });
 });

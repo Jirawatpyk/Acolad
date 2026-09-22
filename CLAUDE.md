@@ -17,8 +17,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **มีบอทสองตัวรันแยกกันบน PM2 — อย่าคิดว่ามีตัวเดียว**: `acolad-bot` (XTM,
 > Playwright, port 47811, `state/acolad.db`) และ `jobcatch-straker` (HTTP, port
 > 47812, `state/straker/straker.db`, Sheet + ห้อง Chat ของตัวเอง). แยกขาดจากกัน
-> ตั้งใจ (R11) — มีจุดเดียวที่ต่อกันคือรายงาน 09:00 ของ XTM ที่แสดง workload รวม
-> สองพอร์ทัล
+> ตั้งใจ (R11) — มีจุดเดียวที่ต่อกันคือรายงาน 09:00 ของ XTM ซึ่งตั้งแต่ 2026-09-22 มี
+> **บรรทัดรวมบรรทัดเดียว** (`Both portals`); **Straker ส่งรายงาน 09:00 ของตัวเองเข้าห้องของตัวเอง**
+> (`straker/dailyReport.ts`) — มีรายงานเช้า 2 ใบ 2 ห้อง ไม่ใช่ใบเดียว
 
 **สถานะปัจจุบัน**: ฟีเจอร์ 002 **live** (auto-accept งานมาเลย์ ตั้งแต่ 2026-06-22) +
 **accept-scheduling gate live** ตั้งแต่ 2026-06-27 (PR #7/#8) + **ฟีเจอร์ 003 live
@@ -150,12 +151,12 @@ main/once → bootstrap.createXtmBot() ประกอบทุกชิ้น (
 | `runtime/` | orchestration + entry points | (ดู Entry points ด้านบน) + `rateLimiter.ts`, `scheduler.ts` |
 | `monitoring/` | สุขภาพระบบ | `heartbeat.ts` (Healthchecks), `logger.ts` (pino + redaction) |
 | `shared/` | ใช้ร่วมกัน**สองบอท** (มี coverage gate) | `outboxRetry.ts` (ตารางเวลา retry), `rollingLogger.ts` (rotation/retention/censor), `sqliteOpen.ts` (open→WAL→migrate→quarantine) |
-| `straker/` | **บอทตัวที่สอง ครบวงจรในตัวเอง** (มี coverage gate) | `httpClient.ts` (transport ที่เดียว — DC-4), `pollCycle.ts` (fetch→diff→gate→act→persist→notify — ชื่อ step เดียวกับ XTM จงใจ), `claim.ts`/`claimDecision.ts`/`claimOutcome.ts`, `reconcile.ts` (ทุก 15 นาที — อ่าน assigned-jobs **และ** purchase-orders, จับคู่ด้วย `workKey.ts`, คืนโควต้างานที่เสร็จ), `ledger.ts` (เพดานรายวันทำงาน — เรียก `schedule/windowCapacity` ตัวเดียวกับ XTM), `strakerStore.ts`/`outbox.ts`, `notifier.ts`/`trackingSink.ts`/`dispatcher.ts`, `combinedSummary.ts` (อ่านสองพอร์ทัล read-only), `main.ts` (composition root) |
+| `straker/` | **บอทตัวที่สอง ครบวงจรในตัวเอง** (มี coverage gate) | `httpClient.ts` (transport ที่เดียว — DC-4), `pollCycle.ts` (fetch→diff→gate→act→persist→notify — ชื่อ step เดียวกับ XTM จงใจ), `claim.ts`/`claimDecision.ts`/`claimOutcome.ts`, `reconcile.ts` (ทุก 15 นาที — อ่าน assigned-jobs **และ** purchase-orders, จับคู่ด้วย `workKey.ts`, คืนโควต้างานที่เสร็จ), `ledger.ts` (เพดานรายวันทำงาน — เรียก `schedule/windowCapacity` ตัวเดียวกับ XTM), `strakerStore.ts`/`outbox.ts`, `notifier.ts`/`trackingSink.ts`/`dispatcher.ts`, `combinedSummary.ts` (อ่านสองพอร์ทัล read-only; `combinedTotalRows` = บรรทัดรวมบนการ์ด XTM), `dailyReport.ts` (รายงาน 09:00 ของ Straker — pure) + `winRateRow.ts` (formatter win rate), `main.ts` (composition root + `createDailyReportStep`) |
 
 **R11 bulkhead — กฎที่ test บังคับ ไม่ใช่สไตล์**: ไฟล์ใน `src/straker/**` **ห้าม
 value-import** `src/state/` หรือ `src/config/` (ข้อยกเว้น type-only ตัวเดียวที่บันทึกไว้:
 `outcomePolicy.ts`) และฝั่ง XTM มีไฟล์เดียวที่เอื้อมเข้า `src/straker/` ได้คือ
-`runtime/xtmPollLoop.ts` → `combinedReportRows`. เพิ่ม import ใหม่ = `isolation.test.ts`
+`runtime/xtmPollLoop.ts` → `combinedTotalRows`. เพิ่ม import ใหม่ = `isolation.test.ts`
 แดงทันที. อีกกฎคู่กัน **DC-4**: ทุกอย่างที่ยิง request ต้องอยู่ใน `httpClient.ts` ไฟล์เดียว
 
 **XtmPortalClient** (interface ใน `src/portal/xtmClient.ts`) แยก Playwright I/O
@@ -236,6 +237,30 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   re-read ว่าง = grid race → ตัดเป็น failed (ไม่ใช่ missing); probe ไม่เจอ target → log loud
 - เฝ้า latency V16/V16b: `npm run report:latency` + heartbeat เขียว
 
+## XTM reliability guards (PR C — fix/xtm-reliability-audit)
+
+- **grid ว่างที่ยังโหลดไม่เสร็จ = ไม่เชื่อ** (คลาสเดียวกับบั๊กพลาดงาน 38 นาที — ดู
+  [[xtm-grid-loads-via-late-xhr]]): ถ้า `settleGrid` (networkidle) หมดเวลา **และ** อ่านได้ 0 แถว →
+  snapshot ถูกติด `unsettledEmpty` → รอบนั้น **ข้าม diff ทั้งหมด** (ไม่นับ missing, ไม่ Missing/
+  Closed/Removed, ไม่กดรับ, ไม่เขียน Sheet/Chat, ไม่ปิด baseline) แต่ **heartbeat ยังเขียว** (โหลดช้า
+  ครั้งเดียวไม่ควร page). log ทุกครั้ง: warn `module:xtmPollLoop action:grid_unsettled outcome:skipped`
+  (+ `streak`, `since`). ติดกัน **≥ 5 รอบ** → alert warn `grid_unsettled_streak` ครั้งเดียวต่อ streak
+  (dedup `grid_unsettled_streak:<capturedAt แรก>`, นับเก็บใน meta — restart ไม่ลืม) → รอบแรกที่เชื่อได้
+  log `outcome:recovered` + การ์ด ✅. **ทำอะไร:** เปิด XTM Tasks→Active ในเบราว์เซอร์ดูว่าโหลดช้า/ค้าง
+  ไหม + ดู log `module:xtmClient action:settleGrid outcome:timeout`. ถ้า XTM เปลี่ยนให้มี background
+  polling จน networkidle ไม่มีวัน settle → เปลี่ยนไปใช้ `waitForResponse` ของ XHR grid (**ห้าม**ถอด
+  การรอออก). ⚠️ ยังไม่ได้กันฝั่ง **Closed read** (`readClosedKeys` ที่ settle ไม่ทัน → set ว่าง →
+  งานที่ถือถูกจัดเป็น Removed) — ยังเสี่ยงอยู่ แต่เกิดได้เฉพาะหลังงานหายจาก Active 2 รอบที่ settle แล้ว
+- **browser recycle มี log แล้ว**: info `module:browser action:recycle outcome:ok` (reason/ageMs)
+  ทุก `BROWSER_RECYCLE_HOURS`; ถ้าเปิดตัวใหม่ล้มกลางทาง → Chromium ที่เพิ่ง launch ถูกปิด, ตัวเก่ายังใช้ต่อ,
+  log error `outcome:error` แล้ว throw (รอบนั้นล้ม — รอบถัดไปลอง recycle ใหม่เอง)
+- **ปฏิทินวันหยุดใกล้หมด**: alert warn `holiday_calendar_expiring:<ปี>` (Chat, **ไม่ page**) เมื่อปีของ
+  (วันนี้ + 60 วัน Bangkok) ยังไม่ curated — ครั้งเดียวต่อปี, ต่างจาก `holiday_calendar_stale` ที่ page
+  เมื่อ*ปีปัจจุบัน*ไม่ curated. **ทำอะไร:** เพิ่มปีถัดไปใน `src/schedule/thaiHolidaysData.ts`
+  (`HOLIDAYS` + `CURATED_YEARS`; นักขัตฤกษ์ + ชดเชย ไม่ใส่วันหยุดพิเศษ ครม.) แล้ว `npm run deploy`.
+  มี **canary test** ใน `tests/unit/thaiHolidays.test.ts` (`CANARY: ...`) ที่อ่านนาฬิกาจริง — CI แดง
+  ~60 วันก่อนสิ้นปีที่ curated สุดท้าย = **ไม่ใช่ flaky** แปลว่าถึงเวลา curate ปีหน้า
+
 ## accept-scheduling gate (live — PR #7/#8; capacity re-keyed to deadline-day + held-derived workload report — PR #14)
 
 `src/schedule/` กรองการ **"กดรับ"** เพิ่มอีกชั้นหลัง `decideAccept()` (detect+notify ยัง
@@ -270,10 +295,13 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   per bulk-group **ครอบทั้ง feasibility + capacity** กัน owned-but-Rejected); seed จาก held ครั้งเดียว/รอบ **ก่อน** record
   (memoize, advance per-DL-day). audit: `XtmCycleSummary.acceptedDueDays` log `resultingBucketEffort` ตอน accept
 - daily report 09:00 (`dailyReport.ts`) ส่ง **เฉพาะวันทำการ** (PR #8) **และเฉพาะเมื่อมี
-  อะไรจะรายงาน** (PR #32) — ไม่มีงานถือ + อีกพอร์ทัลก็ว่าง = **ไม่ส่ง** แล้ว log
-  `action:daily_report outcome:skipped` แทน (เงียบเพราะออกแบบ ≠ เงียบเพราะพัง — ดูจาก log
-  บรรทัดนั้น และ heartbeat ต้องยังเขียว). กฎ fail-safe: แถวที่ระบบไม่รู้จัก = ถือว่ามีเนื้อหา
-  แล้วส่ง — **`📋 Daily Report`:
+  อะไรจะรายงาน** (PR #32) — **ตั้งแต่ 2026-09-22 (owner decision, FR-018 amended)**: ส่งเมื่อ
+  **XTM ถืองาน** หรือ **แถวรวมเป็น warning** (⚠️ / unreadable / withheld / unavailable) เท่านั้น —
+  **งานที่ถือบน Straker อย่างเดียวไม่ทำให้การ์ด XTM ส่งแล้ว** (Straker มีรายงานของตัวเอง ดูหัวข้อ
+  jobcatch-straker). ไม่ส่ง = log `action:daily_report outcome:skipped` (เงียบเพราะออกแบบ ≠ เงียบ
+  เพราะพัง — ดูจาก log บรรทัดนั้น และ heartbeat ต้องยังเขียว). การ์ด XTM มีแถวจากฝั่งรวมแค่ **2 แถว**:
+  `XTM` + `Both portals` (`<n> words committed (XTM a · Straker b)`) — **ไม่มีแถว Straker/win rate
+  แล้ว** (`combinedTotalRows`) — **`📋 Daily Report`:
   Due today (Σ คำ held ที่ **effective deadline day = วันนี้** — งานที่ DL เวลาก่อน 09:00 นับเข้า**วันทำงานก่อนหน้า**
   ไม่ใช่วันที่ปฏิทินดิบ; cutoff PR #19) / ⚠️ Overdue (instant `dueAtMs<now`) / In progress top-5 by
   deadline** สร้างจาก held list, **throw-safe + อยู่ใน try/catch ของ loop** (bug รายงานไม่ page; PR
@@ -322,7 +350,19 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   จะเหลือแค่ ~3,600. **อย่าเปลี่ยนเป็นนับ "จำนวนวัน"** — รอบแรกทำแบบนั้นแล้ว review เจอว่า
   รับ 6,800 คำตอน 17:45 ได้ (C-1). งานค้างที่เลย DL แล้วนับเป็นงานวันนี้.
   `exceeds_daily_ceiling_entirely` = ใหญ่กว่า**เวลาที่เหลือทั้งหมดก่อน DL** ไม่ใช่ใหญ่กว่าวันเดียว.
-  รายงานรวม 09:00 ยังแสดงยอดรายวันครบกำหนด — วันเดียวอาจดูเกินเพดานได้ตามปกติ
+  รายงาน 09:00 ของ Straker แสดงยอด "Due today" รายวันครบกำหนด — วันเดียวอาจดูเกินเพดานได้ตามปกติ
+- **รายงาน 09:00 ของ Straker เอง** (2026-09-22, owner decision, FR-018 amended) — ส่งเข้าห้อง offers
+  ของ Straker วันทำการ ≥ 09:00 (วันทำงาน `ACCEPT_WORKDAYS` + วันหยุดชุดเดียวกับ XTM): `📋 Straker Daily Report`
+  = Due today แยก translation / DTP เทียบเพดานแต่ละตัว · ⚠️ Overdue · งานที่ถือ 5 อันที่ DL ใกล้สุด
+  (`file · job ref (ภาษาปลายทาง) · service` — DTP ไม่มีวงเล็บ) · win rate 14 วัน. **ไม่มีงานถือ + win rate ไม่มีอะไร (winnable 0,
+  turned away 0) = ไม่ส่ง** → log `module:dailyReport action:daily_report outcome:skipped`.
+  ตัดสินวันละครั้งจำใน `straker_meta` key `daily_report:<วันที่>` (ทั้งส่งและข้าม) → restart ไม่ส่งซ้ำ;
+  พัง = log `outcome:error` แล้ว**ลองใหม่รอบหน้า** (ไม่ทำ cycle fail). outbox dedup `daily:<วันที่>`
+  เป็นด่านที่สอง — ลบ meta key อย่างเดียว**ไม่**ทำให้ส่งซ้ำได้ (ถ้าส่งไม่ถึงให้ใช้ `straker:outbox:requeue`)
+- **win rate นับงานละครั้ง** (2026-09-22): recovery ถูกบันทึกด้วย id ของ PO/assigned job ไม่ใช่ offer
+  → เดิมงานเดียวนับสองครั้ง ("29 won of 34" ทั้งที่ชนะจริง 16). ตอนนี้ `computeWinRate` รวม recovery
+  เข้ากับ claim (won/unknown) ของงานเดียวกัน — ด้วย `workKey` หรือ (claim เก่าไม่มีคีย์) คำเท่ากัน +
+  DL ห่าง ≤ 60 วิ + claim ก่อน recovery; หนึ่ง claim รับได้หนึ่ง recovery. recovery ที่ไม่มีคู่ยังนับเป็น won
 - **มีสองเพดาน แยกกันเด็ดขาด** (ตั้งแต่ 2026-09-17): งานแปลใช้
   `STRAKER_MAX_WORDS_PER_DAY` (live = 3,500) งาน DTP/monolingual ใช้
   `STRAKER_DTP_MAX_WORDS_PER_DAY` (live = 30,000) — คนละ ledger คนละ budget

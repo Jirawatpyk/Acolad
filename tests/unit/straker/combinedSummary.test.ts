@@ -30,7 +30,6 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDatabase } from '../../../src/state/db.js';
 import { WORDS_UNIT, WWC_UNIT } from '../../../src/schedule/effort.js';
-import type { CardRow } from '../../../src/reporting/chatCard.js';
 import { openStrakerDatabase, StrakerStore } from '../../../src/straker/strakerStore.js';
 import {
   combineDailyView,
@@ -44,9 +43,7 @@ import {
   readCeilingFromEnv,
   readCycleTimestamps,
   readStrakerWorkload,
-  strakerWinRateRow,
-  WIN_RATE_WINDOW_DAYS,
-  combinedReportRows,
+  combinedTotalRows,
   readXtmWorkload,
   UPTIME_MIN_GRACE_MS,
   type Measured,
@@ -1260,331 +1257,125 @@ describe('the bulkhead holds', () => {
   });
 });
 
-describe('combinedReportRows — the rows the XTM 09:00 report renders (T060a, FR-018)', () => {
+describe('combinedTotalRows — the one combined line on the XTM 09:00 card (FR-018 amended 2026-09-22)', () => {
   /**
-   * The bridge between this module and the one place a human actually reads a daily
-   * summary. Everything it does is defensive on purpose: it is called from inside the live
-   * XTM bot's report, and the combined view is a **mitigation** for the two-ceiling problem.
-   * A mitigation that can break the report it rides on is worse than not having it.
+   * Straker now sends its own 09:00 report into its own room (owner decision 2026-09-22), so the
+   * XTM card no longer carries a Straker row or the win rate. What it keeps is the one figure
+   * that genuinely needs both portals: the crew's combined commitment, because the two daily
+   * ceilings can sum past what one crew can do (the reason separate ledgers were acceptable).
    *
-   * So the contract is narrow and absolute: it returns rows, and it never throws. Whatever
-   * it cannot find out, it says in a row.
+   * The contract stays narrow and absolute: rows out, never a throw — this runs inside the live
+   * XTM bot's report, and PR #14 fixed a bug in that report which took the whole loop down.
    */
-  const xtmSpec = (stateDir: string) => ({
+  const xtmSpec = (stateDir: string, metric: 'words' | 'wwc' = 'words') => ({
     stateDir,
-    metric: 'words' as const,
+    metric,
     ceilingPerDay: 3500,
     dayOf: effectiveDayMapper(9 * 60, new Set([1, 2, 3, 4, 5]), new Map()),
   });
 
-  it('never throws, even handed a state directory that does not exist', () => {
-    // The one guarantee that matters. `dailyReport.ts` is throw-safe at its call site, but
-    // relying on someone else's try/catch for a property this module can hold itself is how
-    // PR #14's bug — a throw in the daily report taking the whole loop down — happened.
-    const rows = combinedReportRows({
-      xtm: xtmSpec(join(tmpdir(), 'straker-nope-does-not-exist')),
-      strakerStateDir: join(tmpdir(), 'straker-also-nope'),
-      nowMs: NOW_MS,
-    });
-
-    expect(Array.isArray(rows)).toBe(true);
-    expect(rows.length).toBeGreaterThan(0);
-  });
-
-  it('states the gap in a row rather than going quiet, when a record cannot be read', () => {
-    const rows = combinedReportRows({
-      xtm: xtmSpec(join(tmpdir(), 'straker-nope-does-not-exist')),
-      strakerStateDir: join(tmpdir(), 'straker-also-nope'),
-      nowMs: NOW_MS,
-    });
-
-    // A report that silently omits the combined line is indistinguishable from one where
-    // the two portals happened to sum to nothing.
-    const text = JSON.stringify(rows);
-    expect(text).toMatch(/Straker/);
-    expect(text).toMatch(/could not|unreadable|not found|no combined/i);
-  });
-
-  it('carries both portals and a combined figure when both records are readable', async () => {
+  function xtmRecordHolding(words: number): string {
     const xtmDir = tempDir();
     const at = new Date(NOW_MS).toISOString();
     const xtm = openDatabase(xtmDir, at);
-    xtm.db
-      .prepare(
-        `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash,
-                           project_name, file_name, due_date, words, file_wwc, lifecycle_status)
-         VALUES ('k', 'k', 'visible', @at, @at, 'h', 'P', 'k', '2026-09-17T17:00:00+07:00',
-                 350, 300, 'accepted')`,
-      )
-      .run({ at });
+    if (words > 0) {
+      xtm.db
+        .prepare(
+          `INSERT INTO jobs (job_key, title, status, first_seen_at, last_seen_at, snapshot_hash,
+                             project_name, file_name, due_date, words, file_wwc, lifecycle_status)
+           VALUES ('k', 'k', 'visible', @at, @at, 'h', 'P', 'k', '2026-09-17T17:00:00+07:00',
+                   @words, 300, 'accepted')`,
+        )
+        .run({ at, words });
+    }
     xtm.db.close();
+    return xtmDir;
+  }
 
+  function strakerRecordHolding(words: number): string {
     const strakerDir = join(tempDir(), 'straker');
     mkdirSync(strakerDir, { recursive: true });
-    const { openStrakerDatabase, StrakerStore } =
-      await import('../../../src/straker/strakerStore.js');
     const straker = openStrakerDatabase(strakerDir, NOW_MS);
-    new StrakerStore(straker.db).hold({
-      objId: 'a',
-      effortWords: 120,
-      kind: 'translation',
-      deadlineMs: Date.parse('2026-09-17T17:00:00+07:00'),
-      heldSinceMs: NOW_MS,
-    });
+    if (words > 0) {
+      new StrakerStore(straker.db).hold({
+        objId: 'a',
+        effortWords: words,
+        kind: 'translation',
+        deadlineMs: Date.parse('2026-09-17T17:00:00+07:00'),
+        heldSinceMs: NOW_MS,
+      });
+    }
     straker.db.close();
+    return strakerDir;
+  }
 
-    const rows = combinedReportRows({
-      xtm: xtmSpec(xtmDir),
-      strakerStateDir: strakerDir,
+  it('shows the XTM figure and one combined line naming both parts — nothing else', () => {
+    const rows = combinedTotalRows({
+      xtm: xtmSpec(xtmRecordHolding(350)),
+      strakerStateDir: strakerRecordHolding(120),
       nowMs: NOW_MS,
     });
 
-    const text = JSON.stringify(rows);
-    expect(text).toContain('Straker');
-    // Both figures present and a combined one alongside them — the whole point of the view.
-    expect(text).toContain('350');
-    expect(text).toContain('120');
-    expect(text).toContain('470');
+    expect(rows).toEqual([
+      { label: 'XTM', value: '350 words committed' },
+      { label: 'Both portals', value: '470 words committed (XTM 350 · Straker 120)' },
+    ]);
   });
-});
 
-// ===========================================================================================
-// T076 / SC-004 — the win rate has to reach the report, not wait for someone to run a script
-// ===========================================================================================
-
-describe('T076 — the Straker win rate reaches the 09:00 report (SC-004)', () => {
-  /**
-   * SC-004 says the win rate is "measured and reported **continuously**". It was measured —
-   * `computeWinRate` is correct and tested — but its only caller was the manual
-   * `npm run straker:win-rate`. The gap that matters is not a missing number: SC-004 sets a
-   * target only after a two-week baseline, and a baseline nobody is shown is one nobody reads.
-   */
-  const HOUR = 3_600_000;
-  const DAY = 24 * HOUR;
-
-  /** One Straker record on disk, holding exactly these events. */
-  async function strakerRecord(events: readonly unknown[]): Promise<string> {
-    const stateDir = join(tempDir(), 'straker');
-    mkdirSync(stateDir, { recursive: true });
-    const opened = openStrakerDatabase(stateDir, NOW_MS);
-    const store = new StrakerStore(opened.db);
-    for (const event of events) store.recordEvent(event as never);
-    opened.db.close();
-    return stateDir;
-  }
-
-  /** The report-row call the 09:00 card makes, with only the Straker record varying. */
-  function reportRows(strakerStateDir: string): CardRow[] {
-    return combinedReportRows({
-      xtm: {
-        stateDir: tempDir(),
-        metric: 'words',
-        ceilingPerDay: 3_500,
-        dayOf: (ms) => (ms === null ? null : new Date(ms + 7 * HOUR).toISOString().slice(0, 10)),
-      },
-      strakerStateDir,
+  it('carries no Straker row and no win-rate row — Straker reports those in its own room', () => {
+    const rows = combinedTotalRows({
+      xtm: xtmSpec(xtmRecordHolding(0)),
+      strakerStateDir: strakerRecordHolding(120),
       nowMs: NOW_MS,
     });
-  }
-  const winRateRowOf = (rows: readonly CardRow[]): CardRow | undefined =>
-    rows.find((r) => r.label === 'Straker win rate');
 
-  const claim = (id: string, outcome: string, atMs = NOW_MS - HOUR) => ({
-    objId: id,
-    occurredAtMs: atMs,
-    eventType: 'claim' as const,
-    outcome,
-    effortWords: 4,
-    deadlineMs: NOW_MS + DAY,
-  });
-  const skip = (id: string, atMs = NOW_MS - HOUR) => ({
-    objId: id,
-    occurredAtMs: atMs,
-    eventType: 'skip' as const,
-    skipReason: 'ineligible_language' as const,
+    expect(rows.map((r) => r.label)).toEqual(['XTM', 'Both portals']);
   });
 
-  it('reports the rate, the numerator and the denominator — never a bare percentage', async () => {
-    const stateDir = await strakerRecord([
-      claim('a', 'won'),
-      claim('b', 'lost'),
-      claim('c', 'lost'),
-    ]);
+  it('states the gap on the combined line when the Straker record cannot be read', () => {
+    const rows = combinedTotalRows({
+      xtm: xtmSpec(xtmRecordHolding(350)),
+      strakerStateDir: join(tempDir(), 'never-existed'),
+      nowMs: NOW_MS,
+    });
 
-    const row = strakerWinRateRow(PERIOD, stateDir);
-
-    expect(row.label).toBe('Straker win rate');
-    // The counts travel with the percentage because at 2-3 offers a day a bare "33%" invites a
-    // decision the sample cannot support.
-    expect(row.value).toContain('33.3%');
-    expect(row.value).toContain('1 won of 3');
+    expect(rows[0]).toEqual({ label: 'XTM', value: '350 words committed' });
+    // A total covering only XTM must never be presented as the whole — the line says why.
+    expect(rows[1]?.emoji).toBe('⚠️');
+    expect(rows[1]?.label).toBe('Both portals');
+    expect(rows[1]?.value).toMatch(/^no combined total: .*Straker/);
   });
 
-  it('says n/a rather than 0% when nothing was genuinely winnable', async () => {
-    // FR-017's only exclusion is offers the team's own rules turned away. A day of those is not
-    // a day of losing — reporting 0% would read as the bot failing at its job.
-    const stateDir = await strakerRecord([skip('a'), skip('b')]);
+  it('flags an unreadable XTM record on the XTM row', () => {
+    const rows = combinedTotalRows({
+      xtm: xtmSpec(join(tempDir(), 'no-xtm-here')),
+      strakerStateDir: strakerRecordHolding(120),
+      nowMs: NOW_MS,
+    });
 
-    const row = strakerWinRateRow(PERIOD, stateDir);
-
-    expect(row.value).toContain('n/a');
-    expect(row.value).not.toContain('0.0%');
+    expect(rows[0]).toMatchObject({ emoji: '⚠️', label: 'XTM' });
+    expect(rows[0]?.value).toMatch(/record unreadable/);
+    expect(rows[1]).toMatchObject({ emoji: '⚠️', label: 'Both portals' });
   });
 
-  it('reports offers turned away beside the rate, because FR-017a says one number hides the other', async () => {
-    // "a low rate with a high turn-away count is a configuration question; a low rate with a low
-    // one is a speed question, and they call for opposite responses" — winRate.ts. The first cut
-    // of this row printed only the rate, which by T076's own argument left FR-017a unreported on
-    // the surface that counts.
-    const stateDir = await strakerRecord([
-      claim('a', 'won'),
-      claim('b', 'lost'),
-      skip('c'),
-      skip('d'),
-    ]);
+  it('withholds the total when the portals measure in different units', () => {
+    const rows = combinedTotalRows({
+      xtm: xtmSpec(xtmRecordHolding(350), 'wwc'),
+      strakerStateDir: strakerRecordHolding(120),
+      nowMs: NOW_MS,
+    });
 
-    expect(strakerWinRateRow(PERIOD, stateDir).value).toContain('2 turned away');
+    expect(rows[1]).toMatchObject({ emoji: '⚠️', label: 'Both portals' });
+    expect(rows[1]?.value).toMatch(/same unit/);
   });
 
-  it('carries the turn-away count even on the n/a line, where it is the only figure there is', async () => {
-    const stateDir = await strakerRecord([skip('a'), skip('b'), skip('c')]);
-
-    const row = strakerWinRateRow(PERIOD, stateDir);
-
-    expect(row.value).toContain('n/a');
-    expect(row.value).toContain('3 turned away');
-  });
-
-  it('says the figure is a lower bound while claims are still unresolved', async () => {
-    // An `unknown` outcome is a claim reconciliation has not settled. Counting it as a loss would
-    // understate the rate; hiding it lets a temporarily depressed figure read as a verdict.
-    const stateDir = await strakerRecord([claim('a', 'won'), claim('b', 'unknown')]);
-
-    expect(strakerWinRateRow(PERIOD, stateDir).value).toMatch(/unresolved|lower bound/i);
-  });
-
-  it('marks a small sample as a weak signal, which is what SC-004 turns on', async () => {
-    const stateDir = await strakerRecord([claim('a', 'won'), claim('b', 'lost')]);
-
-    expect(strakerWinRateRow(PERIOD, stateDir).value).toMatch(/weak signal/i);
-  });
-
-  it('counts only what happened inside the period it was given', async () => {
-    // A figure quoted without its window is the failure this guards: a loss from last month must
-    // not drag down a figure labelled as the last 24 hours.
-    const stateDir = await strakerRecord([
-      claim('a', 'won'),
-      claim('old', 'lost', NOW_MS - 30 * DAY),
-    ]);
-
-    expect(strakerWinRateRow(PERIOD, stateDir).value).toContain('1 won of 1');
-  });
-
-  it('says the record was unreadable rather than going quiet', async () => {
-    // An absent row reads as "no races", which is the one thing an unreadable record does not say.
-    const row = strakerWinRateRow(PERIOD, join(tempDir(), 'no-such-directory'));
-
-    expect(row.emoji).toBe('⚠️');
-    expect(row.value).toMatch(/unreadable/i);
-  });
-
-  it('never throws, even for a directory that could not exist', () => {
-    // An ABSOLUTE path that cannot exist. An earlier version passed '' here, which `join` turns
-    // into the bare relative name `straker.db` — resolved against the repo root where vitest
-    // runs, so the test would have quietly stopped exercising the missing-file path the day
-    // anyone left a scratch database there.
-    expect(() => strakerWinRateRow(PERIOD, join(tempDir(), 'a', 'b', 'c'))).not.toThrow();
-  });
-
-  it('is actually wired into the report rows — the seam, not just the capability', async () => {
-    // The lesson this feature learned five times: a capability can ship built, tested and
-    // unreachable. Asserting the row exists in `combinedReportRows` is the seam test.
-    const stateDir = await strakerRecord([claim('a', 'won'), claim('b', 'lost')]);
-
-    expect(winRateRowOf(reportRows(stateDir))).toBeDefined();
-  });
-
-  it('measures the report row over 14 days, not the card’s 24-hour period', async () => {
-    // The window this row needs is not the window the rest of the card uses. At 2-3 offers a day
-    // a 24-hour window makes `winnable` 0-3, so it could never reach WEAK_SIGNAL_BELOW (10): the
-    // caveat would be permanently on and SC-004's two-week baseline would never arrive. A caveat
-    // that is always true is one people stop reading.
-    const insideTheWindow = NOW_MS - (WIN_RATE_WINDOW_DAYS - 6) * DAY;
-    const stateDir = await strakerRecord([
-      claim('recent', 'won'),
-      claim('older', 'lost', insideTheWindow),
-    ]);
-
-    // The older loss is inside 14 days and far outside 24 hours. Seeing it counted is what proves
-    // the call site does not simply reuse the card's period.
-    expect(winRateRowOf(reportRows(stateDir))?.value).toContain('1 won of 2');
-  });
-
-  it('pins the window at fourteen days, because the number is load-bearing', () => {
-    // Shortening it puts the figure back below the weak-signal threshold forever; lengthening it
-    // stops describing a baseline anyone acted on. Derived fixtures alone would let either change
-    // pass green, so the constant is asserted directly.
-    expect(WIN_RATE_WINDOW_DAYS).toBe(14);
-  });
-
-  it('keeps the whole FR-018 section when the record is healthy', async () => {
-    // The assertion the consolidation dropped: against a GOOD record the section is not merely
-    // present, it is full — both portals, the combined line, and the win rate.
-    const stateDir = await strakerRecord([claim('a', 'won')]);
-
-    const rows = reportRows(stateDir);
-
-    expect(rows.length).toBeGreaterThan(3);
-    expect(rows.filter((r) => r.label === 'Both portals')).toHaveLength(1);
-    expect(winRateRowOf(rows)).toBeDefined();
-  });
-
-  it('keeps the whole FR-018 section when the Straker record cannot be read', async () => {
-    // The composition property that IS reachable. `combinedReportRows`'s outer catch REPLACES
-    // every row with one "unavailable" line, so anything that throws late destroys the XTM
-    // figure too. The win-rate row is therefore built and pushed under its own guard.
-    const rows = reportRows(join(tempDir(), 'never-existed'));
-
-    expect(rows.filter((r) => r.label === 'Both portals')).toHaveLength(1);
-    expect(rows.some((r) => (r.value ?? '').includes('combined view unavailable'))).toBe(false);
-  });
-
-  it('still reports the win rate when held_work is broken but the events read fine', async () => {
-    /**
-     * The case the suppression fix exists for, and it had no test — reverting the fix left the
-     * whole suite green, which a review demonstrated.
-     *
-     * `readStrakerWorkload` calls `heldWork()`, so a fault in `held_work` alone makes the PORTAL
-     * row report the record unreadable. An earlier cut suppressed the win-rate row whenever that
-     * happened — discarding a figure that is perfectly computable, because `offer_events` is a
-     * different table and reads fine. That is the "going quiet on an unreadable record" this
-     * row's own docstring refuses to do.
-     */
-    const stateDir = await strakerRecord([claim('a', 'won'), claim('b', 'lost')]);
-    const db = new Database(join(stateDir, 'straker.db'));
-    db.exec('ALTER TABLE held_work RENAME TO held_work_broken');
-    db.close();
-
-    const rows = reportRows(stateDir);
-
-    // The portal row admits the fault …
-    expect(rows.some((r) => r.label === 'Straker' && (r.value ?? '').includes('unreadable'))).toBe(
-      true,
-    );
-    // … and the win rate is still reported, because nothing about it was unreadable.
-    expect(winRateRowOf(rows)?.value).toContain('50.0%');
-  });
-
-  it('does not say the same thing twice when the record is unreadable', async () => {
-    // One fault, one line. The portal row already reports an unreadable record in the same words.
-    const rows = reportRows(join(tempDir(), 'never-existed'));
-
-    // Asserts the PROPERTY — no win-rate row — rather than filtering on the same
-    // 'record unreadable' string the production predicate matches. Filtering on that string
-    // meant rewording the message would stop the suppression AND stop this test noticing,
-    // because the extra row would no longer match the filter either.
-    expect(winRateRowOf(rows)).toBeUndefined();
-    // And the portal row still says it, so the fault is reported exactly once.
-    expect(rows.filter((r) => (r.value ?? '').includes('record unreadable'))).not.toHaveLength(0);
+  it('never throws, even handed state directories that do not exist', () => {
+    expect(() =>
+      combinedTotalRows({
+        xtm: xtmSpec(join(tmpdir(), 'straker-nope-does-not-exist')),
+        strakerStateDir: join(tmpdir(), 'straker-also-nope'),
+        nowMs: NOW_MS,
+      }),
+    ).not.toThrow();
   });
 });

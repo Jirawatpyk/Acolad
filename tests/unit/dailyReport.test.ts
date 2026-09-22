@@ -607,11 +607,35 @@ describe('reportWorthSending — an empty daily report is not sent', () => {
         [],
         [
           { label: 'XTM', value: '0 words committed' },
-          { label: 'Straker', value: '0 words committed' },
-          { label: 'Both portals', value: '0 words committed' },
+          { label: 'Both portals', value: '0 words committed (XTM 0 · Straker 0)' },
         ],
       ),
     ).toBe(false);
+  });
+
+  it('does not send for work held on Straker alone — Straker reports itself now', () => {
+    // Owner decision 2026-09-22 (FR-018 amended): Straker sends its own 09:00 report into its
+    // own room. A Straker-only figure keeping the XTM card alive would post the same work into
+    // the XTM room every morning, which is the duplicate the decision removed.
+    expect(
+      reportWorthSending(
+        [],
+        [
+          { label: 'XTM', value: '0 words committed' },
+          { label: 'Both portals', value: '1200 words committed (XTM 0 · Straker 1200)' },
+        ],
+      ),
+    ).toBe(false);
+  });
+
+  it('treats a row that says unreadable, withheld or unavailable as a warning, emoji or not', () => {
+    for (const value of [
+      'record unreadable — state/acolad.db not found',
+      'total withheld — units differ',
+      'combined view unavailable: boom',
+    ]) {
+      expect(reportWorthSending([], [{ label: 'Both portals', value }])).toBe(true);
+    }
   });
 
   it('treats a warning anywhere in the companion as enough, not only the first row', () => {
@@ -626,36 +650,14 @@ describe('reportWorthSending — an empty daily report is not sent', () => {
     ).toBe(true);
   });
 
-  it('sends when the win rate has actual races in it, even on a day with no work', () => {
-    // The deliberate half of the win-rate rule: "n/a — no genuinely winnable offers" is a
-    // non-event, but a real fortnightly figure is worth putting in front of someone whether or
-    // not anything is due today. It is also the only place that figure appears.
-    expect(
-      reportWorthSending(
-        [],
-        [
-          { label: 'XTM', value: '0 words committed' },
-          { label: 'Straker', value: '0 words committed' },
-          { label: 'Both portals', value: '0 words committed' },
-          {
-            label: 'Straker win rate',
-            value:
-              '12.5% — 1 won of 8 winnable in the last 14 days · 2 turned away by our own rules',
-          },
-        ],
-      ),
-    ).toBe(true);
-  });
-
   it('recognises the real combined rows as nothing, not a hand-written imitation of them', async () => {
-    // The rule matches on the text `combinedReportRows` produces, so it is pinned against that
-    // function's ACTUAL output rather than against a string copied into this file. Reword the
-    // combined section and this test fails — which is the point: the alternative is suppression
-    // silently switching off (harmless) or, worse, an unrecognised row being treated as empty.
-    const { combinedReportRows, effectiveDayMapper } =
+    // The rule is pinned against `combinedTotalRows`'s ACTUAL output rather than against a
+    // string copied into this file. Reword the combined line into something that reads as a
+    // warning and this test fails — which is the point.
+    const { combinedTotalRows, effectiveDayMapper } =
       await import('../../src/straker/combinedSummary.js');
     const { openDatabase } = await import('../../src/state/db.js');
-    const { openStrakerDatabase } = await import('../../src/straker/strakerStore.js');
+    const { openStrakerDatabase, StrakerStore } = await import('../../src/straker/strakerStore.js');
     const { mkdtempSync, mkdirSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -668,21 +670,39 @@ describe('reportWorthSending — an empty daily report is not sent', () => {
       mkdirSync(strakerDir, { recursive: true });
       openStrakerDatabase(strakerDir, nowMs).db.close();
 
-      const companion = combinedReportRows({
-        xtm: {
-          stateDir: root,
-          metric: 'words',
-          ceilingPerDay: 1_000,
-          dayOf: effectiveDayMapper(9 * 60, new Set([1, 2, 3, 4, 5]), new Map()),
-        },
-        strakerStateDir: strakerDir,
-        nowMs,
-      });
+      const rowsFor = (strakerStateDir: string) =>
+        combinedTotalRows({
+          xtm: {
+            stateDir: root,
+            metric: 'words',
+            ceilingPerDay: 1_000,
+            dayOf: effectiveDayMapper(9 * 60, new Set([1, 2, 3, 4, 5]), new Map()),
+          },
+          strakerStateDir,
+          nowMs,
+        });
 
-      // Both records readable, neither holding anything: the live situation, and the one case
-      // where staying quiet is right.
-      expect(companion.length).toBeGreaterThan(0);
-      expect(reportWorthSending([], companion)).toBe(false);
+      // Both records readable, neither holding anything: the live situation — stay quiet.
+      const empty = rowsFor(strakerDir);
+      expect(empty.length).toBeGreaterThan(0);
+      expect(reportWorthSending([], empty)).toBe(false);
+
+      // Straker holding work while XTM holds none: Straker's own report covers it — stay quiet.
+      const straker = openStrakerDatabase(strakerDir, nowMs);
+      new StrakerStore(straker.db).hold({
+        objId: 'a',
+        effortWords: 1_200,
+        kind: 'translation',
+        deadlineMs: nowMs + 86_400_000,
+        heldSinceMs: nowMs,
+      });
+      straker.db.close();
+      const strakerOnly = rowsFor(strakerDir);
+      expect(JSON.stringify(strakerOnly)).toContain('Straker 1200');
+      expect(reportWorthSending([], strakerOnly)).toBe(false);
+
+      // The Straker record unreadable: the combined line states a gap — that is worth sending.
+      expect(reportWorthSending([], rowsFor(join(root, 'never-existed')))).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

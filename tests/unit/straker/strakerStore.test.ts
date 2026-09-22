@@ -1293,6 +1293,42 @@ describe('work identity on held work and claim events', () => {
     expect(store.claimEventByWorkKey('aj-999|th|translation')).toBeNull();
   });
 
+  it('reads the identity back on claim and recovery events, so the win rate can join them', () => {
+    // The win rate merges a recovery recorded under a purchase-order id into the claim it
+    // settles (A3) — which it can only do if the identity survives the read, not only the write.
+    const { store } = freshStore();
+    const work = { effortWords: 20, deadlineMs: NOW_MS + 86_400_000 };
+    store.recordEvent({
+      objId: 'offer-1',
+      eventType: 'claim',
+      outcome: 'won',
+      occurredAtMs: NOW_MS,
+      identity: IDENTITY,
+      ...work,
+    });
+    store.recordEvent({
+      objId: 'po-1',
+      eventType: 'recovery',
+      outcome: 'recovered',
+      occurredAtMs: NOW_MS + 1,
+      identity: IDENTITY,
+      ...work,
+    });
+    store.recordEvent({
+      objId: 'offer-2',
+      eventType: 'claim',
+      outcome: 'lost',
+      occurredAtMs: NOW_MS + 2,
+      ...work,
+    });
+
+    const events = store.listEvents();
+    expect(events.find((e) => e.objId === 'offer-1')).toMatchObject({ identity: IDENTITY });
+    expect(events.find((e) => e.objId === 'po-1')).toMatchObject({ identity: IDENTITY });
+    // Absent, not a row of nulls, where none was recorded.
+    expect(events.find((e) => e.objId === 'offer-2')).not.toHaveProperty('identity');
+  });
+
   it('remembers a one-time step across restarts', () => {
     const { strakerDir } = tempRoot();
     const first = openStrakerDatabase(strakerDir, NOW_MS);

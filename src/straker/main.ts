@@ -54,6 +54,11 @@ import { createStrakerPollCycle } from './pollCycle.js';
 import { enqueueQuarantineAlert, openStrakerDatabase, StrakerStore } from './strakerStore.js';
 import { openSession, type StrakerSession } from './session.js';
 import type { RawOffer } from './probe.js';
+import { buildStrakerDailyReport } from './dailyReport.js';
+import { winRatePeriod } from './winRateRow.js';
+import { dueDailyReport } from '../reporting/dailyReport.js';
+import { bangkokDateString, bangkokYear } from '../schedule/bangkokCalendar.js';
+import { getThaiHolidays, holidaysForEffectiveDay } from '../schedule/thaiHolidays.js';
 
 /** Raised instead of a bare EADDRINUSE so a caller can tell "already running" from a fault. */
 export class SingleInstanceRefused extends Error {
@@ -588,12 +593,21 @@ export function assembleStrakerBot(
     claimsPermitted: () => reconciledOk,
   });
 
+  const dailyReport = createDailyReportStep({
+    store,
+    outbox,
+    logger,
+    calendar: { hoursStartMin: cfg.hoursStartMin, workdays: cfg.workdays },
+    ceilings,
+  });
+
   return {
     cycle: withDelivery({
       cycle,
       dispatcher,
       reconciler: gatedReconciler,
       reconciledOk: () => reconciledOk,
+      dailyReport,
       outbox,
       logger,
       now,
@@ -602,6 +616,88 @@ export function assembleStrakerBot(
     outbox,
     quarantinedCopyPath: opened.recoveredFromCorruption ? opened.corruptCopyPath : null,
     close: () => opened.db.close(),
+  };
+}
+
+/** The `straker_meta` key a decided report day is remembered under. */
+export const dailyReportFlagKey = (date: string): string => `daily_report:${date}`;
+
+/**
+ * Straker's own 09:00 report (FR-018 amended 2026-09-22), as one step of the bot's turn.
+ *
+ * Gated by the same rule the XTM report uses — `reporting/dailyReport.dueDailyReport`: a
+ * working day by Straker's own workdays and the curated Thai holidays (fail-open on an
+ * uncurated year), at or after 09:00 Bangkok, not yet decided today.
+ *
+ * **The day is remembered as decided, not only as sent.** A day with nothing to say is marked
+ * too, so the step does not re-read the store every ten seconds until midnight, and a claim
+ * won at 15:00 does not produce a "daily" report in the afternoon — that claim announces itself.
+ * The mark is durable (`straker_meta`), so a restart does not send a second card either; and
+ * the queue row and the mark are written in one transaction, so a crash between them cannot
+ * lose the report or double it. The outbox's `(event_id, channel)` dedup is a second guard.
+ *
+ * Never throws: a fault here is logged and the loop carries on, and the day stays undecided so
+ * the next turn tries again. A report is worth much less than the race it rides beside.
+ */
+export function createDailyReportStep(deps: {
+  readonly store: Pick<
+    StrakerStore,
+    'heldWork' | 'listEvents' | 'metaFlagSetAt' | 'setMetaFlag' | 'transaction'
+  >;
+  readonly outbox: Pick<StrakerOutbox, 'enqueue'>;
+  readonly logger: Logger;
+  readonly calendar: { readonly hoursStartMin: number; readonly workdays: ReadonlySet<number> };
+  readonly ceilings: { readonly translation: number; readonly monolingual: number };
+}): { runIfDue(nowMs: number): void } {
+  return {
+    runIfDue(nowMs) {
+      const date = bangkokDateString(nowMs);
+      try {
+        const decided = deps.store.metaFlagSetAt(dailyReportFlagKey(date)) !== null;
+        const holidays = getThaiHolidays(bangkokYear(nowMs)).holidays;
+        if (!dueDailyReport(nowMs, decided ? date : null, deps.calendar.workdays, holidays)) {
+          return;
+        }
+
+        const period = winRatePeriod(nowMs);
+        const report = buildStrakerDailyReport({
+          held: deps.store.heldWork(),
+          events: deps.store.listEvents({ fromMs: period.fromMs, toMs: period.toMs }),
+          nowMs,
+          calendar: { ...deps.calendar, holidays: holidaysForEffectiveDay(nowMs) },
+          ceilings: deps.ceilings,
+        });
+
+        if (report === null) {
+          deps.store.setMetaFlag(dailyReportFlagKey(date), nowMs);
+          deps.logger.info(
+            { module: 'dailyReport', action: 'daily_report', outcome: 'skipped', date },
+            'nothing held and no win-rate news — Straker daily report not sent',
+          );
+          return;
+        }
+
+        deps.store.transaction(() => {
+          deps.outbox.enqueue(`daily:${date}`, 'offers', JSON.stringify(report), nowMs);
+          deps.store.setMetaFlag(dailyReportFlagKey(date), nowMs);
+        });
+        deps.logger.info(
+          {
+            module: 'dailyReport',
+            action: 'daily_report',
+            outcome: 'enqueued',
+            date,
+            rows: report.rows.length,
+          },
+          'Straker daily report queued',
+        );
+      } catch (err) {
+        deps.logger.error(
+          { module: 'dailyReport', action: 'daily_report', outcome: 'error', date },
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    },
   };
 }
 
@@ -631,6 +727,8 @@ function withDelivery(deps: {
   readonly reconciler: { runIfDue(): Promise<unknown> };
   /** Whether a reconciliation pass has completed successfully since the process started. */
   readonly reconciledOk: () => boolean;
+  /** The 09:00 report. Promises never to throw; guarded here anyway, like the reconciler. */
+  readonly dailyReport: { runIfDue(nowMs: number): void };
   /** Read only, and only for the dead backlog — the dispatcher owns every write. */
   readonly outbox: Pick<StrakerOutbox, 'countByStatus'>;
   readonly logger: Logger;
@@ -666,6 +764,10 @@ function withDelivery(deps: {
       await reportAsync(async () => {
         await deps.reconciler.runIfDue();
       });
+
+      // After reconciling, so the report reads the held set this pass just corrected; before
+      // flushing, so a report queued this turn is delivered this turn.
+      report(() => deps.dailyReport.runIfDue(deps.now()));
 
       let deadBacklog = 0;
       await reportAsync(async () => {
