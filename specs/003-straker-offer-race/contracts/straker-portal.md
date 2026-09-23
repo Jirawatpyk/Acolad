@@ -91,9 +91,12 @@ A won claim does **not** go straight to the assigned list. The portal issues a p
 
 `GET /api/hitl/vendor/purchase-orders?vendor_id=&sort_by=created_at&sort_order=desc&page=&page_size=` (the call the portal's own web app makes) returns `{ items, total, page, page_size }`. Each item: `po_obj_id`, `status`, `job_ref`, `source_language_code`, `target_language_code`, `po_type` (`translation`, `dtp_prep`), `due_at`, amounts. **No word count.**
 
-> **Corrected 2026-09-23 — empty language codes are not DTP's alone, and this stage's key is not always an identity.** This section previously said the two language codes are "both empty on a DTP order", and §5b claimed the `job_ref` + target + service triple "never repeated" across 27 orders. A **per-hour / DIRECT** job falsified both: `aj-345` was offered in eight language pairs, the offers named their targets and the assigned jobs named theirs, and all six purchase orders in between came back with **both language codes empty and no readable `due_at`**. Six distinct jobs, one key.
+> **Corrected 2026-09-23 — a PENDING order names no language and no due date; both appear when it is accepted.** This section previously said the two language codes are "both empty on a DTP order", and §5b claimed the `job_ref` + target + service triple "never repeated" across 27 orders. Both were wrong, and in a way that matters:
 >
-> So at the purchase-order stage the key can be a **bucket** — which reference, which service — rather than an identity. The offer and assigned-job stages are unaffected; only this one degrades. Six phantom holds and six duplicate cards were written before reconciliation learned to match a languageless order against the reference's held rows by count instead of by key. Anything reading this endpoint must not assume the triple identifies one job.
+> - Read of all 43 orders in the portal's own UI: **every order with no languages and no due date is `AWAITING ACCEPTANCE`; every `ACCEPTED` / `PAYMENT APPROVED` / `REVOKED` order carries both.** A DTP order carries them too — `Japanese → Japanese`, source equal to target, which `workKey` collapses. So the empty shape belongs to the *pending state*, not to a service or a pricing model.
+> - Every won job therefore passes through a stage where its order names no language. It is usually invisible because a human accepts within minutes and reconciliation only looks every fifteen. `aj-345` — a per-hour / DIRECT job whose six orders sat unaccepted for three hours — is simply the first time a pass read them in that state.
+>
+> While an order is pending its key is a **bucket** (which reference, which service), not an identity: six distinct jobs, one key. Reconciliation matches a languageless order against the reference's held rows by count, one order to one row. The offer and assigned-job stages are unaffected — only this one degrades, and only while pending.
 
 | Status | Assigned job | Meaning |
 |---|---|---|
