@@ -86,7 +86,7 @@ import type { StrakerSession } from './session.js';
 import { trackingRowKey, type TrackingRecord } from './trackingSink.js';
 import type { ClaimOutcome } from './types.js';
 import type { ClaimOnWorkKey, HeldWork, StrakerStore } from './strakerStore.js';
-import { workIdentity, workLabels, type WorkIdentity } from './workKey.js';
+import { workBucket, workIdentity, workLabels, type WorkIdentity } from './workKey.js';
 
 // ---------------------------------------------------------------------------
 // The cadence and the alert threshold
@@ -132,7 +132,11 @@ const RECOVERED_ALERT_CONDITION = CLAIM_ALERT_CONDITION[RECOVERED]!;
 /** The alerts reconciliation raises about held work it keeps — once per offer. */
 type HeldWorkAlertCondition = Extract<
   OfferAlertCondition,
-  'held_work_unmatched' | 'held_work_absent_keyless' | 'adopted_without_effort'
+  | 'held_work_unmatched'
+  | 'held_work_absent_keyless'
+  | 'adopted_without_effort'
+  | 'held_work_undated'
+  | 'held_work_order_languageless'
 >;
 
 /** How many jobs to ask for per page. The read is paginated; the offer list is not. */
@@ -443,7 +447,11 @@ export interface PurchaseOrder {
   readonly poObjId: string;
   readonly status: string;
   readonly deadlineMs: number | null;
-  /** Null on a DTP order, whose language codes are empty. */
+  /**
+   * Null whenever the order's language codes are empty — a DTP order, and (2026-09-23) a
+   * per-hour / DIRECT translation order too. Contract §5a recorded this as DTP-only and was
+   * corrected; do not read a null here as "this is DTP".
+   */
   readonly languageDirection: string | null;
   /** Always present; its `workKey` is null only when the order names no job or service. */
   readonly identity: WorkIdentity;
@@ -580,6 +588,24 @@ interface KeylessPool {
   readonly taken: Set<string>;
 }
 
+/** The reference-and-service group a record belongs to, or null when it has no honest one. */
+function bucketOf(identity: WorkIdentity | undefined): string | null {
+  return identity === undefined ? null : workBucket(identity.jobRef, identity.service);
+}
+
+/**
+ * True when a record's key says which reference and which service but **not which job** —
+ * the shape a per-hour purchase order arrives in, and the shape a DTP record arrives in.
+ *
+ * Read off the key rather than off `languageDirection`, which is not the same question: a
+ * record with an empty source and a real target has no direction to show and a perfectly
+ * good key (`ref|ko|kind`). The key is the only thing that knows whether the job is named.
+ */
+function namesNoLanguage(identity: WorkIdentity | undefined): boolean {
+  const key = identity?.workKey ?? null;
+  return key !== null && key === bucketOf(identity);
+}
+
 /** What proved an unknown claim was won, as a settlement records it. */
 interface SettlementEvidence {
   /** For the note: `its purchase order (pending)`, `its assigned job (in_progress)`. */
@@ -624,7 +650,7 @@ export type ReconcileStore = Pick<
   | 'setMetaFlag'
   | 'claimedObjIds'
 >;
-export type ReconcileLedger = Pick<StrakerLedger, 'hold' | 'release'>;
+export type ReconcileLedger = Pick<StrakerLedger, 'hold' | 'release' | 'heldWorkMissingDeadline'>;
 export type ReconcileOutbox = Pick<StrakerOutbox, 'enqueue'>;
 
 export interface ReconcileDeps {
@@ -673,6 +699,17 @@ export type ReconcileOutcome =
       readonly adopted: number;
       /** Held rows re-weighed upward at the word count their assigned job reports. */
       readonly effortUpgraded: number;
+      /**
+       * Purchase orders that named no language and were matched to a held row of the same
+       * reference instead of recovered (2026-09-23). Climbing on a reference that has not
+       * done this before is the early warning that another payload has degraded.
+       */
+      readonly covered: number;
+      /**
+       * Held rows whose deadline cannot be placed on a day, as the pass leaves them. Every
+       * one of these is load that no day's ceiling is counting.
+       */
+      readonly undated: number;
       readonly consecutiveFailures: 0;
     }
   | {
@@ -819,10 +856,38 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       taken: new Set<string>(),
     };
 
+    // Held work grouped by {@link workBucket} — the reference and the service, without the
+    // language. A purchase order that names no language cannot say WHICH of a reference's
+    // jobs it is, so it is matched against this by count: one order takes one row, and only
+    // an order with no row left to take is work nobody recorded (2026-09-23).
+    //
+    // In `heldWork()` order — `held_since_ms`, then `obj_id` — so which row an order takes is
+    // fixed across processes without sorting anything here. No row is written either way;
+    // the order shows up only in the log line, which is where a human reads it back.
+    const bucketRows = new Map<string, string[]>();
+    for (const row of heldRows) {
+      const bucket = bucketOf(row.identity);
+      if (bucket === null) continue;
+      const queue = bucketRows.get(bucket);
+      if (queue === undefined) bucketRows.set(bucket, [row.objId]);
+      else queue.push(row.objId);
+    }
+    /** One row out of the bucket, never the same row twice. */
+    const takeBucketSlot = (bucket: string | null): string | undefined =>
+      bucket === null ? undefined : bucketRows.get(bucket)?.shift();
+    /** A hold this pass created: the work it covers is now accounted for in its bucket. */
+    const addBucketSlot = (identity: WorkIdentity | undefined, objId: string): void => {
+      const bucket = bucketOf(identity);
+      if (bucket === null) return;
+      const queue = bucketRows.get(bucket);
+      if (queue === undefined) bucketRows.set(bucket, [objId]);
+      else queue.push(objId);
+    };
+
     const recovered: string[] = [];
     let firstFailure: unknown = null;
     // What the pass did, for its one summary line (observability, 2026-09-22).
-    const counts = { settled: 0, adopted: 0, effortUpgraded: 0 };
+    const counts = { settled: 0, adopted: 0, effortUpgraded: 0, covered: 0, undated: 0 };
     const attempt = (objId: string, action: string, fn: () => void): void => {
       try {
         fn();
@@ -889,7 +954,7 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       // assigned job is the proof. Settled as the win it was, not recovered as a lost record.
       const claim = key === null ? null : deps.store.claimEventByWorkKey(key);
       if (claim !== null && claim.outcome === 'unknown') {
-        attempt(claim.objId, 'settle', () =>
+        attempt(claim.objId, 'settle', () => {
           settleUnknown(
             claim,
             {
@@ -898,13 +963,16 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
               languageDirection: item.languageDirection,
             },
             atMs,
-          ),
-        );
+          );
+          // A hold this pass created, for work whose purchase order is in the list below.
+          addBucketSlot(item.identity, claim.objId);
+        });
         continue;
       }
       attempt(item.objId, 'recover', () => {
         recover(item, atMs, pool);
         recovered.push(item.objId);
+        addBucketSlot(item.identity, item.objId);
       });
     }
 
@@ -915,14 +983,42 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       work.map((w) => w.identity?.workKey ?? null).filter((k): k is string => k !== null),
     );
     for (const order of orders) {
+      // A closed order takes no slot. Its held row was given back when it closed — often
+      // weeks ago — so counting it would let a bucket's history crowd out its present: five
+      // confirmed orders against one held row would make a sixth, pending order look like
+      // work nobody recorded, which is the incident this whole branch exists to prevent.
       if (!isOpenOrder(order.status)) continue;
       const key = order.identity.workKey;
-      if (order.status !== 'pending' && key !== null && assignedKeys.has(key)) continue;
-      if (key !== null && handledKeys.has(key)) continue;
-      if (heldFor(order.poObjId, key) !== undefined) continue;
+      const bucket = bucketOf(order.identity);
+      if (order.status !== 'pending' && key !== null && assignedKeys.has(key)) {
+        takeBucketSlot(bucket);
+        continue;
+      }
+      if (key !== null && handledKeys.has(key)) {
+        takeBucketSlot(bucket);
+        continue;
+      }
+      // For an order that names no language, a key match is only a BUCKET match: `heldByKey`
+      // is keyed by the same string, so it answers "this reference has some hold" and not
+      // "this order's work is held". Taking that as held is how a bucket with one such row
+      // swallows every later order of the reference — no recovery, no hold, no log — which
+      // is the over-commit direction. Its own id still counts; the bucket branch below does
+      // the counting, and a DTP order reaches it and is covered there instead of here.
+      const heldAlready = namesNoLanguage(order.identity)
+        ? heldById.get(order.poObjId)
+        : heldFor(order.poObjId, key);
+      if (heldAlready !== undefined) {
+        takeBucketSlot(bucket);
+        continue;
+      }
       const claim = key === null ? null : deps.store.claimEventByWorkKey(key);
+      // Ahead of the bucket check on purpose. A monolingual claim legitimately keyed
+      // `ref||kind` sits in the same bucket as its bilingual siblings; letting the bucket
+      // answer first would cover this order from a sibling's row and leave that claim
+      // neither settled nor held. Settling first can hold the same work twice for one pass,
+      // which is the direction an irreversible claim must err in.
       if (claim !== null && claim.outcome === 'unknown') {
-        attempt(claim.objId, 'settle', () =>
+        attempt(claim.objId, 'settle', () => {
           settleUnknown(
             claim,
             {
@@ -931,17 +1027,39 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
               languageDirection: order.languageDirection,
             },
             atMs,
-          ),
-        );
+          );
+          // Net zero, deliberately: it creates a hold AND accounts for this order, so the
+          // slot it adds is the slot it takes. Left as a comment rather than a push and a
+          // shift that cancel, which would only invite someone to "fix" one of them.
+        });
         continue;
       }
+      // An order that names no language cannot say which of its reference's jobs it is. If
+      // the reference still has a held row unaccounted for, this order is that row's — one
+      // order, one row. Only an order with nothing left to take is work nobody recorded.
+      const languageless = namesNoLanguage(order.identity);
+      if (languageless) {
+        const covered = takeBucketSlot(bucket);
+        if (covered !== undefined) {
+          logLanguagelessOrder(order, 'covered', covered);
+          counts.covered += 1;
+          continue;
+        }
+      }
       if (adopting) {
+        // Net zero, as above: the hold it creates is this order's own.
+        if (languageless) logLanguagelessOrder(order, 'adopted', undefined);
         attempt(order.poObjId, 'adopt', () => adopt(order, atMs, pool));
         continue;
       }
+      if (languageless) logLanguagelessOrder(order, 'recovered', undefined);
       attempt(order.poObjId, 'recover', () => {
         recoverOrder(order, claim, atMs, pool);
         recovered.push(order.poObjId);
+        // Neither taken nor added, and both halves matter. Not taken, because the bucket was
+        // already empty — that is what made this a surplus. Not added, because two orders
+        // are two pieces of work: a row created for THIS order must never end up covering
+        // the next one. The next pass finds it by its own id anyway.
       });
     }
 
@@ -967,6 +1085,8 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       heldRows.filter((w) => !pool.taken.has(w.objId)),
       atMs,
     );
+
+    counts.undated = alertUndatedHolds(atMs);
 
     deps.logger.info(
       {
@@ -1096,10 +1216,68 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
       (o) => o.identity.workKey,
     );
 
+    // Open purchase orders that named no language, by the bucket they belong to (2026-09-23).
+    // `ordersFor` cannot find these for a row whose own key names its language, which is how
+    // seven live holds came within a day of being handed back while their orders were still
+    // pending: the row asks for `aj-345|th|translation`, the order only ever says
+    // `aj-345||translation`, and absence was read as "the portal no longer owes this".
+    const languagelessOrders = new Map<string, PurchaseOrder[]>();
+    for (const order of orders) {
+      if (!isOpenOrder(order.status)) continue;
+      if (!namesNoLanguage(order.identity)) continue;
+      const bucket = bucketOf(order.identity);
+      if (bucket === null) continue;
+      languagelessOrders.set(bucket, [...(languagelessOrders.get(bucket) ?? []), order]);
+    }
+    /** How many rows each bucket's open languageless orders are keeping — see below. */
+    const keptPerBucket = new Map<string, number>();
+
     for (const row of heldRows) {
       const key = row.identity?.workKey ?? null;
       const jobs = jobsFor(row.objId, key);
       const orderList = ordersFor(row.objId, key);
+      // Only when the row's OWN key matched nothing in either list. Gated that tightly on
+      // purpose: a sibling's pending order must never pin a row whose own assigned job the
+      // portal has already reported delivered.
+      if (jobs.length === 0 && orderList.length === 0) {
+        const bucket = bucketOf(row.identity);
+        const siblings = languagelessOrders.get(bucket ?? '') ?? [];
+        if (siblings.length > 0) {
+          // Existence-based, and unbounded on purpose: ONE open languageless order keeps
+          // EVERY unmatched row of its reference, with no deadline escape. The alternatives
+          // are both worse — capping at `siblings.length` would mean picking arbitrarily
+          // which row loses its protection, and a deadline bound is exactly the rule that
+          // released the seven live rows in the first place. The cost is that an order
+          // nobody ever accepts pins its rows indefinitely, which under-states the ceiling
+          // and turns work away; that direction is survivable, the other is not. What the
+          // count below buys is that the imbalance is visible rather than silent.
+          const kept = (keptPerBucket.get(bucket ?? '') ?? 0) + 1;
+          keptPerBucket.set(bucket ?? '', kept);
+          deps.logger.warn(
+            {
+              module: 'reconcile',
+              action: 'release',
+              outcome: 'kept',
+              objId: row.objId,
+              workKey: key,
+              orders: siblings.length,
+              keptInBucket: kept,
+            },
+            'held work matches no record of its own, but its reference has open purchase ' +
+              'orders that name no language — one of them is this work, so it stays held',
+          );
+          raiseHeldWorkAlert(
+            'held_work_order_languageless',
+            row,
+            `its reference has ${String(siblings.length)} open purchase ` +
+              `order${siblings.length === 1 ? '' : 's'} carrying no language codes, so none of ` +
+              'them can be matched to this row by key — the work is kept held on the ' +
+              'reference alone rather than given back while the team still owes it',
+            atMs,
+          );
+          continue;
+        }
+      }
       // Still owed while any stage says so: an assigned job under way, a `pending` order (a
       // round not yet assigned — never spoken for by an earlier round's finished job), or an
       // open order with no assigned job at all. One key can come round twice.
@@ -1237,6 +1415,112 @@ export function createStrakerReconciler(deps: ReconcileDeps): StrakerReconciler 
         `an alert about held work could not be queued and will not be delivered: ${message(err)}`,
       );
     }
+  }
+
+  /**
+   * Held work the ledger can place on no day, named to on-call (2026-09-23). Returns how
+   * many there are, for the pass line.
+   *
+   * `Ledger.heldWorkMissingDeadline` has said since it was written that "the caller alerts on
+   * a non-empty result" — and until now had no caller at all, so work held against no day was
+   * counted nowhere and announced nowhere. That is the quiet half of an over-claim: every day
+   * the work should have loaded reads emptier than it is, and the next claim is measured
+   * against a ceiling it has already spent.
+   *
+   * Read fresh rather than from the pass's opening snapshot: the rows most likely to be
+   * undated are the ones this pass has just created.
+   *
+   * One card per row, not one for the set. The outbox dedups permanently on
+   * `(event_id, channel)`, so six undated rows are six cards once and then silence — while a
+   * key naming the count would repeat the `reconcile_failing:3` mistake, dropping the second
+   * time the set reached six and re-firing everything the moment a seventh appeared. Each
+   * card also names a different job whose deadline a human has to look up separately.
+   */
+  function alertUndatedHolds(atMs: number): number {
+    // Never throws, and the reason is the position: this runs AFTER the pass has committed
+    // its recoveries, settlements and releases, cleared the failure streak and set the
+    // start-up flag. A read that failed here would report `ok: false` for a pass that in
+    // fact succeeded, lose its `recovered` list, and count toward `reconcile_failing` —
+    // `releaseFinished` states the convention this would break: failures are per item and
+    // never fail the pass.
+    let held: readonly HeldWork[];
+    let undated: Set<string>;
+    try {
+      held = deps.store.heldWork();
+      undated = new Set(deps.ledger.heldWorkMissingDeadline(atMs, held));
+    } catch (err) {
+      deps.logger.error(
+        { module: 'reconcile', action: 'held_work_undated', outcome: 'failed' },
+        `held work could not be checked for a placeable deadline: ${message(err)}`,
+      );
+      return 0;
+    }
+    if (undated.size === 0) return 0;
+    const rows = held.filter((w) => undated.has(w.objId));
+    for (const row of rows) {
+      deps.logger.warn(
+        {
+          module: 'reconcile',
+          action: 'held_work_undated',
+          outcome: 'kept',
+          objId: row.objId,
+          workKey: row.identity?.workKey ?? null,
+          undated: rows.length,
+        },
+        'held work has no deadline the calendar can place, so it loads no day and no ceiling ' +
+          'is counting it',
+      );
+      raiseHeldWorkAlert(
+        'held_work_undated',
+        row,
+        rows.length === 1
+          ? 'its deadline cannot be placed on a working day, so it is counted against no ' +
+              "day's ceiling — until someone finds the due date, every day this work should " +
+              'have loaded reads emptier than it is'
+          : `one of ${String(rows.length)} held rows whose deadline cannot be placed on a ` +
+              "working day, so they are counted against no day's ceiling — until someone " +
+              'finds the due dates, the days they should have loaded read emptier than they are',
+        atMs,
+      );
+    }
+    return rows.length;
+  }
+
+  /**
+   * A purchase order that named no language, and what the pass did about it (2026-09-23).
+   *
+   * A log line and not an alert, by decision: a per-hour job issues one such order per
+   * language pair — six of them at once on the job that surfaced this — so one card each
+   * would be the duplicate-card problem again under a new name. `outcome` carries the
+   * consequence, so `action:order_languageless outcome:recovered` finds exactly the orders
+   * this pass held as work nobody had recorded, which are the ones worth a human's time.
+   * (Whether such a hold can be dated depends on the order's own `due_at`; when it cannot,
+   * `held_work_undated` says so separately and by name.)
+   *
+   * `warn`, because a `translation` order without language codes is a departure from
+   * contract §5a, which recorded empty codes as a DTP-only shape.
+   */
+  function logLanguagelessOrder(
+    order: PurchaseOrder,
+    outcome: 'covered' | 'recovered' | 'adopted',
+    heldObjId: string | undefined,
+  ): void {
+    deps.logger.warn(
+      {
+        module: 'reconcile',
+        action: 'order_languageless',
+        outcome,
+        objId: order.poObjId,
+        workKey: order.identity.workKey,
+        jobRef: order.identity.jobRef,
+        service: order.identity.service,
+        status: order.status,
+        heldObjId: heldObjId ?? null,
+      },
+      'a purchase order arrived with empty language codes, so its key names a reference and ' +
+        'a service but not which job — matched against held work of the same reference by ' +
+        'count rather than by identity',
+    );
   }
 
   /**

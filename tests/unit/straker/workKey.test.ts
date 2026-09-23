@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { optionalText, workIdentity, workKey } from '../../../src/straker/workKey.js';
+import { optionalText, workBucket, workIdentity, workKey } from '../../../src/straker/workKey.js';
 
 /**
  * One piece of work wears three ids on this portal — the offer's, the purchase order's and
@@ -102,5 +102,36 @@ describe('workIdentity', () => {
       service: 'translation',
       workKey: null,
     });
+  });
+});
+
+/**
+ * The weaker thing a key becomes when the portal names no language — see the file header.
+ * Live 2026-09-23: six purchase orders for the per-hour job `aj-345` all keyed
+ * `aj-345||translation`, matching none of the seven claims that won them.
+ */
+describe('workBucket', () => {
+  it('is exactly the key a record with no language of its own makes', () => {
+    // The identity the bucket design rests on: match on the bucket and a languageless record
+    // meets its own siblings, because the two functions agree character for character.
+    expect(workBucket('aj-345', 'translation')).toBe('aj-345||translation');
+    expect(workKey('aj-345', '', '', 'translation')).toBe(workBucket('aj-345', 'translation'));
+    // A DTP job spells it three ways across the stages; all three land on the one bucket.
+    expect(workKey('aj-9', 'ja', null, 'dtp_prep')).toBe(workBucket('aj-9', 'dtp_prep'));
+    expect(workKey('aj-9', 'ja', 'ja', 'dtp_prep')).toBe(workBucket('aj-9', 'dtp_prep'));
+  });
+
+  it('folds its parts the way the key folds them, not the way the payload spells them', () => {
+    // `optionalText` only trims, so matching on the raw `jobRef`/`service` fields would miss
+    // an offer that says `Translation` against an order that says `translation`.
+    expect(workBucket('  AJ-345 ', 'Translation')).toBe(workBucket('aj-345', 'translation'));
+    expect(workBucket('aj​-345', 'translation')).toBe('aj-345||translation');
+  });
+
+  it('is null when there is no honest group to name', () => {
+    expect(workBucket(null, 'translation')).toBeNull();
+    expect(workBucket('aj-345', '  ')).toBeNull();
+    // The same condition that nulls the key — so a null key never reaches bucket matching.
+    expect(workKey(null, 'en-us', 'th', 'translation')).toBeNull();
   });
 });

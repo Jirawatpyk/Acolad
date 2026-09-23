@@ -1,4 +1,5 @@
 import { MetaStore } from '../state/meta.js';
+import { checkpointWal } from '../state/db.js';
 import { raiseAlert } from '../reporting/systemAlerts.js';
 import { ColdStartHistory } from './coldStartHistory.js';
 import { createXtmBot } from './bootstrap.js';
@@ -73,6 +74,19 @@ async function main(): Promise<void> {
         'browser dispose exceeded its cap — possible orphaned Chromium (reaped by next deploy sweep)',
       ),
     );
+    // Best effort, and honestly nearly dead code: PM2 on Windows delivers no signal, so
+    // `cleanup` runs under Ctrl-C in a terminal and almost never in production (see the
+    // shutdown comment above). Kept for parity with the Straker bot, and because a
+    // terminal-run bot should leave its `-wal` folded back too. The hourly checkpoint in
+    // `XtmPollLoop` is what actually solves this; nothing here depends on this line.
+    try {
+      checkpointWal(db);
+    } catch (err) {
+      logger.error(
+        { module: 'main', action: 'wal_checkpoint', outcome: 'failed', reason: 'close' },
+        err instanceof Error ? err.message : String(err),
+      );
+    }
     db.close();
     await release().catch(() => undefined);
     logger.info({ module: 'main', action: 'shutdown', outcome }, 'acolad-bot stopped (bounded)');
