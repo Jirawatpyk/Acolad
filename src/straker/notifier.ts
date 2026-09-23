@@ -166,6 +166,9 @@ export const OFFER_ALERT_CONDITIONS = [
   'held_work_unmatched',
   'held_work_absent_keyless',
   'adopted_without_effort',
+  // 2026-09-23, after a per-hour job's purchase orders arrived with no language codes.
+  'held_work_undated',
+  'held_work_order_languageless',
 ] as const;
 export type OfferAlertCondition = (typeof OFFER_ALERT_CONDITIONS)[number];
 
@@ -363,6 +366,22 @@ const ALERT_SPECS: Readonly<Record<StrakerAlertCondition, AlertSpec>> = {
       'Work we hold carries no work key and is absent from both the purchase-order and the assigned-job lists, so it stays counted against its deadline day until a day after the deadline',
     action:
       'Check on the portal whether the job still exists — if it was cancelled, the ceiling is under-stating what the team can take until the hold lapses',
+  },
+  held_work_undated: {
+    severity: 'critical',
+    title: 'Held Work Counted Against No Day',
+    impact:
+      'Work the team holds has no deadline the calendar can place, so it loads no day and no ceiling is counting it — every day it should have filled reads emptier than it is, and the next claim is measured against a ceiling it has already spent',
+    action:
+      "Find the job's due date on the portal. A purchase order recovered with an unreadable due_at is the usual cause; reconciliation dates the hold itself once an assigned job reports one",
+  },
+  held_work_order_languageless: {
+    severity: 'warn',
+    title: 'Purchase Order Names No Language',
+    impact:
+      "This work's purchase order carries empty language codes, so its key names the job reference and the service but not which of that reference's jobs it is — the hold is kept on the strength of the reference alone rather than released as work the portal no longer owes",
+    action:
+      'Check on the portal that the order is still open. A per-hour or DIRECT order is expected to look like this; any other kind means the payload changed',
   },
   adopted_without_effort: {
     severity: 'warn',

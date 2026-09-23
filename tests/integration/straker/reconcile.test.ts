@@ -42,6 +42,7 @@ import {
   createStrakerOffersSender,
 } from '../../../src/straker/notifier.js';
 import { createTrackingSink, type TrackingSheetApi } from '../../../src/straker/trackingSink.js';
+import type { WorkIdentity } from '../../../src/straker/workKey.js';
 
 const NOW_MS = Date.parse('2026-09-16T10:00:00+07:00'); // a Wednesday
 const DEADLINE_MS = Date.parse('2026-09-16T17:00:00+07:00');
@@ -1869,6 +1870,334 @@ describe('purchase orders nobody recorded', () => {
     await f.reconciler.runIfDue();
 
     expect(f.store.heldWork()[0]?.identity).toEqual(IDENTITY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A purchase order that names no language (per-hour / DIRECT, live 2026-09-23)
+// ---------------------------------------------------------------------------
+
+/**
+ * `aj-345` was a per-hour DIRECT offer in eight language pairs. Seven claims were won, each
+ * held under its offer id with a fully qualified key. Then one pass read six purchase orders
+ * whose `source_language_code` and `target_language_code` were **both empty** — so their key
+ * was `aj-345||translation`, which matches no claim's key — and recovered all six as work
+ * nobody had recorded: thirteen holds for seven jobs, and six duplicate cards.
+ *
+ * A languageless key is not an identity, it is a *bucket*: it says which reference and which
+ * service, and cannot say which of that reference's jobs. So it is matched by count against
+ * the held rows of the same bucket, one row per order, and only a genuine surplus recovers.
+ */
+describe('a purchase order whose language codes are empty (per-hour / DIRECT, 2026-09-23)', () => {
+  const LANGS = ['th', 'ar', 'ko', 'zh-cn', 'id', 'zh-tw', 'ms-my'] as const;
+  const BUCKET = 'aj-345||translation';
+
+  function identityFor(lang: string): WorkIdentity {
+    return {
+      jobRef: 'aj-345',
+      title: 'REQ34291_supreme_straker.xlsx',
+      service: 'translation',
+      workKey: `aj-345|${lang}|translation`,
+    };
+  }
+
+  /** A won claim for one language of the job, held under the OFFER's id, as the cycle holds it. */
+  function holdLang(f: Fixture, lang: string, i: number): string {
+    const objId = `offer-${lang}`;
+    const identity = identityFor(lang);
+    const common = { effortWords: 20, deadlineMs: DEADLINE_MS, identity };
+    f.store.recordEvent({
+      objId,
+      eventType: 'claim',
+      outcome: 'won',
+      occurredAtMs: NOW_MS + i,
+      ...common,
+    });
+    f.store.hold({ objId, kind: 'translation', heldSinceMs: NOW_MS + i, ...common });
+    return objId;
+  }
+
+  /** What the portal actually returned: no language, no word count, no due date. */
+  function languagelessOrder(poObjId: string, over: Partial<PurchaseOrder> = {}): PurchaseOrder {
+    return purchaseOrder(poObjId, {
+      deadlineMs: null,
+      languageDirection: null,
+      identity: { jobRef: 'aj-345', title: null, service: 'translation', workKey: BUCKET },
+      ...over,
+    });
+  }
+
+  it('does not recover orders the job’s own held rows already cover', async () => {
+    const f = fixture({ ceiling: 1000 });
+    adopted(f);
+    const held = LANGS.map((lang, i) => holdLang(f, lang, i));
+    f.setPurchaseOrders(
+      ['po-a', 'po-b', 'po-c', 'po-d', 'po-e', 'po-f'].map((id) => languagelessOrder(id)),
+    );
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, recovered: [], covered: 6 });
+    // Seven jobs, seven holds — not thirteen.
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(held);
+    // The duplicate cards are how a human found this. A regression that re-created the rows
+    // silently would be worse than the original, so assert the absence explicitly.
+    expect(f.queued.filter((q) => q.eventId.startsWith('recovery:'))).toEqual([]);
+  });
+
+  it('recovers only the orders the held rows run out for', async () => {
+    const f = fixture({ ceiling: 1000 });
+    adopted(f);
+    holdLang(f, 'th', 0);
+    holdLang(f, 'ko', 1);
+    f.setPurchaseOrders(['po-a', 'po-b', 'po-c'].map((id) => languagelessOrder(id)));
+
+    const outcome = await f.reconciler.runIfDue();
+
+    // Two rows cover two orders; the third is work nobody recorded and is held as such.
+    expect(outcome).toMatchObject({ ran: true, ok: true, recovered: ['po-c'], covered: 2 });
+    expect(
+      f.store
+        .heldWork()
+        .map((w) => w.objId)
+        .sort(),
+    ).toEqual(['offer-ko', 'offer-th', 'po-c']);
+  });
+
+  it('leaves an order that names its language to the ordinary path', async () => {
+    // Nothing is ambiguous about it, so the bucket has no business answering for it.
+    const f = fixture({ ceiling: 1000 });
+    adopted(f);
+    holdLang(f, 'th', 0);
+    f.setPurchaseOrders([
+      purchaseOrder('po-ko', { identity: identityFor('ko') as PurchaseOrder['identity'] }),
+    ]);
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ recovered: ['po-ko'], covered: 0 });
+  });
+
+  it('settles an unknown claim of its own before the bucket can answer for it', async () => {
+    // A monolingual job of the same reference is legitimately keyed `aj-345||translation`.
+    // If the bucket answered first, the bilingual row would cover the order and this claim
+    // would be neither settled nor held — the one direction an irreversible claim must not err.
+    const f = fixture({ ceiling: 1000 });
+    adopted(f);
+    holdLang(f, 'ko', 0);
+    f.store.recordEvent({
+      objId: 'offer-mono',
+      eventType: 'claim',
+      outcome: 'unknown',
+      effortWords: 20,
+      deadlineMs: DEADLINE_MS,
+      occurredAtMs: NOW_MS,
+      identity: { jobRef: 'aj-345', title: null, service: 'translation', workKey: BUCKET },
+    });
+    f.setPurchaseOrders([languagelessOrder('po-mono')]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ ran: true, ok: true, recovered: [], settled: 1, covered: 0 });
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['offer-ko', 'offer-mono']);
+  });
+
+  it('does not let an order the assigned list already speaks for become a surplus', async () => {
+    // `assignedKeys` is built from fully qualified job keys and can never contain a bucket,
+    // so this guard misses for a languageless order — the bucket has to catch it.
+    const f = fixture({ ceiling: 1000 });
+    adopted(f);
+    holdLang(f, 'th', 0);
+    f.setAssigned([assignedWork('job-th', { status: 'in_progress', identity: identityFor('th') })]);
+    f.setPurchaseOrders([languagelessOrder('po-th', { status: 'accepted' })]);
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ recovered: [], covered: 1 });
+  });
+
+  it('does not let a closed order crowd its living sibling out of the bucket', async () => {
+    // The anti-regression for the obvious symmetry. A confirmed order's row was given back
+    // when it closed, so counting it would make the pending order look unrecorded — which is
+    // the incident, rebuilt out of a bucket's history.
+    const f = fixture({ ceiling: 1000 });
+    adopted(f);
+    holdLang(f, 'th', 0);
+    f.setPurchaseOrders([
+      languagelessOrder('po-old', { status: 'confirmed' }),
+      languagelessOrder('po-now'),
+    ]);
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ recovered: [], covered: 1 });
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['offer-th']);
+  });
+
+  it('covers an order from a hold this same pass created', async () => {
+    const f = fixture({ ceiling: 1000 });
+    adopted(f);
+    f.setAssigned([assignedWork('job-th', { identity: identityFor('th') })]);
+    f.setPurchaseOrders([languagelessOrder('po-th')]);
+
+    const outcome = await f.reconciler.runIfDue();
+
+    expect(outcome).toMatchObject({ recovered: ['job-th'], covered: 1 });
+    expect(f.store.heldWork().map((w) => w.objId)).toEqual(['job-th']);
+  });
+
+  it('says in the log which order it was and what it did about it', async () => {
+    const f = fixture({ ceiling: 1000 });
+    adopted(f);
+    holdLang(f, 'th', 0);
+    f.setPurchaseOrders([languagelessOrder('po-a'), languagelessOrder('po-b')]);
+
+    await f.reconciler.runIfDue();
+
+    const lines = f.logs.filter((l) => l.fields['action'] === 'order_languageless');
+    expect(lines.map((l) => [l.level, l.fields['objId'], l.fields['outcome']])).toEqual([
+      ['warn', 'po-a', 'covered'],
+      ['warn', 'po-b', 'recovered'],
+    ]);
+    expect(lines[0]?.fields).toMatchObject({
+      workKey: BUCKET,
+      jobRef: 'aj-345',
+      service: 'translation',
+      status: 'pending',
+      heldObjId: 'offer-th',
+    });
+  });
+
+  describe('a DTP order, whose key has always named no language, is unaffected', () => {
+    const DTP = { jobRef: 'aj-9', title: null, service: 'dtp_prep', workKey: 'aj-9||dtp_prep' };
+
+    it('matches its own held row exactly, before the bucket is consulted', async () => {
+      const f = fixture({ ceiling: 1000 });
+      adopted(f);
+      f.store.hold({
+        objId: 'offer-dtp',
+        effortWords: 956,
+        kind: 'monolingual',
+        deadlineMs: DEADLINE_MS,
+        heldSinceMs: NOW_MS,
+        identity: DTP,
+      });
+      f.setPurchaseOrders([purchaseOrder('po-dtp', { identity: DTP })]);
+
+      await f.reconciler.runIfDue();
+
+      // The exact-key path answered, so the bucket never ran and logged nothing.
+      expect(f.logs.filter((l) => l.fields['action'] === 'order_languageless')).toEqual([]);
+      expect(f.store.heldWork().map((w) => w.objId)).toEqual(['offer-dtp']);
+    });
+
+    it('is still recovered when nothing holds it', async () => {
+      const f = fixture({ ceiling: 1000 });
+      adopted(f);
+      f.setPurchaseOrders([purchaseOrder('po-dtp', { identity: DTP })]);
+
+      expect(await f.reconciler.runIfDue()).toMatchObject({ recovered: ['po-dtp'] });
+    });
+  });
+
+  describe('the work is kept while its languageless order is open', () => {
+    it('does not hand back a hold whose order is still pending, a day past the deadline', async () => {
+      // Live on 2026-09-23: seven won rows keyed by language, six orders keyed by neither.
+      // `ordersFor` matched none of them, absence was read as "no longer owed", and every
+      // one of the seven was due to be given back at deadline + 24h with its order pending.
+      const f = fixture({ ceiling: 1000 });
+      adopted(f);
+      holdLang(f, 'th', 0);
+      f.setPurchaseOrders([languagelessOrder('po-a')]);
+
+      f.setNow(DEADLINE_MS + 25 * 3_600_000);
+      const outcome = await f.reconciler.runIfDue();
+
+      expect(outcome).toMatchObject({ released: [] });
+      expect(f.store.heldWork().map((w) => w.objId)).toEqual(['offer-th']);
+      // `f.queued` rather than `delivered`, whose window closes before this pass's clock.
+      expect(f.queued.map((q) => q.eventId)).toContain('held_work_order_languageless:offer-th');
+      // The old alert sent the operator to compare `service` against `po_type`, which is not
+      // what went wrong here.
+      expect(f.queued.map((q) => q.eventId)).not.toContain('held_work_unmatched:offer-th');
+    });
+
+    it('is not pinned by a sibling order the portal has already closed', async () => {
+      // The keep rests on the order still being OPEN. A revoked order owes nothing, so the
+      // ceiling must come back rather than stay spent on work that is not coming.
+      const f = fixture({ ceiling: 1000 });
+      adopted(f);
+      holdLang(f, 'th', 0);
+      f.setPurchaseOrders([languagelessOrder('po-gone', { status: 'revoked' })]);
+
+      f.setNow(DEADLINE_MS + 25 * 3_600_000);
+      const outcome = await f.reconciler.runIfDue();
+
+      expect(outcome).toMatchObject({ released: ['offer-th'] });
+      expect(f.queued.map((q) => q.eventId)).not.toContain(
+        'held_work_order_languageless:offer-th',
+      );
+    });
+
+    it('still releases a row whose own assigned job is delivered', async () => {
+      // The keep is gated on the row's OWN key matching nothing. A sibling's pending order
+      // must not pin work the portal has positively reported finished.
+      const f = fixture({ ceiling: 1000 });
+      adopted(f);
+      holdLang(f, 'th', 0);
+      holdLang(f, 'ko', 1);
+      f.setAssigned([assignedWork('job-th', { status: 'delivered', identity: identityFor('th') })]);
+      f.setPurchaseOrders([languagelessOrder('po-ko')]);
+
+      f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+      const outcome = await f.reconciler.runIfDue();
+
+      expect(outcome).toMatchObject({ released: ['offer-th'] });
+      expect(f.store.heldWork().map((w) => w.objId)).toEqual(['offer-ko']);
+    });
+  });
+
+  describe('held work the calendar can place on no day is named to on-call', () => {
+    it('raises one card for a surplus recovery held against no deadline', async () => {
+      const f = fixture({ ceiling: 1000 });
+      adopted(f);
+      f.setPurchaseOrders([languagelessOrder('po-a')]);
+
+      const outcome = await f.reconciler.runIfDue();
+
+      expect(outcome).toMatchObject({ recovered: ['po-a'], undated: 1 });
+      expect(delivered(f).map((q) => q.eventId)).toContain('held_work_undated:po-a');
+    });
+
+    it('names each undated row once, and does not name them again next pass', async () => {
+      const f = fixture({ ceiling: 1000 });
+      adopted(f);
+      f.setPurchaseOrders([languagelessOrder('po-a'), languagelessOrder('po-b')]);
+
+      await f.reconciler.runIfDue();
+      const afterFirst = delivered(f).filter((q) => q.eventId.startsWith('held_work_undated:'));
+      expect(afterFirst.map((q) => q.eventId)).toEqual([
+        'held_work_undated:po-a',
+        'held_work_undated:po-b',
+      ]);
+
+      f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+      const second = await f.reconciler.runIfDue();
+
+      // Still true, still logged every pass, but the outbox has already said it.
+      expect(second).toMatchObject({ undated: 2 });
+      expect(delivered(f).filter((q) => q.eventId.startsWith('held_work_undated:'))).toEqual(
+        afterFirst,
+      );
+      expect(
+        f.logs.filter((l) => l.fields['action'] === 'held_work_undated').length,
+      ).toBeGreaterThan(2);
+    });
+
+    it('says nothing about a pass whose writes were rolled back', async () => {
+      const f = fixture({ ceiling: 1000, recordEventThrowsFor: (objId) => objId === 'po-a' });
+      adopted(f);
+      f.setPurchaseOrders([languagelessOrder('po-a')]);
+
+      const outcome = await f.reconciler.runIfDue();
+
+      expect(outcome).toMatchObject({ ran: true, ok: false });
+      expect(f.queued.filter((q) => q.eventId.startsWith('held_work_undated:'))).toEqual([]);
+    });
   });
 });
 
