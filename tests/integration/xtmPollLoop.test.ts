@@ -1610,3 +1610,82 @@ describe('XtmPollLoop unsettled-empty grid reads (false-empty guard)', () => {
     expect(s.lifecycleStatus).not.toBe('missing');
   });
 });
+
+/**
+ * The write-ahead log was never truncated on this side: PR #49 gave the Straker bot an
+ * hourly checkpoint and left `acolad.db` out, which live meant a 1.2 MB database beside a
+ * 4.1 MB `-wal`. A `.db` copied for a backup without its `-wal` is missing those pages.
+ */
+describe('the loop truncates the write-ahead log hourly (2026-09-23)', () => {
+  function loopOn(client = new StubClient()): XtmPollLoop {
+    client.snapshot = snap([]);
+    return new XtmPollLoop(db, client, cfg(), noopLogger, clock, {
+      chatSender: okChat,
+      heartbeat: { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) },
+    });
+  }
+  const checkpoints = (): unknown[] =>
+    noopLogger.info.mock.calls.filter(
+      (c) => (c[0] as { action?: string }).action === 'wal_checkpoint',
+    );
+
+  it('checkpoints on the first cycle, then not again until an hour has passed', async () => {
+    fresh();
+    const loop = loopOn();
+
+    await loop.runOnce();
+    expect(checkpoints()).toHaveLength(1);
+
+    for (const minutes of [1, 30, 59]) {
+      now = Date.parse(NOW) + minutes * 60_000;
+      await loop.runOnce();
+    }
+    expect(checkpoints()).toHaveLength(1);
+
+    now = Date.parse(NOW) + 60 * 60_000;
+    await loop.runOnce();
+    expect(checkpoints()).toHaveLength(2);
+  });
+
+  it('still checkpoints on a cycle the login lockout cuts short', async () => {
+    // The reason it runs at the TOP of runOnce rather than after the writes, as Straker's
+    // does: a lockout is hours of early returns while the bot still writes alert rows.
+    fresh();
+    const client = new StubClient();
+    client.fetchError = new LoginFailedError('bad creds');
+    const loop = new XtmPollLoop(
+      db,
+      client,
+      cfg({ LOGIN_MAX_RETRY: 1, LOGIN_LOCKOUT_MINUTES: 180 }),
+      noopLogger,
+      clock,
+      {
+        chatSender: okChat,
+        heartbeat: { ok: vi.fn(async () => {}), fail: vi.fn(async () => {}) },
+      },
+    );
+
+    await loop.runOnce(); // fails, and locks out for three hours
+    now = Date.parse(NOW) + 61 * 60_000;
+    expect(await loop.runOnce()).toBe(false); // an hour on, still locked out, returns early
+
+    expect(checkpoints()).toHaveLength(2);
+  });
+
+  it('logs a checkpoint that fails and finishes the cycle anyway', async () => {
+    fresh();
+    const loop = loopOn();
+    db.close(); // the handle the checkpoint will reach for
+
+    // A closed database throws from the pragma; the cycle's own work fails for the same
+    // reason, but the checkpoint must not be what decides that.
+    await loop.runOnce().catch(() => undefined);
+
+    expect(
+      noopLogger.error.mock.calls.filter(
+        (c) => (c[0] as { action?: string }).action === 'wal_checkpoint',
+      ),
+    ).toHaveLength(1);
+    fresh(); // give afterEach a live handle to close
+  });
+});

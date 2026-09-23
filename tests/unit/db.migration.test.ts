@@ -1,9 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDatabase, MigrationError } from '../../src/state/db.js';
+import { openDatabase, MigrationError, checkpointWal, DB_FILENAME } from '../../src/state/db.js';
 import { Outbox } from '../../src/state/outbox.js';
 import { computeXtmJobKey } from '../../src/detection/jobKey.js';
 
@@ -786,5 +786,33 @@ describe('backfill job_key to the project-qualified key (re-key-all real-identit
     expect(() => openDatabase(dir, NOW)).toThrow(MigrationError);
     const corruptCopies = readdirSync(dir).filter((f) => f.startsWith('acolad.db.corrupt-'));
     expect(corruptCopies).toEqual([]);
+  });
+});
+
+describe('checkpointWal — the write-ahead log is folded back and truncated (2026-09-23)', () => {
+  // The automatic checkpoint moves pages back into the database but never shrinks the -wal
+  // file, and a reader holding a snapshot can stop it altogether: this bot polls every
+  // twenty seconds for weeks, and live it reached a 1.2 MB acolad.db beside a 4.1 MB -wal.
+  // The risk is not the size — it is that a .db copied for a backup without its -wal is
+  // missing every page still in there.
+  it('leaves a non-empty -wal after writes, and a zero-byte one after the checkpoint', () => {
+    const dir = tmp();
+    const { db } = openDatabase(dir, NOW);
+    const insert = db.prepare(
+      `INSERT INTO appearance_events (event_id, job_key, event_type, occurred_at, poll_cycle_id)
+       VALUES (?,?,?,?,?)`,
+    );
+    for (let i = 0; i < 50; i += 1) insert.run(`e-${String(i)}`, `k-${String(i)}`, 'first_seen', NOW, `c-${String(i)}`); // prettier-ignore
+
+    const wal = join(dir, `${DB_FILENAME}-wal`);
+    expect(statSync(wal).size).toBeGreaterThan(0);
+
+    const result = checkpointWal(db);
+
+    expect(result.busy).toBe(0);
+    expect(statSync(wal).size).toBe(0);
+    // Nothing lost — the rows are in the database file now.
+    expect(db.prepare('SELECT COUNT(*) AS n FROM appearance_events').get()).toEqual({ n: 50 });
+    db.close();
   });
 });

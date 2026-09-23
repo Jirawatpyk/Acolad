@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { DB } from '../state/db.js';
+import { checkpointWal, type DB } from '../state/db.js';
 import { Outbox, createOutbox, type OutboxChannel } from '../state/outbox.js';
 import { XtmJobStore } from '../state/xtmJobStore.js';
 import { MetaStore } from '../state/meta.js';
@@ -50,6 +50,9 @@ export const GRID_UNSETTLED_ALERT_STREAK = 5;
 const META_UNSETTLED_STREAK = 'grid_unsettled_streak';
 const META_UNSETTLED_SINCE = 'grid_unsettled_since';
 
+/** How often the loop truncates the SQLite write-ahead log (2026-09-23). */
+const WAL_CHECKPOINT_INTERVAL_MS = 60 * 60_000;
+
 /** Collaborators injected for testing (default to production impls). */
 export interface XtmPollLoopDeps {
   chatSender?: ChatSender;
@@ -78,6 +81,8 @@ export class XtmPollLoop {
   private lockoutUntilMs = 0;
   private firstPortalErrorMs = 0;
   private lastDiagMs = 0;
+  /** When this loop last truncated the write-ahead log. `0` means "not yet this process". */
+  private lastCheckpointMs = 0;
   /**
    * Set true during flush() when onDead OR onPermanent fires for a non-team channel row.
    * Covers all terminal failures this flush: transient-exhausted, malformed, 400-payload-
@@ -145,9 +150,40 @@ export class XtmPollLoop {
     );
   }
 
+  /**
+   * One WAL checkpoint an hour, and never a reason for a cycle to fail (2026-09-23).
+   *
+   * At the TOP of the cycle, unlike the Straker bot, which runs its checkpoint after the
+   * turn's writes. That works there because its cycle cannot throw; `runOnce` here returns
+   * early on a login lockout and on a yield cooldown, and those are exactly the long stretches
+   * where the bot keeps writing alert and outbox rows while the `-wal` grows unattended.
+   *
+   * The clock advances BEFORE the attempt, so a database a reader has locked is retried in
+   * an hour rather than on every cycle. A failure costs a larger file until the next one —
+   * never a cycle, and never the heartbeat.
+   */
+  private maybeCheckpointWal(nowMs: number): void {
+    if (nowMs - this.lastCheckpointMs < WAL_CHECKPOINT_INTERVAL_MS) return;
+    this.lastCheckpointMs = nowMs;
+    try {
+      const result = checkpointWal(this.db);
+      this.logger.info(
+        { module: 'xtmPollLoop', action: 'wal_checkpoint', outcome: 'ok', ...result },
+        'truncated the SQLite write-ahead log',
+      );
+    } catch (err) {
+      this.logger.error(
+        { module: 'xtmPollLoop', action: 'wal_checkpoint', outcome: 'failed' },
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
   /** Run a single cycle. Returns true on success. */
   async runOnce(): Promise<boolean> {
     const nowMs = this.clock.nowMs();
+    // Before the lockout check, so it still runs on the cycles that return early.
+    this.maybeCheckpointWal(nowMs);
     if (nowMs < this.lockoutUntilMs) {
       await this.heartbeat.fail();
       this.logger.warn(

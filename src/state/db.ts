@@ -107,8 +107,12 @@ export class MigrationError extends Error {
   }
 }
 
-/** This bot's state file. Named here so the quarantine copy is named from it too. */
-const DB_FILENAME = 'acolad.db';
+/**
+ * This bot's state file. Named here so the quarantine copy is named from it too — and
+ * exported so a test can name the `-wal` beside it without writing the literal twice
+ * (`STRAKER_DB_FILENAME` is exported for the same reason).
+ */
+export const DB_FILENAME = 'acolad.db';
 
 /**
  * Open (and migrate) the SQLite state db with WAL. On a corrupt/unopenable file
@@ -142,6 +146,37 @@ export function openDatabase(stateDir: string, nowIso: string): OpenResult {
         corruptCopyPath: opened.corruptCopyPath,
       }
     : { db: opened.db, recoveredFromCorruption: false };
+}
+
+/**
+ * Fold the write-ahead log back into the database and truncate it to zero bytes
+ * (2026-09-23).
+ *
+ * SQLite checkpoints automatically, but the automatic one never shrinks the `-wal` file,
+ * and a reader holding a snapshot can hold it back altogether. This bot polls every twenty
+ * seconds for weeks: `acolad.db` sat at 1.2 MB with a 4.1 MB `-wal` beside it when this was
+ * written. The size is not the problem — the problem is that a `.db` copied for a backup
+ * without its `-wal` is missing every one of those pages.
+ *
+ * Here rather than on a store, because a checkpoint is a property of the CONNECTION and no
+ * store owns it: six of them (`jobs`, `outbox`, `meta`, `appearance_events`,
+ * `system_events`, `xtmJobStore`) share one handle that this module opened.
+ *
+ * `busy` non-zero means a reader blocked a complete checkpoint — harmless, the next one
+ * catches up. Throws what SQLite throws; the caller decides it must not fail a cycle.
+ */
+export function checkpointWal(db: DB): {
+  readonly busy: number;
+  readonly log: number;
+  readonly checkpointed: number;
+} {
+  const rows = db.pragma('wal_checkpoint(TRUNCATE)') as {
+    busy: number;
+    log: number;
+    checkpointed: number;
+  }[];
+  const row = rows[0];
+  return { busy: row?.busy ?? 0, log: row?.log ?? 0, checkpointed: row?.checkpointed ?? 0 };
 }
 
 /**
