@@ -108,6 +108,7 @@ npm run deploy -- -Target both      # xtm ก่อน แล้ว straker; ถ
 npm run outbox:requeue  # ops: คืนรายการแจ้งเตือน dead → pending (ฐานข้อมูล XTM)
 npm run straker:outbox:requeue  # ops: อันเดียวกันสำหรับ Straker — คนละ db คนละสคริปต์ (R11)
 npm run straker:unbar           # ops: ปลดล็อกหลังพอร์ทัลแบนบัญชี (403) — ต้องรันมือเท่านั้น
+npm run straker:drop-phantom-holds  # ops: ล้าง hold ซ้ำจาก PO ที่ไม่มีภาษา (dry-run; ใส่ -- --apply ถึงเขียน)
 npm run straker:win-rate        # ops: win rate ของ Straker (FR-017) — อ่านอย่างเดียว
 npm run report:combined         # ops: workload สองพอร์ทัลรวมกัน (FR-018) — อ่านอย่างเดียว
 npm run report:latency  # สรุป p95 จาก log สำหรับตรวจรับ SC-001/SC-002
@@ -404,6 +405,21 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   งานที่มีคีย์แต่หาคู่ไม่เจอ **ไม่ถูกปล่อยจนกว่า DL จะผ่านไป 1 วัน** และ log warn
   `held_work_unmatched` ทุกรอบ + alert ⚠️ ครั้งเดียวต่อ offer — ถ้าเห็น ให้เช็กว่า `service` ของ offer ยังตรงกับ `po_type` ไหม.
   PO เก่าที่ค้างก่อนมีคีย์ถูก "adopt" เงียบ ๆ ครั้งเดียว (`straker_meta.po_adoption_done`)
+- **งาน per-hour / DIRECT PO ส่ง purchase order ที่ไม่มีภาษามาเลย** (2026-09-23) — คีย์จึงเป็น
+  `job_ref||service` ซึ่งบอกได้แค่ว่า*งานอ้างอิงไหน บริการอะไร* ไม่บอกว่า*งานชิ้นไหน*
+  ("bucket" ไม่ใช่ identity) เอกสารเดิมเขียนว่าภาษาว่างเป็นเรื่องของงาน DTP เท่านั้น ซึ่งไม่จริง
+  - เกิดจริงกับ `aj-345`: ชนะ 7 คู่ภาษา แล้ว PO 6 ใบคีย์ `aj-345||translation` จับคู่ไม่ติด
+    → ถูก recover เป็นงานใหม่ทั้งหมด ได้ 13 แถวสำหรับงาน 7 ชิ้น + การ์ดซ้ำ 6 ใบ
+  - **ตอนนี้จับคู่แบบนับ slot**: PO ที่ไม่มีภาษา 1 ใบกินแถวที่ถืออยู่ของ `job_ref`+`service`
+    เดียวกัน 1 แถว เหลือเท่าไรถึงนับเป็นงานที่ไม่เคยบันทึก. งาน DTP จริงไม่กระทบ เพราะคีย์ของมัน
+    กับคีย์ของแถวที่ถือตรงกันเป๊ะอยู่แล้ว จึงจับคู่ได้ก่อนถึงขั้นนี้
+  - log warn `module:reconcile action:order_languageless` พร้อม `outcome:covered|recovered`
+    — **grep `outcome:recovered`** เพื่อหาใบที่สร้าง hold ที่ไม่มีวันครบกำหนด (ไม่มีการ์ด เพราะงาน
+    per-hour ใบเดียวมี PO หลายใบ จะกลายเป็นการ์ดซ้ำชุดใหม่แทนชุดเก่า)
+  - แถวที่ถือไว้แล้วคีย์หาคู่ไม่เจอ **จะไม่ถูกปล่อย**ถ้า `job_ref`+`service` เดียวกันยังมี PO ที่ไม่มี
+    ภาษาเปิดอยู่ (alert `held_work_order_languageless` ไม่ใช่ `held_work_unmatched`) —
+    ก่อนแก้ แถวจริงทั้ง 7 ของ `aj-345` มีกำหนดถูกคืนโควต้าอัตโนมัติ 25/09 08:00 ทั้งที่ PO ยัง pending
+  - ล้างแถวซ้ำที่ค้างใน DB: `npm run straker:drop-phantom-holds` (dry-run, ต้อง `--apply` ถึงเขียน)
 - **claim รอคำตอบได้ 10 วินาที** (`CLAIM_TIMEOUT_MS`; การอ่านยัง 2 วินาที) — `/accept` สร้าง PO
   จึงช้า. claim ที่ยังได้ `unknown` (ไม่มีคำตอบ) จะถูก**ยืนยันเป็น Won** เมื่อ PO ที่คีย์ตรงกันโผล่ใน
   รอบ reconcile: แถวชีตของ claim นั้นเปลี่ยนเป็น Won + การ์ด ✅ (ไม่ใช่ recovery ใหม่). claim เก่า
@@ -450,6 +466,15 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
   ยังอยู่ไหม (ถ้าถูกยกเลิก เพดานจะต่ำกว่าจริงจนกว่า hold หมดอายุ) · `adopted_without_effort` = PO ที่ adopt
   ได้ 0 คำ/หาจำนวนคำไม่เจอ → เพดานวัน DL นั้นนับขาด เช็กจำนวนคำของงาน (reconcile จะปรับขึ้นเองเมื่อ assigned
   job บอกคำ). enqueue alert ล้ม = log error `module:reconcile action:alert outcome:failed` ไม่ทำให้รอบล้ม
+- **alert อีก 2 ตัว (2026-09-23)** ครั้งเดียวต่อ offer เหมือนกัน:
+  🔴 `held_work_undated` (**critical**) = งานที่ถืออยู่แต่ปฏิทินวาง DL ลงวันไหนไม่ได้ → มันไม่ถูกนับ
+  เข้าเพดานวันไหนเลย แปลว่าทุกวันที่ควรมีงานนี้อยู่อ่านว่าว่างกว่าจริง และ claim ถัดไปวัดกับเพดานที่ใช้ไปแล้ว
+  → หา DL ของงานบนพอร์ทัล (ต้นเหตุปกติคือ PO ที่ `due_at` อ่านไม่ออก; reconcile จะเติมวันให้เองเมื่อ
+  assigned job บอก DL). **ยามตัวนี้คือ `Ledger.heldWorkMissingDeadline()` ซึ่งมีมานานแล้วแต่ไม่มีใครเรียก**
+  — docstring เขียนว่า "The caller alerts on a non-empty result" มาตลอดโดยไม่มี caller ·
+  ⚠️ `held_work_order_languageless` = แถวที่ถือไว้เพราะ `job_ref`+`service` เดียวกันยังมี PO ที่ไม่มีภาษา
+  เปิดอยู่ → เช็กบนพอร์ทัลว่า order ยังเปิดจริงไหม (งาน per-hour/DIRECT เป็นแบบนี้ปกติ แบบอื่นแปลว่า
+  payload เปลี่ยน)
 - **poll ต่ำสุด 10 วินาที** (2026-09-22): `STRAKER_POLL_INTERVAL_MS` < 10000 = config ปฏิเสธ ไม่ start
   (เดิมยอม 1000). ช้ากว่าได้ เร็วกว่าต้องแก้ spec ก่อน
 - **การ์ด Chat escape `& < >` ในข้อความแถว** (ทั้ง XTM และ Straker — `reporting/cardText.escapeCardText`):
@@ -460,8 +485,17 @@ accept **เปิด live แล้ว** ตั้งแต่ 2026-06-22: `ACC
 - **ชีต: upsert อ่าน `_row_key` ของแถวซ้ำก่อนเขียนทับ** — ถ้าแถวเลื่อน (มีคนแทรก/sort) จะ scan ใหม่ 1 ครั้ง
   ถ้ายังไม่ตรง → ไม่เขียน ปล่อย outbox retry. ลดโอกาสเขียนทับแถวคนอื่น แต่**ปิดไม่สนิท** (Sheets ไม่มี
   compare-and-set) — อย่า sort/แทรกแถวในแท็บ `Straker_Tracking` ถ้าเลี่ยงได้
-- **WAL checkpoint (TRUNCATE) ทุกชั่วโมง + ตอน close** — log `module:main action:wal_checkpoint`;
-  ล้ม = log error เฉย ๆ ไม่ทำให้ cycle fail. `straker.db-wal` ควรกลับเป็น 0 ไบต์อย่างน้อยชั่วโมงละครั้ง
+- **WAL checkpoint (TRUNCATE) ทุกชั่วโมง + ตอน close — ทั้งสองบอทแล้วตั้งแต่ 2026-09-23**
+  (Straker ได้ไปก่อนใน PR #49, XTM ตามมาทีหลัง): ล้ม = log error เฉย ๆ ไม่ทำให้ cycle fail
+  `straker.db-wal` และ `acolad.db-wal` ควรกลับเป็น 0 ไบต์อย่างน้อยชั่วโมงละครั้ง
+  - **grep ที่ `action:wal_checkpoint`** ไม่ใช่ `module:main` — Straker log เป็น `module:main`
+    (โค้ดอยู่ใน `straker/main.ts`) ส่วน XTM เป็น `module:xtmPollLoop` แต่ละไฟล์ใช้ชื่อโมดูลของตัวเอง
+  - ฝั่ง XTM เรียกที่**หัว** `runOnce` ก่อนเช็ก login lockout ต่างจาก Straker ที่เรียกท้าย
+    `withDelivery` — จงใจ เพราะ `XtmPollLoop.runOnce` มีทางออกก่อนกำหนด 2 ทาง (login lockout,
+    yield cooldown) ซึ่งเป็นช่วงที่บอทยังเขียน outbox/alert และ WAL โตต่อเนื่องพอดี
+  - ⚠️ **อ่านขนาดไฟล์บน Windows ด้วย `Get-ChildItem` ไม่ได้** — directory entry ของไฟล์ที่ยังถูก
+    เปิดค้างไว้ไม่ถูกอัปเดตจนกว่าจะปิด handle (log ของวันนี้เคยรายงาน 0 ไบต์ทั้งที่จริง 1.07 MB)
+    ต้องใช้ `[System.IO.File]::Open($p,'Open','Read','ReadWrite').Length`
 - **ประวัติ skip reason** (2026-09-22): ตาราง `offer_skip_history` เก็บทุกครั้งที่เหตุผล skip ของ offer
   **เปลี่ยน** (เหตุผลเดิมซ้ำทุก 10 วิ = แถวเดียว). `offer_events` ยังเก็บแค่เหตุผลล่าสุด; win rate/รายงาน
   ไม่เปลี่ยน. ดูประวัติ: `SELECT skip_reason, datetime(occurred_at_ms/1000,'unixepoch','+7 hours')

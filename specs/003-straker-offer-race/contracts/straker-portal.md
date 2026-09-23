@@ -89,7 +89,11 @@ Reconciliation (FR-016a) depends on being able to ask the portal what it believe
 
 A won claim does **not** go straight to the assigned list. The portal issues a purchase order, which sits `pending` until someone on the team accepts it and names a translator — hours, sometimes a day — and only then does an assigned job appear, under yet another id.
 
-`GET /api/hitl/vendor/purchase-orders?vendor_id=&sort_by=created_at&sort_order=desc&page=&page_size=` (the call the portal's own web app makes) returns `{ items, total, page, page_size }`. Each item: `po_obj_id`, `status`, `job_ref`, `source_language_code`, `target_language_code` (both empty on a DTP order), `po_type` (`translation`, `dtp_prep`), `due_at`, amounts. **No word count.**
+`GET /api/hitl/vendor/purchase-orders?vendor_id=&sort_by=created_at&sort_order=desc&page=&page_size=` (the call the portal's own web app makes) returns `{ items, total, page, page_size }`. Each item: `po_obj_id`, `status`, `job_ref`, `source_language_code`, `target_language_code`, `po_type` (`translation`, `dtp_prep`), `due_at`, amounts. **No word count.**
+
+> **Corrected 2026-09-23 — empty language codes are not DTP's alone, and this stage's key is not always an identity.** This section previously said the two language codes are "both empty on a DTP order", and §5b below still claims the `job_ref` + target + service triple "never repeated" across 27 orders. A **per-hour / DIRECT** job falsified both: `aj-345` was offered in eight language pairs, the offers named their targets and the assigned jobs named theirs, and all six purchase orders in between came back with **both language codes empty and no readable `due_at`**. Six distinct jobs, one key.
+>
+> So at the purchase-order stage the key can be a **bucket** — which reference, which service — rather than an identity. The offer and assigned-job stages are unaffected; only this one degrades. Six phantom holds and six duplicate cards were written before reconciliation learned to match a languageless order against the reference's held rows by count instead of by key. Anything reading this endpoint must not assume the triple identifies one job.
 
 | Status | Assigned job | Meaning |
 |---|---|---|
