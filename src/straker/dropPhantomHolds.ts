@@ -39,28 +39,39 @@
 
 import { config as loadDotenv } from 'dotenv';
 import { STRAKER_DEFAULT_STATE_DIR } from './combinedSummary.js';
-import { phantomHolds, type Phantom } from './phantomHolds.js';
+import { phantomHolds, type Phantom, type PhantomReport } from './phantomHolds.js';
 import { StrakerStore, openStrakerDatabase, type StrakerDB } from './strakerStore.js';
 
-function report(phantoms: readonly Phantom[], wrote: boolean): string {
-  if (phantoms.length === 0) {
+function report(found: PhantomReport, wrote: boolean): string {
+  const unexplained =
+    found.unexplained.length === 0
+      ? ''
+      : `\n⚠ ${String(found.unexplained.length)} bucket-keyed recover${found.unexplained.length === 1 ? 'y' : 'ies'} left alone — ` +
+        'their reference has fewer language-keyed holds than recoveries, so at least one of ' +
+        'them is work nobody recorded twice. Look before releasing these:\n' +
+        found.unexplained.map((id) => `  ${id}\n`).join('');
+
+  if (found.phantoms.length === 0) {
     return (
-      'no duplicate holds found — every open hold whose key names no language is the only ' +
-      'hold of its reference, which is what a real DTP job looks like\n'
+      'no duplicate holds found — every open hold whose key names no language either has no ' +
+      'language-keyed sibling (a real DTP job) or was won by a claim of its own (a real ' +
+      'monolingual job), and neither is a duplicate\n' +
+      unexplained
     );
   }
-  const lines = phantoms.map(
+  const lines = found.phantoms.map(
     (p) =>
       `  ${p.objId}  ${p.workKey}  held since ` +
       `${new Date(p.heldSinceMs).toISOString()}  (duplicates ${String(p.siblings.length)}: ` +
       `${p.siblings.join(', ')})\n`,
   );
   return (
-    `${String(phantoms.length)} duplicate hold${phantoms.length === 1 ? '' : 's'}:\n` +
+    `${String(found.phantoms.length)} duplicate hold${found.phantoms.length === 1 ? '' : 's'}:\n` +
     lines.join('') +
     (wrote
       ? 'released, and their recovery events removed so the win rate stops counting them twice\n'
-      : 'nothing written — re-run with --apply to release these and drop their recovery events\n')
+      : 'nothing written — re-run with --apply to release these and drop their recovery events\n') +
+    unexplained
   );
 }
 
@@ -91,10 +102,21 @@ function main(): void {
   const opened = openStrakerDatabase(stateDir, nowMs);
   try {
     const store = new StrakerStore(opened.db);
-    const phantoms = phantomHolds(store.heldWork());
-    const wrote = writing && phantoms.length > 0;
-    if (wrote) apply(opened.db, store, phantoms, nowMs);
-    process.stdout.write(`${stateDir}\n${report(phantoms, wrote)}`);
+    // Which held rows reconciliation created, as against which the bot won itself. This is
+    // what tells a phantom from a real monolingual claim of the same shape — see
+    // `phantomHolds`. No store method exposes it, and adding one for a cleanup would widen
+    // the store's surface for a single use.
+    const recovered = new Set(
+      (
+        opened.db
+          .prepare("SELECT obj_id FROM offer_events WHERE event_type = 'recovery'")
+          .all() as { obj_id: string }[]
+      ).map((r) => r.obj_id),
+    );
+    const found = phantomHolds(store.heldWork(), recovered);
+    const wrote = writing && found.phantoms.length > 0;
+    if (wrote) apply(opened.db, store, found.phantoms, nowMs);
+    process.stdout.write(`${stateDir}\n${report(found, wrote)}`);
   } finally {
     opened.db.close();
   }

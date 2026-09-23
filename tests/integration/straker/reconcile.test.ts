@@ -2065,7 +2065,11 @@ describe('a purchase order whose language codes are empty (per-hour / DIRECT, 20
   describe('a DTP order, whose key has always named no language, is unaffected', () => {
     const DTP = { jobRef: 'aj-9', title: null, service: 'dtp_prep', workKey: 'aj-9||dtp_prep' };
 
-    it('matches its own held row exactly, before the bucket is consulted', async () => {
+    it('is covered by its own held row, through the bucket that its key already is', async () => {
+      // A DTP key and its bucket are the same string, so the count and the identity agree —
+      // the bucket path IS the exact path here. It answers rather than `heldFor` on purpose:
+      // `heldByKey` would match ANY bucket-keyed row and skip unconditionally, so a second
+      // DTP round of one reference would be dropped with no hold and no log.
       const f = fixture({ ceiling: 1000 });
       adopted(f);
       f.store.hold({
@@ -2078,10 +2082,9 @@ describe('a purchase order whose language codes are empty (per-hour / DIRECT, 20
       });
       f.setPurchaseOrders([purchaseOrder('po-dtp', { identity: DTP })]);
 
-      await f.reconciler.runIfDue();
+      const outcome = await f.reconciler.runIfDue();
 
-      // The exact-key path answered, so the bucket never ran and logged nothing.
-      expect(f.logs.filter((l) => l.fields['action'] === 'order_languageless')).toEqual([]);
+      expect(outcome).toMatchObject({ recovered: [], covered: 1 });
       expect(f.store.heldWork().map((w) => w.objId)).toEqual(['offer-dtp']);
     });
 
@@ -2092,6 +2095,53 @@ describe('a purchase order whose language codes are empty (per-hour / DIRECT, 20
 
       expect(await f.reconciler.runIfDue()).toMatchObject({ recovered: ['po-dtp'] });
     });
+
+    it('recovers a second round of the same reference rather than swallowing it', async () => {
+      // One bucket-keyed hold used to make `heldByKey` answer for every later order of the
+      // reference — no recovery, no hold, not even a log line, and it never self-healed.
+      const f = fixture({ ceiling: 1000 });
+      adopted(f);
+      f.store.hold({
+        objId: 'offer-dtp',
+        effortWords: 956,
+        kind: 'monolingual',
+        deadlineMs: DEADLINE_MS,
+        heldSinceMs: NOW_MS,
+        identity: DTP,
+      });
+      f.setPurchaseOrders([
+        purchaseOrder('po-round-1', { identity: DTP }),
+        purchaseOrder('po-round-2', { identity: DTP }),
+      ]);
+
+      const outcome = await f.reconciler.runIfDue();
+
+      expect(outcome).toMatchObject({ recovered: ['po-round-2'], covered: 1 });
+      expect(f.store.heldWork().map((w) => w.objId)).toEqual(['offer-dtp', 'po-round-2']);
+    });
+  });
+
+  it('does not let one recovered row answer for every later order of its reference', async () => {
+    // The translation form of the same defect, and the one this branch makes routine: every
+    // surplus recovery mints a bucket-keyed hold, and `heldByKey` is keyed by that same
+    // string. Pass 1 recovers the surplus; pass 2 must still recover a genuinely new order
+    // rather than treat it as held — the over-commit direction.
+    const f = fixture({ ceiling: 1000 });
+    adopted(f);
+    holdLang(f, 'th', 0);
+    f.setPurchaseOrders([languagelessOrder('po-a'), languagelessOrder('po-b')]);
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ recovered: ['po-b'], covered: 1 });
+
+    // `po-b` now holds under its own id; a third order is new work.
+    f.setPurchaseOrders([
+      languagelessOrder('po-a'),
+      languagelessOrder('po-b'),
+      languagelessOrder('po-c'),
+    ]);
+    f.setNow(NOW_MS + RECONCILE_INTERVAL_MS);
+
+    expect(await f.reconciler.runIfDue()).toMatchObject({ recovered: ['po-c'] });
   });
 
   describe('the work is kept while its languageless order is open', () => {
@@ -2128,9 +2178,7 @@ describe('a purchase order whose language codes are empty (per-hour / DIRECT, 20
       const outcome = await f.reconciler.runIfDue();
 
       expect(outcome).toMatchObject({ released: ['offer-th'] });
-      expect(f.queued.map((q) => q.eventId)).not.toContain(
-        'held_work_order_languageless:offer-th',
-      );
+      expect(f.queued.map((q) => q.eventId)).not.toContain('held_work_order_languageless:offer-th');
     });
 
     it('still releases a row whose own assigned job is delivered', async () => {
@@ -2186,6 +2234,33 @@ describe('a purchase order whose language codes are empty (per-hour / DIRECT, 20
       expect(
         f.logs.filter((l) => l.fields['action'] === 'held_work_undated').length,
       ).toBeGreaterThan(2);
+    });
+
+    it('does not fail a pass that already committed, when its own read throws', async () => {
+      // It runs after the recoveries, the releases, the cleared failure streak and the
+      // start-up flag. A throw here would report `ok: false` for a pass that succeeded, lose
+      // its `recovered` list, and count toward `reconcile_failing` — which is the opposite of
+      // what a housekeeping check is for.
+      const f = fixture({ ceiling: 1000 });
+      adopted(f);
+      f.setPurchaseOrders([languagelessOrder('po-a')]);
+      const realHeldWork = f.store.heldWork.bind(f.store);
+      let calls = 0;
+      f.store.heldWork = ((...args: Parameters<typeof realHeldWork>) => {
+        calls += 1;
+        // The pass reads it twice: once for its snapshot, once for this guard.
+        if (calls > 1) throw new Error('database is locked');
+        return realHeldWork(...args);
+      }) as typeof realHeldWork;
+
+      const outcome = await f.reconciler.runIfDue();
+
+      expect(outcome).toMatchObject({ ran: true, ok: true, recovered: ['po-a'], undated: 0 });
+      expect(
+        f.logs.filter(
+          (l) => l.fields['action'] === 'held_work_undated' && l.fields['outcome'] === 'failed',
+        ),
+      ).toHaveLength(1);
     });
 
     it('says nothing about a pass whose writes were rolled back', async () => {
