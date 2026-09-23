@@ -21,11 +21,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **บรรทัดรวมบรรทัดเดียว** (`Both portals`); **Straker ส่งรายงาน 09:00 ของตัวเองเข้าห้องของตัวเอง**
 > (`straker/dailyReport.ts`) — มีรายงานเช้า 2 ใบ 2 ห้อง ไม่ใช่ใบเดียว
 
-**สถานะปัจจุบัน**: ฟีเจอร์ 002 **live** (auto-accept งานมาเลย์ ตั้งแต่ 2026-06-22) +
-**accept-scheduling gate live** ตั้งแต่ 2026-06-27 (PR #7/#8) + **ฟีเจอร์ 003 live
-2026-09-16** (PR #30/#31) + **claim จริงตั้งแต่ 18/09** (`/accept`, PR #42–#44) + **PO lifecycle/รายงาน Straker/
-reliability audit** (PR #45–#48, 2026-09-22). ~1985 tests ผ่าน, coverage 6 area ≥ 80%
-(detection/state/reporting/schedule/straker/shared), lint + typecheck สะอาด.
+**สถานะปัจจุบัน**: ฟีเจอร์ 002 **live** (XTM — detect + auto-accept งานมาเลย์ + Sheets) และ
+ฟีเจอร์ 003 **live** (Straker — claim จริงผ่าน `/accept`) รันคู่กันบน PM2 ตลอด 24/7.
+เทสต์ต้องผ่านครบ (`npm test` บอกจำนวนจริง — อย่าฝังตัวเลขไว้ที่นี่ มันเน่าทุกสัปดาห์),
+coverage 6 area ≥ 80% (detection/state/reporting/schedule/straker/shared), lint + typecheck สะอาด.
 
 > **ค้างอยู่และเป็นงานของเจ้าของ (RP-1)**: รหัสผ่าน Straker เคยส่งผ่านแชต ถือว่ารั่ว
 > — ต้อง rotate แล้วลบ `state/storageState.json`. บอท sign-in ทุก 10 วินาที
