@@ -153,8 +153,22 @@ const CLAIMABLE_LISTING_TYPE = 'direct_po';
 /** The list is read with `?status=open`, so anything else is the portal contradicting itself. */
 const OPEN_STATUS = 'open';
 
-/** `2026-09-15T23:20:00` — zone-less to the second, exactly as captured. Nothing else. */
-const DUE_AT_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
+/**
+ * `2026-09-15T23:20:00`, optionally with a fraction — zone-less. Nothing else.
+ *
+ * The fraction was added on 2026-09-25, after six offers arrived carrying
+ * `2026-09-28T00:05:50.987723` and every one was refused: 846 parse failures across a
+ * morning, six `offer_unreadable` alerts, and no decision taken on any of them. Those
+ * deadlines are machine-computed (creation + 72h) rather than the round `08:00:00` a human
+ * sets, which is why earlier offers never showed it. `reconcile.ts`'s `ASSIGNED_DUE_AT` had
+ * accepted the same six digits from the assigned-jobs endpoint all along.
+ *
+ * **A fraction is not the thing the strictness guards.** What must keep failing loudly is a
+ * zone designator, because that either confirms or refutes the UTC assumption this module
+ * rests on — see {@link parseDeadline}. Precision says nothing about zone, so there is no
+ * designator branch here and there must not be one.
+ */
+const DUE_AT_SHAPE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?$/;
 
 /**
  * A payload that does not match the shape this parser was built against.
@@ -430,21 +444,27 @@ function parseEffort(value: unknown, objId: string): number | null {
  */
 function parseDeadline(value: unknown, zone: DeadlineZone, objId: string): number | null {
   if (value === undefined || value === null) return null;
-  if (typeof value !== 'string' || !DUE_AT_SHAPE.test(value)) {
+  const shape = typeof value === 'string' ? DUE_AT_SHAPE.exec(value) : null;
+  if (shape === null) {
     throw new StrakerOfferShapeError(
       'due_at',
-      `expected a zone-less YYYY-MM-DDTHH:mm:ss as every captured payload carried ` +
-        `(read as ${zone.id}), got ${describe(value)}`,
+      `expected a zone-less YYYY-MM-DDTHH:mm:ss, optionally with a fraction, as the ` +
+        `captured payloads carry (read as ${zone.id}), got ${describe(value)}`,
       objId,
     );
   }
+  const [, wallClock = '', fraction = ''] = shape;
   // Read the configured offset BEFORE touching the payload. A zone we cannot read is a
   // configuration fault, and it must say so — if it were left to `Date.parse` to choke on,
   // every offer would be reported as carrying an unreadable deadline and the actual cause
   // would be nowhere in the message.
   const offsetMs = utcOffsetMs(zone);
 
-  const ms = Date.parse(`${value}${zone.utcOffset}`);
+  // Truncate rather than hand six digits to `Date.parse`: the ECMAScript grammar specifies
+  // exactly three, so the engine's tolerance for more is an implementation detail, and
+  // `reconcile.ts` already refuses to lean on it for the very same portal field.
+  const millis = `${fraction}000`.slice(0, 3);
+  const ms = Date.parse(`${wallClock}.${millis}${zone.utcOffset}`);
   if (Number.isNaN(ms)) {
     throw new StrakerOfferShapeError('due_at', `is not a real instant: ${describe(value)}`, objId);
   }
@@ -452,11 +472,14 @@ function parseDeadline(value: unknown, zone: DeadlineZone, objId: string): numbe
   // `2026-02-31T10:00:00` comes back as 3 March, three days late, and an infeasible job
   // would look comfortably feasible. Reading the instant back as wall-clock and comparing
   // it to what arrived is what turns that into a loud failure. Measured, not assumed.
-  const wallClock = new Date(ms + offsetMs).toISOString().slice(0, 19);
-  if (wallClock !== value) {
+  // Compare against the DATE-TIME CAPTURE, not the raw string: with a fraction present the
+  // raw string can never equal a 19-character roundtrip, and this guard would throw on
+  // every fractional deadline while claiming the date was impossible.
+  const readBack = new Date(ms + offsetMs).toISOString().slice(0, 19);
+  if (readBack !== wallClock) {
     throw new StrakerOfferShapeError(
       'due_at',
-      `is not a real date — ${describe(value)} silently rolls over to ${wallClock}`,
+      `is not a real date — ${describe(value)} silently rolls over to ${readBack}`,
       objId,
     );
   }
