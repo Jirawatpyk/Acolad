@@ -424,6 +424,49 @@ describe('parseOffer — a wrong shape is a hard FAILURE (FR-023)', () => {
     }
   });
 
+  it('reads a due_at that carries microseconds, truncating to milliseconds', () => {
+    // Live, 2026-09-25 07:07-07:24: six offers arrived with `2026-09-28T00:05:50.987723`
+    // and every one was refused as unreadable — 846 parse failures, six `offer_unreadable`
+    // alerts, and not a single decision recorded. A whole morning of offers went by
+    // untouched because of six digits after the seconds.
+    //
+    // These deadlines are machine-computed (creation + 72h) rather than the round
+    // `08:00:00` a human sets, which is why every earlier offer parsed and these did not.
+    // `reconcile.ts` has accepted the same six digits on the assigned-jobs endpoint since
+    // it was written — only this side was strict.
+    //
+    // A fraction carries no zone, so accepting it gives up nothing the strictness exists
+    // to protect. Truncation is deliberate: ECMAScript specifies exactly three fractional
+    // digits, so feeding six to `Date.parse` would lean on engine leniency.
+    // Kills: a regex that still rejects the fraction, and a parse that feeds all six digits through.
+    const offer = parseOffer(
+      withField(captured(AJ_265_MS), 'due_at', '2026-09-28T00:05:50.987723'),
+      options(),
+    );
+
+    expect(offer.deadlineMs).toBe(Date.parse('2026-09-28T00:05:50.987Z'));
+  });
+
+  it('still refuses a zone even when a fraction is there to hide behind', () => {
+    // Widening the shape must not open the door the strictness was built to hold shut.
+    // Kills: swapping in `reconcile`'s ASSIGNED_DUE_AT, which accepts a designator.
+    for (const value of ['2026-09-15T23:20:00.123456Z', '2026-09-15T23:20:00.123456+13:00']) {
+      expect(() => parseOffer(withField(captured(AJ_265_MS), 'due_at', value), options())).toThrow(
+        StrakerOfferShapeError,
+      );
+    }
+  });
+
+  it('still catches an impossible day when a fraction is attached', () => {
+    // The rollover guard compares the instant read back against what arrived. Once the
+    // regex captures the date-time separately, that comparison has to use the CAPTURE, and
+    // a guard rewritten carelessly would either stop firing or fire on every fraction.
+    // Kills: comparing the roundtrip against the whole raw string, and dropping the guard.
+    expect(() =>
+      parseOffer(withField(captured(AJ_267_ZH), 'due_at', '2026-02-31T10:00:00.123456'), options()),
+    ).toThrow(StrakerOfferShapeError);
+  });
+
   it.each([[undefined], [''], ['auction'], ['marketplace'], [null], [3]])(
     'rejects listing_type %o — only the observed value is known to be claimable',
     (value) => {
